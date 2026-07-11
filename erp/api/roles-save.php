@@ -1,25 +1,212 @@
 <?php
-if (session_status() === PHP_SESSION_NONE) { session_start(); }
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
 header('Content-Type: application/json; charset=utf-8');
-function out($ok,$msg,$extra=[],$status=200){http_response_code($status);echo json_encode(array_merge(['success'=>$ok,'message'=>$msg],$extra));exit;}
-foreach ([__DIR__.'/../config/config.php',__DIR__.'/../config.php',__DIR__.'/../super-admin/includes/config.php'] as $f){if(is_file($f)){require_once $f;break;}}
-if(!isset($conn)||!($conn instanceof mysqli))out(false,'Database configuration is not available.',[],500);
+function out($ok, $msg, $extra = [], $status = 200)
+{
+    http_response_code($status);
+    echo json_encode(array_merge(['success' => $ok, 'message' => $msg], $extra));
+    exit;
+}
+foreach ([__DIR__ . '/../config/config.php', __DIR__ . '/../config.php', __DIR__ . '/../super-admin/includes/config.php'] as $f) {
+    if (is_file($f)) {
+        require_once $f;
+        break;
+    }
+}
+if (!isset($conn) || !($conn instanceof mysqli))
+    out(false, 'Database configuration is not available.', [], 500);
 $conn->set_charset('utf8mb4');
-if(empty($_SESSION['user_id']))out(false,'Your session has expired. Please sign in again.',[],401);
-if($_SERVER['REQUEST_METHOD']!=='POST')out(false,'Invalid request method.',[],405);
-if(!hash_equals((string)($_SESSION['roles_csrf']??''),(string)($_POST['csrf_token']??'')))out(false,'Invalid or expired request token.',[],419);
-function perm(mysqli $conn,$action){if(($_SESSION['user_type']??'')==='Platform Admin')return true;$map=['open'=>'can_open','view'=>'can_view','create'=>'can_create','update'=>'can_update','delete'=>'can_delete'];$field=$map[$action]??'';if(!$field)return false;foreach(['perm.staff.roles','perm.staff'] as $k){if(isset($_SESSION['permissions'][$k][$field]))return (int)$_SESSION['permissions'][$k][$field]===1;}$bid=(int)($_SESSION['business_id']??0);$rid=(int)($_SESSION['role_id']??0);$sql="SELECT rp.`{$field}` FROM role_permissions rp JOIN permissions p ON p.id=rp.permission_id WHERE rp.business_id=? AND rp.role_id=? AND p.permission_code IN ('perm.staff.roles','perm.staff') AND p.is_active=1 ORDER BY FIELD(p.permission_code,'perm.staff.roles','perm.staff') LIMIT 1";$s=$conn->prepare($sql);if(!$s)return false;$s->bind_param('ii',$bid,$rid);$s->execute();$r=$s->get_result()->fetch_assoc();$s->close();return (int)($r[$field]??0)===1;}
-$action=(string)($_POST['action']??'');$businessId=(int)($_SESSION['business_id']??0);$userId=(int)($_SESSION['user_id']??0);if($businessId<=0)out(false,'A valid business is required.',[],403);
-if($action==='get'){
- if(!perm($conn,'view')&&!perm($conn,'open'))out(false,'Permission denied.',[],403);$id=(int)($_POST['role_id']??0);$s=$conn->prepare('SELECT * FROM roles WHERE id=? AND (business_id=? OR business_id IS NULL) LIMIT 1');$s->bind_param('ii',$id,$businessId);$s->execute();$role=$s->get_result()->fetch_assoc();$s->close();if(!$role)out(false,'Role not found.',[],404);if(($role['role_code']??'')==='PLATFORM_ADMIN'&&($_SESSION['user_type']??'')!=='Platform Admin')out(false,'Permission denied.',[],403);$rows=[];$s=$conn->prepare('SELECT permission_id,can_open,can_view_value,can_view,can_create,can_update,can_approve,can_delete FROM role_permissions WHERE business_id=? AND role_id=?');$s->bind_param('ii',$businessId,$id);$s->execute();$rs=$s->get_result();while($x=$rs->fetch_assoc())$rows[]=$x;$s->close();out(true,'Role loaded.',['role'=>$role,'permissions'=>$rows]);
+if (empty($_SESSION['user_id']))
+    out(false, 'Your session has expired. Please sign in again.', [], 401);
+if ($_SERVER['REQUEST_METHOD'] !== 'POST')
+    out(false, 'Invalid request method.', [], 405);
+if (!hash_equals((string) ($_SESSION['roles_csrf'] ?? ''), (string) ($_POST['csrf_token'] ?? '')))
+    out(false, 'Invalid or expired request token.', [], 419);
+function perm(mysqli $conn, $action)
+{
+    if (($_SESSION['user_type'] ?? '') === 'Platform Admin')
+        return true;
+    $map = ['open' => 'can_open', 'view' => 'can_view', 'create' => 'can_create', 'update' => 'can_update', 'delete' => 'can_delete'];
+    $field = $map[$action] ?? '';
+    if (!$field)
+        return false;
+    foreach (['perm.staff.roles', 'perm.staff'] as $k) {
+        if (isset($_SESSION['permissions'][$k][$field]))
+            return (int) $_SESSION['permissions'][$k][$field] === 1;
+    }
+    $bid = (int) ($_SESSION['business_id'] ?? 0);
+    $rid = (int) ($_SESSION['role_id'] ?? 0);
+    $sql = "SELECT rp.`{$field}` FROM role_permissions rp JOIN permissions p ON p.id=rp.permission_id WHERE rp.business_id=? AND rp.role_id=? AND p.permission_code IN ('perm.staff.roles','perm.staff') AND p.is_active=1 ORDER BY FIELD(p.permission_code,'perm.staff.roles','perm.staff') LIMIT 1";
+    $s = $conn->prepare($sql);
+    if (!$s)
+        return false;
+    $s->bind_param('ii', $bid, $rid);
+    $s->execute();
+    $r = $s->get_result()->fetch_assoc();
+    $s->close();
+    return (int) ($r[$field] ?? 0) === 1;
 }
-if($action==='delete'){
- if(!perm($conn,'delete'))out(false,'You do not have permission to delete roles.',[],403);$id=(int)($_POST['role_id']??0);$s=$conn->prepare('SELECT role_name,is_system FROM roles WHERE id=? AND business_id=? LIMIT 1');$s->bind_param('ii',$id,$businessId);$s->execute();$r=$s->get_result()->fetch_assoc();$s->close();if(!$r)out(false,'Role not found.',[],404);if((int)$r['is_system']===1)out(false,'System roles cannot be deleted.');$s=$conn->prepare('SELECT COUNT(*) c FROM user_roles WHERE business_id=? AND role_id=?');$s->bind_param('ii',$businessId,$id);$s->execute();$c=(int)($s->get_result()->fetch_assoc()['c']??0);$s->close();if($c>0)out(false,'This role is assigned to users and cannot be deleted.');$conn->begin_transaction();try{$s=$conn->prepare('DELETE FROM role_permissions WHERE business_id=? AND role_id=?');$s->bind_param('ii',$businessId,$id);$s->execute();$s->close();$s=$conn->prepare('DELETE FROM roles WHERE id=? AND business_id=?');$s->bind_param('ii',$id,$businessId);$s->execute();$s->close();$conn->commit();out(true,'Role deleted successfully.');}catch(Throwable $e){$conn->rollback();out(false,'Unable to delete role: '.$e->getMessage(),[],500);}
+$action = (string) ($_POST['action'] ?? '');
+$businessId = (int) ($_SESSION['business_id'] ?? 0);
+$userId = (int) ($_SESSION['user_id'] ?? 0);
+if ($businessId <= 0)
+    out(false, 'A valid business is required.', [], 403);
+if ($action === 'get') {
+    if (!perm($conn, 'view') && !perm($conn, 'open'))
+        out(false, 'Permission denied.', [], 403);
+    $id = (int) ($_POST['role_id'] ?? 0);
+    $s = $conn->prepare('SELECT * FROM roles WHERE id=? AND (business_id=? OR business_id IS NULL) LIMIT 1');
+    $s->bind_param('ii', $id, $businessId);
+    $s->execute();
+    $role = $s->get_result()->fetch_assoc();
+    $s->close();
+    if (!$role)
+        out(false, 'Role not found.', [], 404);
+    if (($role['role_code'] ?? '') === 'PLATFORM_ADMIN' && ($_SESSION['user_type'] ?? '') !== 'Platform Admin')
+        out(false, 'Permission denied.', [], 403);
+    $rows = [];
+    $s = $conn->prepare('SELECT permission_id,can_open,can_view_value,can_view,can_create,can_update,can_approve,can_delete FROM role_permissions WHERE business_id=? AND role_id=?');
+    $s->bind_param('ii', $businessId, $id);
+    $s->execute();
+    $rs = $s->get_result();
+    while ($x = $rs->fetch_assoc())
+        $rows[] = $x;
+    $s->close();
+    out(true, 'Role loaded.', ['role' => $role, 'permissions' => $rows]);
 }
-if($action!=='save')out(false,'Unsupported action.',[],400);
-$id=(int)($_POST['role_id']??0);if($id>0&&!perm($conn,'update'))out(false,'You do not have permission to update roles.',[],403);if($id<=0&&!perm($conn,'create'))out(false,'You do not have permission to create roles.',[],403);
-$code=strtoupper(trim((string)($_POST['role_code']??'')));$code=preg_replace('/[^A-Z0-9_\-]/','_',$code);$name=trim((string)($_POST['role_name']??''));$desc=trim((string)($_POST['description']??''));$active=(int)($_POST['is_active']??1)===1?1:0;if($code===''||$name==='')out(false,'Role code and role name are required.');if(strlen($code)>50||strlen($name)>100||strlen($desc)>255)out(false,'One or more values exceed the allowed length.');
-$s=$conn->prepare('SELECT id FROM roles WHERE business_id=? AND role_code=? AND id<>? LIMIT 1');$s->bind_param('isi',$businessId,$code,$id);$s->execute();$dup=$s->get_result()->fetch_assoc();$s->close();if($dup)out(false,'Role code already exists for this business.');
-$posted=$_POST['permissions']??[];$valid=[];$rs=$conn->prepare('SELECT id FROM permissions WHERE is_active=1 AND (business_id IS NULL OR business_id=?)');$rs->bind_param('i',$businessId);$rs->execute();$rr=$rs->get_result();while($x=$rr->fetch_assoc())$valid[(int)$x['id']]=true;$rs->close();
-$conn->begin_transaction();try{if($id>0){$s=$conn->prepare('SELECT is_system FROM roles WHERE id=? AND business_id=? LIMIT 1');$s->bind_param('ii',$id,$businessId);$s->execute();$old=$s->get_result()->fetch_assoc();$s->close();if(!$old)throw new Exception('Role not found.');if((int)$old['is_system']===1){$s=$conn->prepare('UPDATE roles SET role_name=?,description=?,is_active=? WHERE id=? AND business_id=?');$s->bind_param('ssiii',$name,$desc,$active,$id,$businessId);}else{$s=$conn->prepare('UPDATE roles SET role_code=?,role_name=?,description=?,is_active=? WHERE id=? AND business_id=?');$s->bind_param('sssiii',$code,$name,$desc,$active,$id,$businessId);}$s->execute();$s->close();}else{$isSystem=0;$s=$conn->prepare('INSERT INTO roles (business_id,role_code,role_name,description,is_system,is_active) VALUES (?,?,?,?,?,?)');$s->bind_param('isssii',$businessId,$code,$name,$desc,$isSystem,$active);$s->execute();$id=$s->insert_id;$s->close();}
-$s=$conn->prepare('DELETE FROM role_permissions WHERE business_id=? AND role_id=?');$s->bind_param('ii',$businessId,$id);$s->execute();$s->close();$ins=$conn->prepare('INSERT INTO role_permissions (business_id,role_id,permission_id,can_open,can_view_value,can_view,can_create,can_update,can_approve,can_delete) VALUES (?,?,?,?,?,?,?,?,?,?)');foreach($posted as $pid=>$vals){$pid=(int)$pid;if(!isset($valid[$pid])||!is_array($vals))continue;$open=!empty($vals['can_open'])?1:0;$vv=!empty($vals['can_view_value'])?1:0;$view=!empty($vals['can_view'])?1:0;$create=!empty($vals['can_create'])?1:0;$update=!empty($vals['can_update'])?1:0;$approve=!empty($vals['can_approve'])?1:0;$delete=!empty($vals['can_delete'])?1:0;if($vv||$view||$create||$update||$approve||$delete)$open=1;$ins->bind_param('iiiiiiiiii',$businessId,$id,$pid,$open,$vv,$view,$create,$update,$approve,$delete);$ins->execute();}$ins->close();if($conn->query("SHOW TABLES LIKE 'audit_logs'")->num_rows){$descLog=($id>0?'Saved':'Created').' role '.$name;$s=$conn->prepare("INSERT INTO audit_logs (business_id,branch_id,user_id,module_code,action_type,reference_table,reference_id,description,ip_address,user_agent) VALUES (?,?,?,'staff.roles','Update','roles',?,?,?,?)");$branchId=(int)($_SESSION['branch_id']??0);$ip=(string)($_SERVER['REMOTE_ADDR']??'');$ua=(string)($_SERVER['HTTP_USER_AGENT']??'');$s->bind_param('iiiisss',$businessId,$branchId,$userId,$id,$descLog,$ip,$ua);$s->execute();$s->close();}$conn->commit();out(true,'Role and permissions saved successfully.',['role_id'=>$id]);}catch(Throwable $e){$conn->rollback();out(false,'Unable to save role: '.$e->getMessage(),[],500);}
+if ($action === 'delete') {
+    if (!perm($conn, 'delete'))
+        out(false, 'You do not have permission to delete roles.', [], 403);
+    $id = (int) ($_POST['role_id'] ?? 0);
+    $s = $conn->prepare('SELECT role_name,is_system FROM roles WHERE id=? AND business_id=? LIMIT 1');
+    $s->bind_param('ii', $id, $businessId);
+    $s->execute();
+    $r = $s->get_result()->fetch_assoc();
+    $s->close();
+    if (!$r)
+        out(false, 'Role not found.', [], 404);
+    if ((int) $r['is_system'] === 1)
+        out(false, 'System roles cannot be deleted.');
+    $s = $conn->prepare('SELECT COUNT(*) c FROM user_roles WHERE business_id=? AND role_id=?');
+    $s->bind_param('ii', $businessId, $id);
+    $s->execute();
+    $c = (int) ($s->get_result()->fetch_assoc()['c'] ?? 0);
+    $s->close();
+    if ($c > 0)
+        out(false, 'This role is assigned to users and cannot be deleted.');
+    $conn->begin_transaction();
+    try {
+        $s = $conn->prepare('DELETE FROM role_permissions WHERE business_id=? AND role_id=?');
+        $s->bind_param('ii', $businessId, $id);
+        $s->execute();
+        $s->close();
+        $s = $conn->prepare('DELETE FROM roles WHERE id=? AND business_id=?');
+        $s->bind_param('ii', $id, $businessId);
+        $s->execute();
+        $s->close();
+        $conn->commit();
+        out(true, 'Role deleted successfully.');
+    } catch (Throwable $e) {
+        $conn->rollback();
+        out(false, 'Unable to delete role: ' . $e->getMessage(), [], 500);
+    }
+}
+if ($action !== 'save')
+    out(false, 'Unsupported action.', [], 400);
+$id = (int) ($_POST['role_id'] ?? 0);
+if ($id > 0 && !perm($conn, 'update'))
+    out(false, 'You do not have permission to update roles.', [], 403);
+if ($id <= 0 && !perm($conn, 'create'))
+    out(false, 'You do not have permission to create roles.', [], 403);
+$code = strtoupper(trim((string) ($_POST['role_code'] ?? '')));
+$code = preg_replace('/[^A-Z0-9_\-]/', '_', $code);
+$name = trim((string) ($_POST['role_name'] ?? ''));
+$desc = trim((string) ($_POST['description'] ?? ''));
+$active = (int) ($_POST['is_active'] ?? 1) === 1 ? 1 : 0;
+if ($code === '' || $name === '')
+    out(false, 'Role code and role name are required.');
+if (strlen($code) > 50 || strlen($name) > 100 || strlen($desc) > 255)
+    out(false, 'One or more values exceed the allowed length.');
+$s = $conn->prepare('SELECT id FROM roles WHERE business_id=? AND role_code=? AND id<>? LIMIT 1');
+$s->bind_param('isi', $businessId, $code, $id);
+$s->execute();
+$dup = $s->get_result()->fetch_assoc();
+$s->close();
+if ($dup)
+    out(false, 'Role code already exists for this business.');
+$posted = $_POST['permissions'] ?? [];
+$valid = [];
+$rs = $conn->prepare('SELECT id FROM permissions WHERE is_active=1 AND (business_id IS NULL OR business_id=?)');
+$rs->bind_param('i', $businessId);
+$rs->execute();
+$rr = $rs->get_result();
+while ($x = $rr->fetch_assoc())
+    $valid[(int) $x['id']] = true;
+$rs->close();
+$conn->begin_transaction();
+try {
+    if ($id > 0) {
+        $s = $conn->prepare('SELECT is_system FROM roles WHERE id=? AND business_id=? LIMIT 1');
+        $s->bind_param('ii', $id, $businessId);
+        $s->execute();
+        $old = $s->get_result()->fetch_assoc();
+        $s->close();
+        if (!$old)
+            throw new Exception('Role not found.');
+        if ((int) $old['is_system'] === 1) {
+            $s = $conn->prepare('UPDATE roles SET role_name=?,description=?,is_active=? WHERE id=? AND business_id=?');
+            $s->bind_param('ssiii', $name, $desc, $active, $id, $businessId);
+        } else {
+            $s = $conn->prepare('UPDATE roles SET role_code=?,role_name=?,description=?,is_active=? WHERE id=? AND business_id=?');
+            $s->bind_param('sssiii', $code, $name, $desc, $active, $id, $businessId);
+        }
+        $s->execute();
+        $s->close();
+    } else {
+        $isSystem = 0;
+        $s = $conn->prepare('INSERT INTO roles (business_id,role_code,role_name,description,is_system,is_active) VALUES (?,?,?,?,?,?)');
+        $s->bind_param('isssii', $businessId, $code, $name, $desc, $isSystem, $active);
+        $s->execute();
+        $id = $s->insert_id;
+        $s->close();
+    }
+    $s = $conn->prepare('DELETE FROM role_permissions WHERE business_id=? AND role_id=?');
+    $s->bind_param('ii', $businessId, $id);
+    $s->execute();
+    $s->close();
+    $ins = $conn->prepare('INSERT INTO role_permissions (business_id,role_id,permission_id,can_open,can_view_value,can_view,can_create,can_update,can_approve,can_delete) VALUES (?,?,?,?,?,?,?,?,?,?)');
+    foreach ($posted as $pid => $vals) {
+        $pid = (int) $pid;
+        if (!isset($valid[$pid]) || !is_array($vals))
+            continue;
+        $open = !empty($vals['can_open']) ? 1 : 0;
+        $vv = !empty($vals['can_view_value']) ? 1 : 0;
+        $view = !empty($vals['can_view']) ? 1 : 0;
+        $create = !empty($vals['can_create']) ? 1 : 0;
+        $update = !empty($vals['can_update']) ? 1 : 0;
+        $approve = !empty($vals['can_approve']) ? 1 : 0;
+        $delete = !empty($vals['can_delete']) ? 1 : 0;
+        if ($vv || $view || $create || $update || $approve || $delete)
+            $open = 1;
+        $ins->bind_param('iiiiiiiiii', $businessId, $id, $pid, $open, $vv, $view, $create, $update, $approve, $delete);
+        $ins->execute();
+    }
+    $ins->close();
+    if ($conn->query("SHOW TABLES LIKE 'audit_logs'")->num_rows) {
+        $descLog = ($id > 0 ? 'Saved' : 'Created') . ' role ' . $name;
+        $s = $conn->prepare("INSERT INTO audit_logs (business_id,branch_id,user_id,module_code,action_type,reference_table,reference_id,description,ip_address,user_agent) VALUES (?,?,?,'staff.roles','Update','roles',?,?,?,?)");
+        $branchId = (int) ($_SESSION['branch_id'] ?? 0);
+        $ip = (string) ($_SERVER['REMOTE_ADDR'] ?? '');
+        $ua = (string) ($_SERVER['HTTP_USER_AGENT'] ?? '');
+        $s->bind_param('iiiisss', $businessId, $branchId, $userId, $id, $descLog, $ip, $ua);
+        $s->execute();
+        $s->close();
+    }
+    $conn->commit();
+    out(true, 'Role and permissions saved successfully.', ['role_id' => $id]);
+} catch (Throwable $e) {
+    $conn->rollback();
+    out(false, 'Unable to save role: ' . $e->getMessage(), [], 500);
+}
