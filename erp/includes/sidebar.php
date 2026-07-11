@@ -175,11 +175,16 @@ foreach ($menuRows as $row) {
     }
 }
 
-$rootMenus = $childrenByParent[0] ?? [];
-usort($rootMenus, static function (array $a, array $b): int {
-    return [(int)$a['sort_order'], (int)$a['id']] <=> [(int)$b['sort_order'], (int)$b['id']];
-});
+// Sort every menu level independently by the assigned sort order.
+foreach ($childrenByParent as $parentKey => &$childRows) {
+    usort($childRows, static function (array $a, array $b): int {
+        $orderCompare = (int)($a['sort_order'] ?? 0) <=> (int)($b['sort_order'] ?? 0);
+        return $orderCompare !== 0 ? $orderCompare : ((int)$a['id'] <=> (int)$b['id']);
+    });
+}
+unset($childRows);
 
+$rootMenus = $childrenByParent[0] ?? [];
 $businessShort = sidebar_initials($businessName);
 ?>
 
@@ -295,16 +300,16 @@ $businessShort = sidebar_initials($businessName);
         width: 100%;
         display: flex;
         align-items: center;
-        gap: 12px;
-        min-height: 44px;
-        padding: 10px 12px;
+        gap: 10px;
+        min-height: 42px;
+        padding: 9px 10px;
         margin-bottom: 3px;
         border: 0;
         border-radius: calc(var(--sidebar-radius) * .72);
         background: transparent;
         color: rgba(255,255,255,.82);
         text-decoration: none;
-        font-size: 14px;
+        font-size: 13px;
         font-weight: 600;
         text-align: left;
         transition: background .2s ease, color .2s ease, transform .2s ease;
@@ -330,6 +335,19 @@ $businessShort = sidebar_initials($businessName);
         text-align: center;
     }
 
+
+    .app-sidebar .sidebar-label {
+        min-width: 0;
+        flex: 1 1 auto;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .app-sidebar .sidebar-submenu .sidebar-label {
+        font-size: 11px;
+    }
+
     .app-sidebar .submenu-toggle .submenu-arrow {
         margin-left: auto;
         font-size: 10px;
@@ -347,9 +365,9 @@ $businessShort = sidebar_initials($businessName);
     }
 
     .app-sidebar .sidebar-submenu .nav-link {
-        min-height: 38px;
-        padding: 8px 10px;
-        font-size: 12px;
+        min-height: 36px;
+        padding: 7px 8px;
+        font-size: 11px;
         color: rgba(255,255,255,.68);
     }
 
@@ -426,9 +444,42 @@ $businessShort = sidebar_initials($businessName);
         box-shadow: 0 0 0 2px color-mix(in srgb, var(--sidebar-primary) 35%, transparent);
     }
 
+    .sidebar-hover-card {
+        position: fixed;
+        z-index: 30000;
+        display: none;
+        max-width: 260px;
+        padding: 8px 11px;
+        border: 1px solid rgba(255,255,255,.12);
+        border-radius: 8px;
+        background: #20272d;
+        color: #fff;
+        font-size: 11px;
+        font-weight: 600;
+        line-height: 1.35;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        box-shadow: 0 10px 28px rgba(0,0,0,.28);
+        pointer-events: none;
+    }
+    .sidebar-hover-card.show { display: block; }
+
     @media (prefers-reduced-motion: reduce) {
         .app-sidebar .sidebar-submenu,
-        .app-sidebar .submenu-toggle .submenu-arrow {
+    
+    .app-sidebar .sidebar-label {
+        min-width: 0;
+        flex: 1 1 auto;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .app-sidebar .sidebar-submenu .sidebar-label {
+        font-size: 11px;
+    }
+
+    .app-sidebar .submenu-toggle .submenu-arrow {
             transition: none !important;
         }
     }
@@ -495,7 +546,8 @@ $businessShort = sidebar_initials($businessName);
                     type="button"
                     data-submenu-target="<?php echo sidebar_e($collapseId); ?>"
                     aria-expanded="<?php echo $isActive ? 'true' : 'false'; ?>"
-                    aria-controls="<?php echo sidebar_e($collapseId); ?>">
+                    aria-controls="<?php echo sidebar_e($collapseId); ?>"
+                    data-sidebar-tooltip="<?php echo sidebar_e($menuTitle); ?>">
                     <i class="<?php echo sidebar_e($iconClass); ?>"></i>
                     <span class="sidebar-label"><?php echo sidebar_e($menuTitle); ?></span>
                     <i class="fa-solid fa-chevron-down submenu-arrow"></i>
@@ -511,6 +563,7 @@ $businessShort = sidebar_initials($businessName);
                         ?>
                         <a class="nav-link <?php echo $childCurrent ? 'active' : ''; ?>"
                            href="<?php echo sidebar_e($childRoute !== '' ? $childRoute : '#'); ?>"
+                           data-sidebar-tooltip="<?php echo sidebar_e($child['menu_title'] ?? 'Menu'); ?>"
                            <?php echo !empty($child['open_in_new_tab']) ? 'target="_blank" rel="noopener"' : ''; ?>>
                             <i class="<?php echo sidebar_e($childIcon); ?>"></i>
                             <span class="sidebar-label"><?php echo sidebar_e($child['menu_title'] ?? 'Menu'); ?></span>
@@ -521,6 +574,7 @@ $businessShort = sidebar_initials($businessName);
             <?php else: ?>
                 <a class="nav-link <?php echo $directActive ? 'active' : ''; ?>"
                    href="<?php echo sidebar_e($routeUrl !== '' ? $routeUrl : '#'); ?>"
+                   data-sidebar-tooltip="<?php echo sidebar_e($menuTitle); ?>"
                    <?php echo !empty($menu['open_in_new_tab']) ? 'target="_blank" rel="noopener"' : ''; ?>>
                     <i class="<?php echo sidebar_e($iconClass); ?>"></i>
                     <span class="sidebar-label"><?php echo sidebar_e($menuTitle); ?></span>
@@ -533,3 +587,40 @@ $businessShort = sidebar_initials($businessName);
         <?php endif; ?>
     </nav>
 </aside>
+<div class="sidebar-hover-card" id="sidebarHoverCard" role="tooltip"></div>
+<script>
+(function () {
+    'use strict';
+    const card = document.getElementById('sidebarHoverCard');
+    if (!card) return;
+    let activeTarget = null;
+    function showCard(target) {
+        const text = (target.getAttribute('data-sidebar-tooltip') || '').trim();
+        const label = target.querySelector('.sidebar-label');
+        if (!text || !label) return;
+        const isTruncated = label.scrollWidth > label.clientWidth + 1;
+        const isCollapsed = document.body.classList.contains('sidebar-collapsed');
+        if (!isTruncated && !isCollapsed) return;
+        activeTarget = target;
+        card.textContent = text;
+        card.classList.add('show');
+        const rect = target.getBoundingClientRect();
+        const cardRect = card.getBoundingClientRect();
+        let top = rect.top + (rect.height - cardRect.height) / 2;
+        top = Math.max(8, Math.min(top, window.innerHeight - cardRect.height - 8));
+        let left = rect.right + 8;
+        if (left + cardRect.width > window.innerWidth - 8) left = Math.max(8, rect.left - cardRect.width - 8);
+        card.style.top = top + 'px';
+        card.style.left = left + 'px';
+    }
+    function hideCard() { activeTarget = null; card.classList.remove('show'); }
+    document.querySelectorAll('.app-sidebar [data-sidebar-tooltip]').forEach(function (target) {
+        target.addEventListener('mouseenter', function () { showCard(target); });
+        target.addEventListener('mouseleave', hideCard);
+        target.addEventListener('focus', function () { showCard(target); });
+        target.addEventListener('blur', hideCard);
+    });
+    window.addEventListener('scroll', function () { if (activeTarget) showCard(activeTarget); }, true);
+    window.addEventListener('resize', hideCard);
+})();
+</script>
