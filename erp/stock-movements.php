@@ -29,6 +29,7 @@ if (!$configLoaded || !isset($conn) || !($conn instanceof mysqli)) {
 mysqli_report(MYSQLI_REPORT_OFF);
 $conn->set_charset('utf8mb4');
 
+
 if (!function_exists('h')) {
     function h($value): string
     {
@@ -39,51 +40,351 @@ if (!function_exists('h')) {
 if (!function_exists('tableExists')) {
     function tableExists(mysqli $conn, string $table): bool
     {
-        $safe = $conn->real_escape_string($table);
-        $result = $conn->query("SHOW TABLES LIKE '{$safe}'");
-        return $result && $result->num_rows > 0;
+        $table = $conn->real_escape_string($table);
+        $res = $conn->query("SHOW TABLES LIKE '{$table}'");
+        return $res && $res->num_rows > 0;
     }
 }
 
-if (empty($_SESSION['user_id'])) {
-    header('Location: login.php');
+function hasColumn(mysqli $conn, string $table, string $column): bool
+{
+    $table = $conn->real_escape_string($table);
+    $column = $conn->real_escape_string($column);
+    $res = $conn->query("SHOW COLUMNS FROM `{$table}` LIKE '{$column}'");
+    return $res && $res->num_rows > 0;
+}
+
+$pageTitle = 'Stock Movements';
+
+/* -------------------------------------------------------
+   AUTH CHECK
+------------------------------------------------------- */
+if (!isset($_SESSION['user_id']) || (int)$_SESSION['user_id'] <= 0) {
+    header('Location: ../login.php');
     exit;
 }
 
+$userId = (int)$_SESSION['user_id'];
 $businessId = (int)($_SESSION['business_id'] ?? 0);
 
 if ($businessId <= 0) {
     die('Business session not found. Please login again.');
 }
 
+/* -------------------------------------------------------
+   ROLE / PERMISSION CHECK
+------------------------------------------------------- */
 $roleName = strtolower(trim((string)($_SESSION['role_name'] ?? '')));
 $roleCode = strtolower(trim((string)($_SESSION['role_code'] ?? '')));
 $userType = (string)($_SESSION['user_type'] ?? '');
-$permissions = $_SESSION['permissions'] ?? [];
+$sessionPermissions = $_SESSION['permissions'] ?? [];
 
-$allowed = (
+$allowedRoles = ['admin', 'manager', 'stock'];
+
+$accessAllowed = (
     $userType === 'Platform Admin'
-    || in_array($roleName, ['admin', 'business admin', 'manager', 'stock'], true)
-    || in_array($roleCode, ['admin', 'business_admin', 'manager', 'stock'], true)
+    || in_array($roleName, $allowedRoles, true)
+    || in_array($roleCode, $allowedRoles, true)
 );
 
-foreach (['perm.stock', 'perm.inventory'] as $permissionCode) {
+foreach (['perm.stock', 'perm.inventory', 'perm.old_silver'] as $permissionCode) {
     if (
-        isset($permissions[$permissionCode]) &&
-        (
-            (int)($permissions[$permissionCode]['can_open'] ?? 0) === 1 ||
-            (int)($permissions[$permissionCode]['can_view'] ?? 0) === 1
+        isset($sessionPermissions[$permissionCode])
+        && (
+            (int)($sessionPermissions[$permissionCode]['can_open'] ?? 0) === 1
+            || (int)($sessionPermissions[$permissionCode]['can_view'] ?? 0) === 1
+            || (int)($sessionPermissions[$permissionCode]['can_create'] ?? 0) === 1
+            || (int)($sessionPermissions[$permissionCode]['can_edit'] ?? 0) === 1
         )
     ) {
-        $allowed = true;
+        $accessAllowed = true;
         break;
     }
 }
 
-if (!$allowed) {
+if (!$accessAllowed) {
     http_response_code(403);
     die('Access denied.');
 }
+
+/* -------------------------------------------------------
+   REQUIRED TABLES
+------------------------------------------------------- */
+if (!tableExists($conn, 'stock_movements')) {
+    die('Required table `stock_movements` not found. Please import the SQL first.');
+}
+
+if (!tableExists($conn, 'products')) {
+    die('Required table `products` not found. Please import the SQL first.');
+}
+
+/* -------------------------------------------------------
+   COLUMN CHECKS
+------------------------------------------------------- */
+$smHasBusinessId   = hasColumn($conn, 'stock_movements', 'business_id');
+$smHasMovementDate = hasColumn($conn, 'stock_movements', 'movement_date');
+$smHasProductId    = hasColumn($conn, 'stock_movements', 'product_id');
+$smHasMovementType = hasColumn($conn, 'stock_movements', 'movement_type');
+$smHasRefTable     = hasColumn($conn, 'stock_movements', 'ref_table');
+$smHasRefId        = hasColumn($conn, 'stock_movements', 'ref_id');
+$smHasQtyIn        = hasColumn($conn, 'stock_movements', 'qty_in');
+$smHasQtyOut       = hasColumn($conn, 'stock_movements', 'qty_out');
+$smHasWeightIn     = hasColumn($conn, 'stock_movements', 'weight_in');
+$smHasWeightOut    = hasColumn($conn, 'stock_movements', 'weight_out');
+$smHasRemarks      = hasColumn($conn, 'stock_movements', 'remarks');
+$smHasCreatedBy    = hasColumn($conn, 'stock_movements', 'created_by');
+$smHasCreatedAt    = hasColumn($conn, 'stock_movements', 'created_at');
+
+$prodHasBusinessId = hasColumn($conn, 'products', 'business_id');
+$prodHasCode       = hasColumn($conn, 'products', 'product_code');
+$prodHasBarcode    = hasColumn($conn, 'products', 'barcode');
+$prodHasUnit       = hasColumn($conn, 'products', 'unit');
+
+$userTableExists   = tableExists($conn, 'users');
+
+/* -------------------------------------------------------
+   FILTERS
+------------------------------------------------------- */
+$search        = trim((string)($_GET['search'] ?? ''));
+$movementType  = trim((string)($_GET['movement_type'] ?? ''));
+$dateFrom      = trim((string)($_GET['date_from'] ?? ''));
+$dateTo        = trim((string)($_GET['date_to'] ?? ''));
+$productId     = (int)($_GET['product_id'] ?? 0);
+
+/* -------------------------------------------------------
+   PRODUCT OPTIONS
+------------------------------------------------------- */
+$productSql = "SELECT id, product_name";
+if ($prodHasCode) {
+    $productSql .= ", product_code";
+}
+$productSql .= " FROM products WHERE 1=1";
+
+$productParams = [];
+$productTypes  = '';
+
+if ($prodHasBusinessId) {
+    $productSql .= " AND business_id = ?";
+    $productParams[] = $businessId;
+    $productTypes .= 'i';
+}
+
+if (hasColumn($conn, 'products', 'is_active')) {
+    $productSql .= " AND is_active = 1";
+}
+
+$productSql .= " ORDER BY product_name ASC";
+
+$productOptions = [];
+$stmt = $conn->prepare($productSql);
+if ($stmt) {
+    if (!empty($productParams)) {
+        $bindValues = [];
+        $bindValues[] = $productTypes;
+        for ($i = 0; $i < count($productParams); $i++) {
+            $bindValues[] = &$productParams[$i];
+        }
+        call_user_func_array([$stmt, 'bind_param'], $bindValues);
+    }
+
+    $stmt->execute();
+    $res = $stmt->get_result();
+    while ($res && $row = $res->fetch_assoc()) {
+        $productOptions[] = $row;
+    }
+    $stmt->close();
+}
+
+/* -------------------------------------------------------
+   SUMMARY COUNTS
+------------------------------------------------------- */
+$summaryWhere  = " WHERE 1=1 ";
+$summaryParams = [];
+$summaryTypes  = '';
+
+if ($smHasBusinessId) {
+    $summaryWhere .= " AND sm.business_id = ? ";
+    $summaryParams[] = $businessId;
+    $summaryTypes .= 'i';
+}
+
+$totalMovements = 0;
+$totalQtyIn = 0;
+$totalQtyOut = 0;
+$totalWeightIn = 0;
+$totalWeightOut = 0;
+
+$summarySql = "
+    SELECT
+        COUNT(*) AS total_movements,
+        SUM(" . ($smHasQtyIn ? "IFNULL(sm.qty_in, 0)" : "0") . ") AS total_qty_in,
+        SUM(" . ($smHasQtyOut ? "IFNULL(sm.qty_out, 0)" : "0") . ") AS total_qty_out,
+        SUM(" . ($smHasWeightIn ? "IFNULL(sm.weight_in, 0)" : "0") . ") AS total_weight_in,
+        SUM(" . ($smHasWeightOut ? "IFNULL(sm.weight_out, 0)" : "0") . ") AS total_weight_out
+    FROM stock_movements sm
+    {$summaryWhere}
+";
+
+$stmt = $conn->prepare($summarySql);
+if ($stmt) {
+    if (!empty($summaryParams)) {
+        $bindValues = [];
+        $bindValues[] = $summaryTypes;
+        for ($i = 0; $i < count($summaryParams); $i++) {
+            $bindValues[] = &$summaryParams[$i];
+        }
+        call_user_func_array([$stmt, 'bind_param'], $bindValues);
+    }
+
+    $stmt->execute();
+    $res = $stmt->get_result();
+    $row = $res ? $res->fetch_assoc() : null;
+    $stmt->close();
+
+    if ($row) {
+        $totalMovements = (int)($row['total_movements'] ?? 0);
+        $totalQtyIn = (float)($row['total_qty_in'] ?? 0);
+        $totalQtyOut = (float)($row['total_qty_out'] ?? 0);
+        $totalWeightIn = (float)($row['total_weight_in'] ?? 0);
+        $totalWeightOut = (float)($row['total_weight_out'] ?? 0);
+    }
+}
+
+/* -------------------------------------------------------
+   MOVEMENT TYPES
+------------------------------------------------------- */
+$movementTypes = [
+    'Opening',
+    'Purchase',
+    'Sale',
+    'Sale Return',
+    'Purchase Return',
+    'Adjustment',
+    'Old Silver Inward',
+    'Damage',
+    'Manual'
+];
+
+/* -------------------------------------------------------
+   LIST QUERY
+------------------------------------------------------- */
+$where  = " WHERE 1=1 ";
+$params = [];
+$types  = '';
+
+if ($smHasBusinessId) {
+    $where .= " AND sm.business_id = ? ";
+    $params[] = $businessId;
+    $types .= 'i';
+}
+
+if ($search !== '') {
+    $where .= " AND (p.product_name LIKE ?";
+    $like = '%' . $search . '%';
+    $params[] = $like;
+    $types .= 's';
+
+    if ($prodHasCode) {
+        $where .= " OR p.product_code LIKE ?";
+        $params[] = $like;
+        $types .= 's';
+    }
+
+    if ($prodHasBarcode) {
+        $where .= " OR p.barcode LIKE ?";
+        $params[] = $like;
+        $types .= 's';
+    }
+
+    if ($smHasRemarks) {
+        $where .= " OR sm.remarks LIKE ?";
+        $params[] = $like;
+        $types .= 's';
+    }
+
+    if ($smHasRefTable) {
+        $where .= " OR sm.ref_table LIKE ?";
+        $params[] = $like;
+        $types .= 's';
+    }
+
+    $where .= ")";
+}
+
+if ($movementType !== '' && $smHasMovementType) {
+    $where .= " AND sm.movement_type = ? ";
+    $params[] = $movementType;
+    $types .= 's';
+}
+
+if ($productId > 0 && $smHasProductId) {
+    $where .= " AND sm.product_id = ? ";
+    $params[] = $productId;
+    $types .= 'i';
+}
+
+if ($dateFrom !== '' && $smHasMovementDate) {
+    $where .= " AND DATE(sm.movement_date) >= ? ";
+    $params[] = $dateFrom;
+    $types .= 's';
+}
+
+if ($dateTo !== '' && $smHasMovementDate) {
+    $where .= " AND DATE(sm.movement_date) <= ? ";
+    $params[] = $dateTo;
+    $types .= 's';
+}
+
+$sql = "
+    SELECT
+        sm.id,
+        " . ($smHasMovementDate ? "sm.movement_date," : "sm.created_at AS movement_date,") . "
+        " . ($smHasMovementType ? "sm.movement_type," : "'' AS movement_type,") . "
+        " . ($smHasRefTable ? "sm.ref_table," : "'' AS ref_table,") . "
+        " . ($smHasRefId ? "sm.ref_id," : "NULL AS ref_id,") . "
+        " . ($smHasQtyIn ? "sm.qty_in," : "0 AS qty_in,") . "
+        " . ($smHasQtyOut ? "sm.qty_out," : "0 AS qty_out,") . "
+        " . ($smHasWeightIn ? "sm.weight_in," : "0 AS weight_in,") . "
+        " . ($smHasWeightOut ? "sm.weight_out," : "0 AS weight_out,") . "
+        " . ($smHasRemarks ? "sm.remarks," : "'' AS remarks,") . "
+        " . ($smHasCreatedAt ? "sm.created_at," : "NULL AS created_at,") . "
+        p.product_name,
+        " . ($prodHasCode ? "p.product_code," : "'' AS product_code,") . "
+        " . ($prodHasBarcode ? "p.barcode," : "'' AS barcode,") . "
+        " . ($prodHasUnit ? "p.unit," : "'pcs' AS unit,") . "
+        " . ($userTableExists && $smHasCreatedBy ? "u.full_name AS created_by_name" : "'' AS created_by_name") . "
+    FROM stock_movements sm
+    LEFT JOIN products p ON p.id = sm.product_id
+    " . ($userTableExists && $smHasCreatedBy ? "LEFT JOIN users u ON u.id = sm.created_by" : "") . "
+    {$where}
+    ORDER BY " . ($smHasMovementDate ? "sm.movement_date" : "sm.id") . " DESC, sm.id DESC
+";
+
+$stmt = $conn->prepare($sql);
+if (!$stmt) {
+    die('Failed to prepare stock movements query.');
+}
+
+if (!empty($params)) {
+    $bindValues = [];
+    $bindValues[] = $types;
+    for ($i = 0; $i < count($params); $i++) {
+        $bindValues[] = &$params[$i];
+    }
+    call_user_func_array([$stmt, 'bind_param'], $bindValues);
+}
+
+$stmt->execute();
+$res = $stmt->get_result();
+$movements = [];
+if ($res) {
+    while ($row = $res->fetch_assoc()) {
+        $movements[] = $row;
+    }
+}
+$stmt->close();
+
+
 
 $theme = [
     'primary_color' => '#d89416',
@@ -92,38 +393,37 @@ $theme = [
     'sidebar_gradient_1' => '#171c21',
     'sidebar_gradient_2' => '#20272d',
     'sidebar_gradient_3' => '#101419',
-    'page_background' => '#f4f3f0',
+    'page_background' => '#f5f5f3',
     'card_background' => '#ffffff',
-    'text_color' => '#171717',
-    'muted_text_color' => '#7d8794',
-    'border_color' => '#e8e8e8',
+    'text_color' => '#111827',
+    'muted_text_color' => '#7b8497',
+    'border_color' => '#e5e7eb',
     'font_family' => 'Inter',
     'heading_font_family' => 'Playfair Display',
-    'border_radius_px' => 12,
-    'sidebar_width_px' => 230,
+    'border_radius_px' => 14,
 ];
 
-if (tableExists($conn, 'business_theme_settings')) {
-    $stmt = $conn->prepare(
+if (function_exists('tableExists') && tableExists($conn, 'business_theme_settings')) {
+    $themeStmt = $conn->prepare(
         'SELECT * FROM business_theme_settings WHERE business_id = ? LIMIT 1'
     );
 
-    if ($stmt) {
-        $stmt->bind_param('i', $businessId);
-        $stmt->execute();
-        $row = $stmt->get_result()->fetch_assoc() ?: [];
-        $stmt->close();
+    if ($themeStmt) {
+        $themeStmt->bind_param('i', $businessId);
+        $themeStmt->execute();
+        $themeRow = $themeStmt->get_result()->fetch_assoc() ?: [];
+        $themeStmt->close();
 
-        foreach ($theme as $key => $defaultValue) {
-            if (isset($row[$key]) && $row[$key] !== '') {
-                $theme[$key] = $row[$key];
+        foreach ($theme as $themeKey => $themeDefault) {
+            if (isset($themeRow[$themeKey]) && $themeRow[$themeKey] !== '') {
+                $theme[$themeKey] = $themeRow[$themeKey];
             }
         }
     }
 }
 
-$pageTitle = 'Stock Movements';
 $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
+
 ?>
 <!doctype html>
 <html lang="en">
@@ -134,328 +434,222 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
 
     <?php include('includes/links.php'); ?>
 
-    <style>
-        :root {
-            --primary: <?php echo h($theme['primary_color']); ?>;
-            --primary-dark: <?php echo h($theme['primary_dark_color']); ?>;
-            --primary-soft: <?php echo h($theme['primary_soft_color']); ?>;
-            --sidebar-gradient-1: <?php echo h($theme['sidebar_gradient_1']); ?>;
-            --sidebar-gradient-2: <?php echo h($theme['sidebar_gradient_2']); ?>;
-            --sidebar-gradient-3: <?php echo h($theme['sidebar_gradient_3']); ?>;
-            --page-bg: <?php echo h($theme['page_background']); ?>;
-            --card-bg: <?php echo h($theme['card_background']); ?>;
-            --text-color: <?php echo h($theme['text_color']); ?>;
-            --muted-color: <?php echo h($theme['muted_text_color']); ?>;
-            --border-color: <?php echo h($theme['border_color']); ?>;
-            --radius: <?php echo (int)$theme['border_radius_px']; ?>px;
-        }
+    
+<style>
+:root {
+    --brand: <?php echo h($theme['primary_color']); ?>;
+    --brand-dark: <?php echo h($theme['primary_dark_color']); ?>;
+    --brand-soft: <?php echo h($theme['primary_soft_color']); ?>;
+    --page-bg: <?php echo h($theme['page_background']); ?>;
+    --card-bg: <?php echo h($theme['card_background']); ?>;
+    --text: <?php echo h($theme['text_color']); ?>;
+    --muted: <?php echo h($theme['muted_text_color']); ?>;
+    --line: <?php echo h($theme['border_color']); ?>;
+    --radius: <?php echo (int)$theme['border_radius_px']; ?>px;
+}
 
-        body {
-            background: var(--page-bg);
-            color: var(--text-color);
-            font-family: <?php echo json_encode((string)$theme['font_family']); ?>, sans-serif;
-        }
+body {
+    background: var(--page-bg);
+    color: var(--text);
+    font-family: <?php echo json_encode((string)$theme['font_family']); ?>, sans-serif;
+}
 
-        .sidebar {
-            background: linear-gradient(
-                180deg,
-                var(--sidebar-gradient-1),
-                var(--sidebar-gradient-2),
-                var(--sidebar-gradient-3)
-            ) !important;
-        }
+.sidebar {
+    background: linear-gradient(
+        180deg,
+        <?php echo h($theme['sidebar_gradient_1']); ?>,
+        <?php echo h($theme['sidebar_gradient_2']); ?>,
+        <?php echo h($theme['sidebar_gradient_3']); ?>
+    ) !important;
+}
 
-        .page-head,
-        .panel,
-        .stat-card {
-            background: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: var(--radius);
-        }
+.content-wrap {
+    padding-top: 16px;
+}
 
-        .page-head {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 12px;
-            padding: 13px 15px;
-            margin-bottom: 12px;
-        }
+.page-new-header {
+    margin-bottom: 14px;
+}
 
-        .page-title {
-            margin: 0;
-            font-family: <?php echo json_encode((string)$theme['heading_font_family']); ?>, serif;
-            font-size: 19px;
-            font-weight: 800;
-        }
+.page-new-title {
+    margin: 0;
+    font-family: <?php echo json_encode((string)$theme['heading_font_family']); ?>, serif;
+    font-size: 24px;
+    line-height: 1.1;
+    font-weight: 800;
+}
 
-        .page-subtitle {
-            margin-top: 2px;
-            color: var(--muted-color);
-            font-size: 10px;
-        }
+.page-new-subtitle {
+    margin-top: 4px;
+    color: var(--muted);
+    font-size: 11px;
+}
 
-        .btn {
-            border-radius: 9px;
-            font-size: 11px;
-            font-weight: 700;
-        }
+.card,
+.report-card,
+.invoice-header-box {
+    background: var(--card-bg) !important;
+    border: 1px solid var(--line) !important;
+    border-radius: var(--radius) !important;
+    box-shadow: none !important;
+}
 
-        .btn-primary {
-            border-color: transparent;
-            background: linear-gradient(135deg, var(--primary), var(--primary-dark));
-        }
+.card-header,
+.report-card .card-header {
+    background: #f7f7f8 !important;
+    border-bottom: 1px solid var(--line) !important;
+    color: var(--text);
+    border-radius: var(--radius) var(--radius) 0 0 !important;
+}
 
-        .btn-soft {
-            border: 1px solid color-mix(in srgb, var(--primary) 25%, var(--border-color));
-            background: var(--primary-soft);
-            color: var(--primary-dark);
-        }
+.card-body,
+.report-card .card-body {
+    padding: 14px !important;
+}
 
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(5, minmax(0, 1fr));
-            gap: 10px;
-            margin-bottom: 12px;
-        }
+h1, h2, h3, h4, h5, h6,
+.card-title {
+    color: var(--text);
+}
 
-        .stat-card {
-            padding: 13px;
-        }
+.form-label {
+    margin-bottom: 5px;
+    color: var(--text);
+    font-size: 10px;
+    font-weight: 700;
+}
 
-        .stat-label {
-            color: var(--muted-color);
-            font-size: 9px;
-            font-weight: 700;
-            letter-spacing: .04em;
-            text-transform: uppercase;
-        }
+.form-control,
+.form-select {
+    min-height: 40px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--card-bg);
+    color: var(--text);
+    font-size: 11px;
+    box-shadow: none;
+}
 
-        .stat-value {
-            margin-top: 6px;
-            font-family: <?php echo json_encode((string)$theme['heading_font_family']); ?>, serif;
-            font-size: 21px;
-            font-weight: 800;
-        }
+.form-control:focus,
+.form-select:focus {
+    border-color: var(--brand);
+    box-shadow: 0 0 0 .18rem rgba(216, 148, 22, .12);
+}
 
-        .panel {
-            margin-bottom: 12px;
-            overflow: hidden;
-        }
+.btn {
+    min-height: 38px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 700;
+}
 
-        .panel-head {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 10px;
-            padding: 12px 14px;
-            border-bottom: 1px solid var(--border-color);
-        }
+.btn-primary,
+.btn-info {
+    border-color: transparent !important;
+    background: linear-gradient(135deg, var(--brand), var(--brand-dark)) !important;
+    color: #fff !important;
+}
 
-        .panel-title {
-            margin: 0;
-            font-size: 14px;
-            font-weight: 800;
-        }
+.btn-secondary,
+.btn-light {
+    border: 1px solid var(--line) !important;
+    background: #fff !important;
+    color: var(--text) !important;
+}
 
-        .panel-body {
-            padding: 14px;
-        }
+.table-responsive {
+    border-radius: 12px;
+}
 
-        .form-label {
-            margin-bottom: 5px;
-            font-size: 10px;
-            font-weight: 700;
-        }
+.table {
+    margin-bottom: 0;
+    color: var(--text);
+    font-size: 10px;
+}
 
-        .form-control,
-        .form-select {
-            min-height: 38px;
-            border-color: var(--border-color);
-            border-radius: 9px;
-            background: var(--card-bg);
-            color: var(--text-color);
-            font-size: 11px;
-            box-shadow: none;
-        }
+.table thead th {
+    padding: 12px 13px;
+    border-color: var(--line);
+    background: #f7f7f8;
+    color: #738096;
+    font-size: 9px;
+    font-weight: 800;
+    letter-spacing: .035em;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
 
-        .form-control:focus,
-        .form-select:focus {
-            border-color: var(--primary);
-            box-shadow: 0 0 0 .2rem color-mix(in srgb, var(--primary) 14%, transparent);
-        }
+.table tbody td {
+    padding: 11px 13px;
+    border-color: var(--line);
+    background: var(--card-bg) !important;
+    color: var(--text);
+    vertical-align: middle;
+}
 
-        .table-wrap {
-            overflow-x: auto;
-        }
+.badge {
+    border-radius: 999px;
+    padding: 5px 9px;
+    font-size: 9px;
+    font-weight: 800;
+}
 
-        .movement-table {
-            min-width: 1450px;
-            margin: 0;
-            color: var(--text-color);
-            font-size: 10px;
-        }
+.alert {
+    border: 0;
+    border-radius: 10px;
+    font-size: 11px;
+}
 
-        .movement-table th {
-            padding: 9px 8px;
-            border-color: var(--border-color);
-            background: color-mix(in srgb, var(--muted-color) 6%, var(--card-bg));
-            color: var(--muted-color);
-            font-size: 9px;
-            letter-spacing: .04em;
-            text-transform: uppercase;
-            white-space: nowrap;
-        }
+.text-muted {
+    color: var(--muted) !important;
+}
 
-        .movement-table td {
-            padding: 9px 8px;
-            border-color: var(--border-color);
-            background: var(--card-bg) !important;
-            vertical-align: middle;
-        }
+.row > [class*="col-"] > .card {
+    height: calc(100% - 12px);
+    margin-bottom: 12px;
+}
 
-        .product-name {
-            font-weight: 800;
-        }
+body.dark-mode,
+body[data-theme="dark"],
+html.dark-mode body,
+html[data-theme="dark"] body {
+    --page-bg: #0f151b;
+    --card-bg: #182129;
+    --text: #f3f6f8;
+    --muted: #9aa7b3;
+    --line: #2c3944;
+}
 
-        .product-code,
-        .small-muted {
-            color: var(--muted-color);
-            font-size: 9px;
-        }
+@media (max-width: 767px) {
+    .content-wrap {
+        padding-left: 10px;
+        padding-right: 10px;
+    }
+}
 
-        .movement-badge {
-            display: inline-flex;
-            padding: 5px 8px;
-            border-radius: 999px;
-            font-size: 9px;
-            font-weight: 800;
-        }
+@media print {
+    .sidebar,
+    .app-nav,
+    .footer,
+    .no-print {
+        display: none !important;
+    }
 
-        .badge-in { background: #eaf8f0; color: #168449; }
-        .badge-out { background: #fdecec; color: #bd2d2d; }
-        .badge-adjust { background: #fff4dc; color: #9a6200; }
-        .badge-neutral { background: #edf1f4; color: #56616d; }
+    .app-main {
+        margin-left: 0 !important;
+    }
 
-        .pagination-bar {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 12px;
-            padding: 12px 14px;
-            border-top: 1px solid var(--border-color);
-        }
+    .content-wrap {
+        padding: 0 !important;
+    }
 
-        .pagination-info {
-            color: var(--muted-color);
-            font-size: 10px;
-        }
+    .table-responsive {
+        overflow: visible !important;
+    }
+}
+</style>
 
-        .loading-row {
-            padding: 35px !important;
-            color: var(--muted-color);
-            text-align: center;
-        }
-
-        .toast-box {
-            position: fixed;
-            top: 75px;
-            right: 18px;
-            z-index: 20000;
-            width: min(360px, calc(100vw - 24px));
-        }
-
-        .app-toast {
-            margin-bottom: 8px;
-            padding: 11px 13px;
-            border-radius: 10px;
-            color: #fff;
-            font-size: 11px;
-            font-weight: 700;
-            box-shadow: 0 14px 35px rgba(0,0,0,.22);
-        }
-
-        .toast-error { background: #c0392b; }
-        .toast-info { background: #285a8e; }
-
-        body.dark-mode,
-        body[data-theme="dark"],
-        html.dark-mode body,
-        html[data-theme="dark"] body {
-            --page-bg: #0f151b;
-            --card-bg: #182129;
-            --text-color: #f3f6f8;
-            --muted-color: #9aa7b3;
-            --border-color: #2c3944;
-        }
-
-        @media (max-width: 1199.98px) {
-            .stats-grid {
-                grid-template-columns: repeat(3, minmax(0, 1fr));
-            }
-        }
-
-        @media (max-width: 767.98px) {
-            .content-wrap {
-                padding-left: 10px;
-                padding-right: 10px;
-            }
-
-            .page-head {
-                align-items: flex-start;
-                flex-direction: column;
-            }
-
-            .page-actions {
-                display: grid !important;
-                grid-template-columns: repeat(2, 1fr);
-                width: 100%;
-            }
-
-            .stats-grid {
-                grid-template-columns: repeat(2, minmax(0, 1fr));
-            }
-        }
-
-        @media (max-width: 575.98px) {
-            .stats-grid {
-                grid-template-columns: 1fr;
-            }
-
-            .pagination-bar {
-                align-items: stretch;
-                flex-direction: column;
-            }
-        }
-
-        @media print {
-            .sidebar,
-            .app-nav,
-            .page-actions,
-            .filter-panel,
-            .footer,
-            .pagination-bar {
-                display: none !important;
-            }
-
-            .app-main {
-                margin-left: 0 !important;
-            }
-
-            .content-wrap {
-                padding: 0 !important;
-            }
-
-            .table-wrap {
-                overflow: visible !important;
-            }
-
-            .movement-table {
-                min-width: 0 !important;
-                font-size: 8px;
-            }
-        }
-    </style>
+    
 </head>
 
 <body>
@@ -465,427 +659,230 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
     <?php include('includes/nav.php'); ?>
 
     <div class="content-wrap">
-        <div class="page-head">
-            <div>
-                <h1 class="page-title">Stock Movements</h1>
-                <div class="page-subtitle">
-                    Review product stock inward, outward, adjustments and references.
-                </div>
-            </div>
-
-            <div class="page-actions d-flex gap-2">
-                <button type="button" class="btn btn-soft" onclick="window.print()">
-                    <i class="fa-solid fa-print me-1"></i>Print
-                </button>
-
-                <a href="stock-overview.php" class="btn btn-primary">
-                    <i class="fa-solid fa-boxes-stacked me-1"></i>Stock Overview
-                </a>
+        <div class="page-new-header">
+            <h1 class="page-new-title">Stock Movements</h1>
+            <div class="page-new-subtitle">
+                <?php echo h($businessName); ?> &nbsp;•&nbsp; Inventory
             </div>
         </div>
 
-        <div class="stats-grid">
-            <div class="stat-card">
-                <div class="stat-label">Total Movements</div>
-                <div class="stat-value" id="totalMovements">0</div>
-            </div>
-
-            <div class="stat-card">
-                <div class="stat-label">Quantity In</div>
-                <div class="stat-value" id="totalQtyIn">0.000</div>
-            </div>
-
-            <div class="stat-card">
-                <div class="stat-label">Quantity Out</div>
-                <div class="stat-value" id="totalQtyOut">0.000</div>
-            </div>
-
-            <div class="stat-card">
-                <div class="stat-label">Weight In</div>
-                <div class="stat-value" id="totalWeightIn">0.000</div>
-            </div>
-
-            <div class="stat-card">
-                <div class="stat-label">Net Weight Change</div>
-                <div class="stat-value" id="netWeightChange">0.000</div>
-            </div>
-        </div>
-
-        <section class="panel filter-panel">
-            <div class="panel-head">
-                <h2 class="panel-title">Filters</h2>
-            </div>
-
-            <div class="panel-body">
-                <form id="filterForm" class="row g-2 align-items-end">
-                    <div class="col-xl-3 col-md-6">
-                        <label class="form-label">Search</label>
-                        <input
-                            type="text"
-                            class="form-control"
-                            id="searchInput"
-                            placeholder="Product, code, barcode, remarks"
-                        >
-                    </div>
-
-                    <div class="col-xl-2 col-md-6">
-                        <label class="form-label">Product</label>
-                        <select class="form-select" id="productFilter">
-                            <option value="">All Products</option>
-                        </select>
-                    </div>
-
-                    <div class="col-xl-2 col-md-6">
-                        <label class="form-label">Movement Type</label>
-                        <select class="form-select" id="movementType">
-                            <option value="">All Types</option>
-                        </select>
-                    </div>
-
-                    <div class="col-xl-2 col-md-6">
-                        <label class="form-label">Date From</label>
-                        <input type="date" class="form-control" id="dateFrom">
-                    </div>
-
-                    <div class="col-xl-2 col-md-6">
-                        <label class="form-label">Date To</label>
-                        <input type="date" class="form-control" id="dateTo">
-                    </div>
-
-                    <div class="col-xl-1 col-md-6">
-                        <button type="submit" class="btn btn-primary w-100">
-                            Go
-                        </button>
-                    </div>
-
-                    <div class="col-12">
-                        <button type="button" class="btn btn-light" id="resetBtn">
-                            Reset
-                        </button>
-                    </div>
-                </form>
-            </div>
-        </section>
-
-        <section class="panel">
-            <div class="panel-head">
-                <h2 class="panel-title">Movement History</h2>
-
-                <select class="form-select" id="limitSelect" style="width:100px;min-height:34px">
-                    <option value="25">25 rows</option>
-                    <option value="50" selected>50 rows</option>
-                    <option value="100">100 rows</option>
-                    <option value="200">200 rows</option>
-                </select>
-            </div>
-
-            <div class="table-wrap">
-                <table class="table movement-table align-middle">
-                    <thead>
-                        <tr>
-                            <th>#</th>
-                            <th>Date & Time</th>
-                            <th>Product</th>
-                            <th>Type</th>
-                            <th>Reference</th>
-                            <th>Qty In</th>
-                            <th>Qty Out</th>
-                            <th>Weight In</th>
-                            <th>Weight Out</th>
-                            <th>Rate</th>
-                            <th>Value</th>
-                            <th>Remarks</th>
-                            <th>Created By</th>
-                        </tr>
-                    </thead>
-
-                    <tbody id="movementRows">
-                        <tr>
-                            <td colspan="13" class="loading-row">Loading stock movements...</td>
-                        </tr>
-                    </tbody>
-                </table>
-            </div>
-
-            <div class="pagination-bar">
-                <div class="pagination-info" id="paginationInfo">
-                    Showing 0 records
+        
                 </div>
 
-                <div class="d-flex gap-2">
-                    <button type="button" class="btn btn-light" id="prevBtn">
-                        Previous
-                    </button>
-                    <button type="button" class="btn btn-light" id="nextBtn">
-                        Next
-                    </button>
+                <div class="row">
+                    <div class="col-md-3 col-xl-3">
+                        <div class="card text-center">
+                            <div class="card-body">
+                                <h3 class="text-primary mt-2"><?php echo $totalMovements; ?></h3>
+                                <p class="text-muted mb-0">Total Movements</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="col-md-3 col-xl-3">
+                        <div class="card text-center">
+                            <div class="card-body">
+                                <h3 class="text-success mt-2"><?php echo number_format($totalQtyIn, 3); ?></h3>
+                                <p class="text-muted mb-0">Total Qty In</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="col-md-3 col-xl-3">
+                        <div class="card text-center">
+                            <div class="card-body">
+                                <h3 class="text-danger mt-2"><?php echo number_format($totalQtyOut, 3); ?></h3>
+                                <p class="text-muted mb-0">Total Qty Out</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="col-md-3 col-xl-3">
+                        <div class="card text-center">
+                            <div class="card-body">
+                                <h3 class="text-dark mt-2"><?php echo number_format($totalWeightIn - $totalWeightOut, 3); ?></h3>
+                                <p class="text-muted mb-0">Net Weight Change</p>
+                            </div>
+                        </div>
+                    </div>
                 </div>
-            </div>
-        </section>
+
+                <div class="card">
+                    <div class="card-body">
+                        <form method="get" class="row g-2 align-items-end">
+                            <div class="col-md-3">
+                                <label class="form-label">Search</label>
+                                <input
+                                    type="text"
+                                    name="search"
+                                    class="form-control"
+                                    placeholder="Product, code, remarks..."
+                                    value="<?php echo h($search); ?>"
+                                >
+                            </div>
+
+                            <div class="col-md-2">
+                                <label class="form-label">Product</label>
+                                <select name="product_id" class="form-select">
+                                    <option value="0">All Products</option>
+                                    <?php foreach ($productOptions as $product): ?>
+                                        <option value="<?php echo (int)$product['id']; ?>" <?php echo $productId === (int)$product['id'] ? 'selected' : ''; ?>>
+                                            <?php echo h($product['product_name'] . (!empty($product['product_code']) ? ' - ' . $product['product_code'] : '')); ?>
+                                        </option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
+
+                            <div class="col-md-2">
+                                <label class="form-label">Movement Type</label>
+                                <select name="movement_type" class="form-select">
+                                    <option value="">All Types</option>
+                                    <?php foreach ($movementTypes as $type): ?>
+                                        <option value="<?php echo h($type); ?>" <?php echo $movementType === $type ? 'selected' : ''; ?>>
+                                            <?php echo h($type); ?>
+                                        </option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
+
+                            <div class="col-md-2">
+                                <label class="form-label">Date From</label>
+                                <input type="date" name="date_from" class="form-control" value="<?php echo h($dateFrom); ?>">
+                            </div>
+
+                            <div class="col-md-2">
+                                <label class="form-label">Date To</label>
+                                <input type="date" name="date_to" class="form-control" value="<?php echo h($dateTo); ?>">
+                            </div>
+
+                            <div class="col-md-1">
+                                <button type="submit" class="btn btn-primary w-100">Go</button>
+                            </div>
+
+                            <div class="col-md-12">
+                                <a href="stock-movements.php" class="btn btn-secondary">Reset</a>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-body">
+                        <div class="table-responsive">
+                            <table class="table table-bordered table-striped align-middle mb-0">
+                                <thead>
+                                    <tr>
+                                        <th>#</th>
+                                        <th>Date & Time</th>
+                                        <th>Product</th>
+                                        <th>Type</th>
+                                        <th>Reference</th>
+                                        <th>Qty In</th>
+                                        <th>Qty Out</th>
+                                        <th>Weight In</th>
+                                        <th>Weight Out</th>
+                                        <th>Remarks</th>
+                                        <th>Created By</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php if (!empty($movements)): ?>
+                                        <?php foreach ($movements as $index => $movement): ?>
+                                            <?php
+                                                $type = (string)($movement['movement_type'] ?? '');
+                                                $badgeClass = 'bg-secondary';
+
+                                                if (in_array($type, ['Opening', 'Purchase', 'Sale Return', 'Old Silver Inward', 'Manual'], true)) {
+                                                    $badgeClass = 'bg-success';
+                                                } elseif (in_array($type, ['Sale', 'Purchase Return', 'Damage'], true)) {
+                                                    $badgeClass = 'bg-danger';
+                                                } elseif ($type === 'Adjustment') {
+                                                    $badgeClass = 'bg-warning text-dark';
+                                                }
+
+                                                $referenceText = '-';
+                                                if (!empty($movement['ref_table']) || !empty($movement['ref_id'])) {
+                                                    $referenceText = trim((string)($movement['ref_table'] ?? ''));
+                                                    if (!empty($movement['ref_id'])) {
+                                                        $referenceText .= ' #' . (int)$movement['ref_id'];
+                                                    }
+                                                }
+                                            ?>
+                                            <tr>
+                                                <td><?php echo $index + 1; ?></td>
+
+                                                <td>
+                                                    <?php
+                                                    if (!empty($movement['movement_date'])) {
+                                                        echo date('d-m-Y h:i A', strtotime($movement['movement_date']));
+                                                    } else {
+                                                        echo '-';
+                                                    }
+                                                    ?>
+                                                </td>
+
+                                                <td>
+                                                    <strong><?php echo h($movement['product_name'] ?? 'Unknown Product'); ?></strong>
+                                                    <?php if (!empty($movement['product_code'])): ?>
+                                                        <br><small class="text-muted"><?php echo h($movement['product_code']); ?></small>
+                                                    <?php endif; ?>
+                                                    <?php if (!empty($movement['barcode'])): ?>
+                                                        <br><small class="text-muted"><?php echo h($movement['barcode']); ?></small>
+                                                    <?php endif; ?>
+                                                </td>
+
+                                                <td>
+                                                    <span class="badge <?php echo $badgeClass; ?>">
+                                                        <?php echo h($type !== '' ? $type : 'N/A'); ?>
+                                                    </span>
+                                                </td>
+
+                                                <td><?php echo h($referenceText); ?></td>
+
+                                                <td class="text-success">
+                                                    <?php echo number_format((float)($movement['qty_in'] ?? 0), 3); ?>
+                                                    <?php if (!empty($movement['unit'])): ?>
+                                                        <small><?php echo h($movement['unit']); ?></small>
+                                                    <?php endif; ?>
+                                                </td>
+
+                                                <td class="text-danger">
+                                                    <?php echo number_format((float)($movement['qty_out'] ?? 0), 3); ?>
+                                                    <?php if (!empty($movement['unit'])): ?>
+                                                        <small><?php echo h($movement['unit']); ?></small>
+                                                    <?php endif; ?>
+                                                </td>
+
+                                                <td class="text-success"><?php echo number_format((float)($movement['weight_in'] ?? 0), 3); ?></td>
+                                                <td class="text-danger"><?php echo number_format((float)($movement['weight_out'] ?? 0), 3); ?></td>
+
+                                                <td><?php echo h($movement['remarks'] ?? ''); ?></td>
+                                                <td><?php echo h($movement['created_by_name'] ?? '-'); ?></td>
+                                            </tr>
+                                        <?php endforeach; ?>
+                                    <?php else: ?>
+                                        <tr>
+                                            <td colspan="11" class="text-center text-muted">No stock movements found.</td>
+                                        </tr>
+                                    <?php endif; ?>
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <?php if (empty($movements)): ?>
+                            <div class="alert alert-warning mt-3 mb-0">
+                                No entries are available in `stock_movements` table yet.
+                            </div>
+                        <?php endif; ?>
+                    </div>
+                </div>
 
         <?php include('includes/footer.php'); ?>
     </div>
 </main>
 
-<div class="toast-box" id="toastBox"></div>
-
 <?php include('includes/script.php'); ?>
 <script src="assets/js/script.js"></script>
 
-<script>
-(function () {
-    'use strict';
-
-    const apiUrl = 'api/stock-movements-list.php';
-    const state = {
-        page: 1,
-        limit: 50,
-        optionsLoaded: false
-    };
-
-    const currency = <?php echo json_encode((string)($_SESSION['currency_symbol'] ?? '₹')); ?>;
-
-    function escapeHtml(value) {
-        const div = document.createElement('div');
-        div.textContent = value == null ? '' : String(value);
-        return div.innerHTML;
-    }
-
-    function number(value, decimals = 3) {
-        const parsed = parseFloat(value);
-        return Number.isFinite(parsed) ? parsed.toFixed(decimals) : (0).toFixed(decimals);
-    }
-
-    function formatDate(value) {
-        if (!value) {
-            return '-';
-        }
-
-        const date = new Date(String(value).replace(' ', 'T'));
-
-        if (Number.isNaN(date.getTime())) {
-            return escapeHtml(value);
-        }
-
-        return date.toLocaleString('en-IN', {
-            day: '2-digit',
-            month: '2-digit',
-            year: 'numeric',
-            hour: '2-digit',
-            minute: '2-digit'
-        });
-    }
-
-    function showToast(message, type = 'info') {
-        const box = document.getElementById('toastBox');
-        const toast = document.createElement('div');
-        toast.className = 'app-toast toast-' + type;
-        toast.textContent = message;
-        box.appendChild(toast);
-
-        setTimeout(function () {
-            toast.remove();
-        }, 3500);
-    }
-
-    function movementBadge(type) {
-        const inward = ['Opening', 'Purchase', 'Sale Return', 'Old Silver Inward', 'Manual'];
-        const outward = ['Sale', 'Purchase Return', 'Damage'];
-
-        if (inward.includes(type)) {
-            return '<span class="movement-badge badge-in">' + escapeHtml(type) + '</span>';
-        }
-
-        if (outward.includes(type)) {
-            return '<span class="movement-badge badge-out">' + escapeHtml(type) + '</span>';
-        }
-
-        if (type === 'Adjustment') {
-            return '<span class="movement-badge badge-adjust">Adjustment</span>';
-        }
-
-        return '<span class="movement-badge badge-neutral">' + escapeHtml(type || 'N/A') + '</span>';
-    }
-
-    function getFilters() {
-        return {
-            search: document.getElementById('searchInput').value.trim(),
-            product_id: document.getElementById('productFilter').value,
-            movement_type: document.getElementById('movementType').value,
-            date_from: document.getElementById('dateFrom').value,
-            date_to: document.getElementById('dateTo').value,
-            page: state.page,
-            limit: state.limit
-        };
-    }
-
-    function buildQuery(params) {
-        const query = new URLSearchParams();
-
-        Object.entries(params).forEach(function ([key, value]) {
-            if (value !== '' && value !== null && value !== undefined) {
-                query.set(key, value);
-            }
-        });
-
-        return query.toString();
-    }
-
-    function renderOptions(products, movementTypes) {
-        if (state.optionsLoaded) {
-            return;
-        }
-
-        const productSelect = document.getElementById('productFilter');
-
-        products.forEach(function (product) {
-            const option = document.createElement('option');
-            option.value = product.id;
-            option.textContent = product.product_name +
-                (product.product_code ? ' - ' + product.product_code : '');
-            productSelect.appendChild(option);
-        });
-
-        const movementSelect = document.getElementById('movementType');
-
-        movementTypes.forEach(function (type) {
-            const option = document.createElement('option');
-            option.value = type;
-            option.textContent = type;
-            movementSelect.appendChild(option);
-        });
-
-        state.optionsLoaded = true;
-    }
-
-    function renderSummary(summary) {
-        document.getElementById('totalMovements').textContent = summary.total_movements || 0;
-        document.getElementById('totalQtyIn').textContent = number(summary.total_qty_in);
-        document.getElementById('totalQtyOut').textContent = number(summary.total_qty_out);
-        document.getElementById('totalWeightIn').textContent = number(summary.total_weight_in);
-        document.getElementById('netWeightChange').textContent = number(summary.net_weight_change);
-    }
-
-    function renderRows(rows, pagination) {
-        const tbody = document.getElementById('movementRows');
-
-        if (!rows.length) {
-            tbody.innerHTML =
-                '<tr><td colspan="13" class="loading-row">No stock movements found.</td></tr>';
-            return;
-        }
-
-        tbody.innerHTML = rows.map(function (row, index) {
-            const serial = ((pagination.page - 1) * pagination.limit) + index + 1;
-            const reference = row.reference_table || row.reference_id
-                ? escapeHtml(row.reference_table || '') +
-                  (row.reference_id ? ' #' + escapeHtml(row.reference_id) : '')
-                : '-';
-
-            return `
-                <tr>
-                    <td>${serial}</td>
-                    <td>${formatDate(row.movement_date)}</td>
-                    <td>
-                        <div class="product-name">${escapeHtml(row.product_name || 'Unknown Product')}</div>
-                        <div class="product-code">${escapeHtml(row.product_code || '')}</div>
-                        ${row.barcode
-                            ? '<div class="product-code">' + escapeHtml(row.barcode) + '</div>'
-                            : ''}
-                    </td>
-                    <td>${movementBadge(row.movement_type)}</td>
-                    <td>${reference}</td>
-                    <td class="text-success">${number(row.quantity_in)} ${escapeHtml(row.unit || '')}</td>
-                    <td class="text-danger">${number(row.quantity_out)} ${escapeHtml(row.unit || '')}</td>
-                    <td class="text-success">${number(row.weight_in)}</td>
-                    <td class="text-danger">${number(row.weight_out)}</td>
-                    <td>${currency}${number(row.rate, 2)}</td>
-                    <td>${currency}${number(row.value_amount, 2)}</td>
-                    <td>${escapeHtml(row.remarks || '-')}</td>
-                    <td>${escapeHtml(row.created_by_name || '-')}</td>
-                </tr>
-            `;
-        }).join('');
-    }
-
-    function renderPagination(pagination) {
-        const start = pagination.total === 0
-            ? 0
-            : ((pagination.page - 1) * pagination.limit) + 1;
-        const end = Math.min(pagination.page * pagination.limit, pagination.total);
-
-        document.getElementById('paginationInfo').textContent =
-            'Showing ' + start + '–' + end + ' of ' + pagination.total + ' records';
-
-        document.getElementById('prevBtn').disabled = pagination.page <= 1;
-        document.getElementById('nextBtn').disabled = pagination.page >= pagination.pages;
-    }
-
-    async function loadMovements() {
-        document.getElementById('movementRows').innerHTML =
-            '<tr><td colspan="13" class="loading-row">' +
-            '<i class="fa-solid fa-spinner fa-spin me-2"></i>Loading stock movements...' +
-            '</td></tr>';
-
-        try {
-            const response = await fetch(apiUrl + '?' + buildQuery(getFilters()), {
-                headers: {
-                    'Accept': 'application/json'
-                }
-            });
-
-            const payload = await response.json();
-
-            if (!response.ok || !payload.success) {
-                throw new Error(payload.message || 'Unable to load stock movements.');
-            }
-
-            renderOptions(payload.data.products || [], payload.data.movement_types || []);
-            renderSummary(payload.data.summary || {});
-            renderRows(payload.data.rows || [], payload.data.pagination);
-            renderPagination(payload.data.pagination);
-        } catch (error) {
-            document.getElementById('movementRows').innerHTML =
-                '<tr><td colspan="13" class="loading-row text-danger">' +
-                escapeHtml(error.message) +
-                '</td></tr>';
-
-            showToast(error.message, 'error');
-        }
-    }
-
-    document.getElementById('filterForm').addEventListener('submit', function (event) {
-        event.preventDefault();
-        state.page = 1;
-        loadMovements();
-    });
-
-    document.getElementById('resetBtn').addEventListener('click', function () {
-        document.getElementById('filterForm').reset();
-        state.page = 1;
-        loadMovements();
-    });
-
-    document.getElementById('limitSelect').addEventListener('change', function () {
-        state.limit = parseInt(this.value, 10) || 50;
-        state.page = 1;
-        loadMovements();
-    });
-
-    document.getElementById('prevBtn').addEventListener('click', function () {
-        if (state.page > 1) {
-            state.page--;
-            loadMovements();
-        }
-    });
-
-    document.getElementById('nextBtn').addEventListener('click', function () {
-        state.page++;
-        loadMovements();
-    });
-
-    loadMovements();
-})();
-</script>
 </body>
 </html>

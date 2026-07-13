@@ -175,6 +175,121 @@ foreach ($menuRows as $row) {
     }
 }
 
+
+/* -------------------------------------------------------
+   ENSURE INVENTORY SUBMENU OPTIONS
+   These options are added only when the same route is not
+   already present in the database-driven menu.
+------------------------------------------------------- */
+$inventoryRoutes = [
+    [
+        'menu_title' => 'Stock Summary',
+        'route_url' => 'stock-overview.php',
+        'icon_class' => 'fa-solid fa-chart-column',
+        'sort_order' => 10,
+    ],
+    [
+        'menu_title' => 'Stock Movements',
+        'route_url' => 'stock-movements.php',
+        'icon_class' => 'fa-solid fa-arrow-right-arrow-left',
+        'sort_order' => 20,
+    ],
+    [
+        'menu_title' => 'Stock Adjustment',
+        'route_url' => 'stock-adjustment.php',
+        'icon_class' => 'fa-solid fa-sliders',
+        'sort_order' => 30,
+    ],
+    [
+        'menu_title' => 'Old Silver Entry',
+        'route_url' => 'old-silver-entry.php',
+        'icon_class' => 'fa-solid fa-recycle',
+        'sort_order' => 40,
+    ],
+];
+
+$inventoryParentId = 0;
+
+foreach ($menuById as $menuId => $menuRow) {
+    $menuTitle = strtolower(trim((string)($menuRow['menu_title'] ?? '')));
+    $menuCode = strtolower(trim((string)($menuRow['menu_code'] ?? '')));
+    $routeUrl = strtolower(trim((string)($menuRow['route_url'] ?? '')));
+
+    if (
+        $menuTitle === 'inventory'
+        || $menuCode === 'inventory'
+        || $routeUrl === 'inventory.php'
+    ) {
+        $inventoryParentId = (int)$menuId;
+        break;
+    }
+}
+
+if ($inventoryParentId === 0) {
+    $virtualInventoryId = -1000;
+
+    $inventoryParent = [
+        'id' => $virtualInventoryId,
+        'business_id' => $businessId > 0 ? $businessId : null,
+        'parent_id' => null,
+        'menu_code' => 'inventory',
+        'menu_title' => 'Inventory',
+        'menu_type' => 'Menu',
+        'route_url' => '',
+        'icon_class' => 'fa-solid fa-boxes-stacked',
+        'sort_order' => 40,
+        'is_active' => 1,
+        'is_visible' => 1,
+        'open_in_new_tab' => 0,
+        'can_open' => 1,
+    ];
+
+    $menuById[$virtualInventoryId] = $inventoryParent;
+    $childrenByParent[0][] = $inventoryParent;
+    $inventoryParentId = $virtualInventoryId;
+}
+
+$existingInventoryRoutes = [];
+
+foreach (($childrenByParent[$inventoryParentId] ?? []) as $inventoryChild) {
+    $existingRoute = basename(
+        parse_url((string)($inventoryChild['route_url'] ?? ''), PHP_URL_PATH) ?: ''
+    );
+
+    if ($existingRoute !== '') {
+        $existingInventoryRoutes[strtolower($existingRoute)] = true;
+    }
+}
+
+$virtualChildId = -1100;
+
+foreach ($inventoryRoutes as $inventoryRoute) {
+    $routeFile = strtolower(
+        basename(parse_url($inventoryRoute['route_url'], PHP_URL_PATH) ?: '')
+    );
+
+    if (isset($existingInventoryRoutes[$routeFile])) {
+        continue;
+    }
+
+    $childrenByParent[$inventoryParentId][] = [
+        'id' => $virtualChildId--,
+        'business_id' => $businessId > 0 ? $businessId : null,
+        'parent_id' => $inventoryParentId,
+        'menu_code' => pathinfo($routeFile, PATHINFO_FILENAME),
+        'menu_title' => $inventoryRoute['menu_title'],
+        'menu_type' => 'Menu',
+        'route_url' => $inventoryRoute['route_url'],
+        'icon_class' => $inventoryRoute['icon_class'],
+        'sort_order' => $inventoryRoute['sort_order'],
+        'is_active' => 1,
+        'is_visible' => 1,
+        'open_in_new_tab' => 0,
+        'can_open' => 1,
+    ];
+}
+
+
 $rootMenus = $childrenByParent[0] ?? [];
 usort($rootMenus, static function (array $a, array $b): int {
     return [(int)$a['sort_order'], (int)$a['id']] <=> [(int)$b['sort_order'], (int)$b['id']];
