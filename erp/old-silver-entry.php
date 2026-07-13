@@ -13,7 +13,6 @@ $configCandidates = [
 ];
 
 $configLoaded = false;
-
 foreach ($configCandidates as $configFile) {
     if (is_file($configFile)) {
         require_once $configFile;
@@ -29,7 +28,6 @@ if (!$configLoaded || !isset($conn) || !($conn instanceof mysqli)) {
 mysqli_report(MYSQLI_REPORT_OFF);
 $conn->set_charset('utf8mb4');
 
-
 if (!function_exists('h')) {
     function h($value): string
     {
@@ -41,8 +39,8 @@ if (!function_exists('tableExists')) {
     function tableExists(mysqli $conn, string $table): bool
     {
         $table = $conn->real_escape_string($table);
-        $res = $conn->query("SHOW TABLES LIKE '{$table}'");
-        return $res && $res->num_rows > 0;
+        $result = $conn->query("SHOW TABLES LIKE '{$table}'");
+        return $result && $result->num_rows > 0;
     }
 }
 
@@ -51,55 +49,119 @@ if (!function_exists('hasColumn')) {
     {
         $table = $conn->real_escape_string($table);
         $column = $conn->real_escape_string($column);
-        $res = $conn->query("SHOW COLUMNS FROM `{$table}` LIKE '{$column}'");
-        return $res && $res->num_rows > 0;
+        $result = $conn->query("SHOW COLUMNS FROM `{$table}` LIKE '{$column}'");
+        return $result && $result->num_rows > 0;
     }
 }
 
-$pageTitle = 'Old Silver Entry';
-$page_title = 'Old Silver Entry';
-$currentPage = 'old-silver-entry';
+if (!function_exists('bindDynamic')) {
+    function bindDynamic(mysqli_stmt $stmt, string $types, array &$values): void
+    {
+        $params = [$types];
+        foreach ($values as $key => &$value) {
+            $params[] = &$value;
+        }
+        call_user_func_array([$stmt, 'bind_param'], $params);
+    }
+}
 
-/* -------------------------------------------------------
-   AUTH CHECK
-------------------------------------------------------- */
-if (!isset($_SESSION['user_id']) || (int)$_SESSION['user_id'] <= 0) {
-    header('Location: ../login.php');
+if (!function_exists('addAuditLogSafe')) {
+    function addAuditLogSafe(
+        mysqli $conn,
+        int $businessId,
+        int $branchId,
+        int $userId,
+        int $referenceId,
+        string $entryNo
+    ): void {
+        if (!tableExists($conn, 'audit_logs')) {
+            return;
+        }
+
+        $columns = [];
+        $placeholders = [];
+        $types = '';
+        $values = [];
+
+        $available = [
+            'business_id' => ['i', $businessId],
+            'branch_id' => ['i', $branchId],
+            'user_id' => ['i', $userId],
+            'module_code' => ['s', 'inventory.old-metal'],
+            'action_type' => ['s', 'Create'],
+            'reference_table' => ['s', 'old_metal_entries'],
+            'reference_id' => ['i', $referenceId],
+            'description' => ['s', 'Created old silver entry ' . $entryNo],
+            'ip_address' => ['s', (string)($_SERVER['REMOTE_ADDR'] ?? '')],
+            'user_agent' => ['s', (string)($_SERVER['HTTP_USER_AGENT'] ?? '')],
+        ];
+
+        foreach ($available as $column => [$type, $value]) {
+            if (hasColumn($conn, 'audit_logs', $column)) {
+                $columns[] = "`{$column}`";
+                $placeholders[] = '?';
+                $types .= $type;
+                $values[] = $value;
+            }
+        }
+
+        if (!$columns) {
+            return;
+        }
+
+        $stmt = $conn->prepare(
+            'INSERT INTO audit_logs (' . implode(',', $columns) . ')
+             VALUES (' . implode(',', $placeholders) . ')'
+        );
+
+        if (!$stmt) {
+            return;
+        }
+
+        bindDynamic($stmt, $types, $values);
+        $stmt->execute();
+        $stmt->close();
+    }
+}
+
+$userId = (int)($_SESSION['user_id'] ?? 0);
+$businessId = (int)($_SESSION['business_id'] ?? 0);
+$branchId = (int)($_SESSION['branch_id'] ?? $_SESSION['default_branch_id'] ?? 0);
+
+if ($userId <= 0) {
+    header('Location: login.php');
     exit;
 }
 
-$userId = (int)$_SESSION['user_id'];
-$businessId = (int)($_SESSION['business_id'] ?? 0);
-
-if ($businessId <= 0) {
-    die('Business session not found. Please login again.');
+if ($businessId <= 0 || $branchId <= 0) {
+    die('A valid business and branch must be selected.');
 }
 
-/* -------------------------------------------------------
-   ROLE / PERMISSION CHECK
-------------------------------------------------------- */
 $roleName = strtolower(trim((string)($_SESSION['role_name'] ?? '')));
 $roleCode = strtolower(trim((string)($_SESSION['role_code'] ?? '')));
-$userType = (string)($_SESSION['user_type'] ?? '');
-$sessionPermissions = $_SESSION['permissions'] ?? [];
+$userType = strtolower(trim((string)($_SESSION['user_type'] ?? '')));
+$permissions = $_SESSION['permissions'] ?? [];
 
-$allowedRoles = ['admin', 'manager', 'staff', 'sales'];
+$allowedRoles = [
+    'platform admin',
+    'super admin',
+    'admin',
+    'manager',
+    'staff',
+    'sales',
+    'billing',
+];
 
-$accessAllowed = (
-    $userType === 'Platform Admin'
-    || in_array($roleName, $allowedRoles, true)
+$accessAllowed = in_array($roleName, $allowedRoles, true)
     || in_array($roleCode, $allowedRoles, true)
-);
+    || in_array($userType, $allowedRoles, true);
 
-foreach (['perm.stock', 'perm.inventory', 'perm.old_silver'] as $permissionCode) {
+foreach (['perm.stock', 'perm.inventory', 'perm.old_metal', 'perm.old-metal'] as $permissionCode) {
+    $permission = $permissions[$permissionCode] ?? [];
     if (
-        isset($sessionPermissions[$permissionCode])
-        && (
-            (int)($sessionPermissions[$permissionCode]['can_open'] ?? 0) === 1
-            || (int)($sessionPermissions[$permissionCode]['can_view'] ?? 0) === 1
-            || (int)($sessionPermissions[$permissionCode]['can_create'] ?? 0) === 1
-            || (int)($sessionPermissions[$permissionCode]['can_edit'] ?? 0) === 1
-        )
+        (int)($permission['can_open'] ?? 0) === 1
+        || (int)($permission['can_view'] ?? 0) === 1
+        || (int)($permission['can_create'] ?? 0) === 1
     ) {
         $accessAllowed = true;
         break;
@@ -111,232 +173,148 @@ if (!$accessAllowed) {
     die('Access denied.');
 }
 
-/* -------------------------------------------------------
-   REQUIRED TABLES
-------------------------------------------------------- */
-if (!tableExists($conn, 'old_silver_entries')) {
-    die('Required table `old_silver_entries` not found. Please import the SQL first.');
+foreach (['old_metal_entries', 'old_metal_items', 'metals'] as $requiredTable) {
+    if (!tableExists($conn, $requiredTable)) {
+        die("Required table `{$requiredTable}` was not found in the current database.");
+    }
 }
 
-if (!tableExists($conn, 'old_silver_items')) {
-    die('Required table `old_silver_items` not found. Please import the SQL first.');
-}
-
-/* -------------------------------------------------------
-   FLASH
-------------------------------------------------------- */
-$success = '';
-$error = '';
-
-if (!empty($_SESSION['flash_success'])) {
-    $success = (string)$_SESSION['flash_success'];
-    unset($_SESSION['flash_success']);
-}
-
-if (!empty($_SESSION['flash_error'])) {
-    $error = (string)$_SESSION['flash_error'];
-    unset($_SESSION['flash_error']);
-}
-
-/* -------------------------------------------------------
-   HELPERS
-------------------------------------------------------- */
-function generateOldSilverEntryNo(mysqli $conn, int $businessId): string
+function generateOldMetalEntryNo(mysqli $conn, int $businessId, int $branchId): string
 {
     $prefix = 'OS' . date('ym');
+    $like = $prefix . '%';
 
-    $stmt = $conn->prepare("
-        SELECT entry_no
-        FROM old_silver_entries
-        WHERE business_id = ?
-          AND entry_no LIKE CONCAT(?, '%')
-        ORDER BY id DESC
-        LIMIT 1
-    ");
-
-    $lastNo = 0;
-
-    if ($stmt) {
-        $stmt->bind_param('is', $businessId, $prefix);
-        $stmt->execute();
-        $res = $stmt->get_result();
-
-        if ($res && ($row = $res->fetch_assoc())) {
-            $lastNo = (int)substr((string)$row['entry_no'], -4);
-        }
-
-        $stmt->close();
-    }
-
-    return $prefix . str_pad((string)($lastNo + 1), 4, '0', STR_PAD_LEFT);
-}
-
-function addAuditLogSafe(mysqli $conn, int $businessId, int $userId, string $module, string $action, int $refId, string $desc): void
-{
-    if (!tableExists($conn, 'audit_logs')) {
-        return;
-    }
-
-    $columns = [];
-    $placeholders = [];
-    $types = '';
-    $values = [];
-
-    if (hasColumn($conn, 'audit_logs', 'business_id')) {
-        $columns[] = 'business_id';
-        $placeholders[] = '?';
-        $types .= 'i';
-        $values[] = $businessId;
-    }
-
-    if (hasColumn($conn, 'audit_logs', 'user_id')) {
-        $columns[] = 'user_id';
-        $placeholders[] = '?';
-        $types .= 'i';
-        $values[] = $userId;
-    }
-
-    if (hasColumn($conn, 'audit_logs', 'module_name')) {
-        $columns[] = 'module_name';
-        $placeholders[] = '?';
-        $types .= 's';
-        $values[] = $module;
-    }
-
-    if (hasColumn($conn, 'audit_logs', 'action_type')) {
-        $columns[] = 'action_type';
-        $placeholders[] = '?';
-        $types .= 's';
-        $values[] = $action;
-    }
-
-    if (hasColumn($conn, 'audit_logs', 'reference_id')) {
-        $columns[] = 'reference_id';
-        $placeholders[] = '?';
-        $types .= 'i';
-        $values[] = $refId;
-    }
-
-    if (hasColumn($conn, 'audit_logs', 'description')) {
-        $columns[] = 'description';
-        $placeholders[] = '?';
-        $types .= 's';
-        $values[] = $desc;
-    }
-
-    if (hasColumn($conn, 'audit_logs', 'ip_address')) {
-        $columns[] = 'ip_address';
-        $placeholders[] = '?';
-        $types .= 's';
-        $values[] = (string)($_SERVER['REMOTE_ADDR'] ?? '');
-    }
-
-    if (hasColumn($conn, 'audit_logs', 'user_agent')) {
-        $columns[] = 'user_agent';
-        $placeholders[] = '?';
-        $types .= 's';
-        $values[] = (string)($_SERVER['HTTP_USER_AGENT'] ?? '');
-    }
-
-    if (empty($columns)) {
-        return;
-    }
-
-    $sql = "INSERT INTO audit_logs (" . implode(', ', $columns) . ") VALUES (" . implode(', ', $placeholders) . ")";
-    $stmt = $conn->prepare($sql);
+    $stmt = $conn->prepare(
+        "SELECT entry_no
+         FROM old_metal_entries
+         WHERE business_id = ?
+           AND branch_id = ?
+           AND entry_no LIKE ?
+         ORDER BY id DESC
+         LIMIT 1"
+    );
 
     if (!$stmt) {
-        return;
+        return $prefix . '0001';
     }
 
-    if ($types !== '') {
-        $bindValues = [];
-        $bindValues[] = $types;
-
-        foreach ($values as $k => $v) {
-            $bindValues[] = &$values[$k];
-        }
-
-        call_user_func_array([$stmt, 'bind_param'], $bindValues);
-    }
-
+    $stmt->bind_param('iis', $businessId, $branchId, $like);
     $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
     $stmt->close();
+
+    $next = 1;
+    if ($row && preg_match('/(\d+)$/', (string)$row['entry_no'], $match)) {
+        $next = (int)$match[1] + 1;
+    }
+
+    return $prefix . str_pad((string)$next, 4, '0', STR_PAD_LEFT);
 }
 
-function latestSilverRate(mysqli $conn, int $businessId): float
+function getSilverMetal(mysqli $conn, int $businessId): ?array
 {
-    if (tableExists($conn, 'metal_rates')) {
-        $stmt = $conn->prepare("
-            SELECT rate_per_gram
-            FROM metal_rates
-            WHERE business_id = ?
-              AND metal_type = 'Silver'
-            ORDER BY effective_date DESC, id DESC
-            LIMIT 1
-        ");
+    $stmt = $conn->prepare(
+        "SELECT id, metal_code, metal_name, default_purity
+         FROM metals
+         WHERE business_id = ?
+           AND is_active = 1
+           AND (
+                UPPER(metal_code) LIKE '%SILVER%'
+                OR UPPER(metal_name) LIKE '%SILVER%'
+           )
+         ORDER BY
+            CASE
+                WHEN UPPER(metal_code) IN ('SILVER','SILVER925') THEN 0
+                ELSE 1
+            END,
+            id
+         LIMIT 1"
+    );
 
-        if ($stmt) {
-            $stmt->bind_param('i', $businessId);
-            $stmt->execute();
-            $res = $stmt->get_result();
-
-            if ($res && ($row = $res->fetch_assoc())) {
-                $stmt->close();
-                return (float)$row['rate_per_gram'];
-            }
-
-            $stmt->close();
-        }
+    if (!$stmt) {
+        return null;
     }
 
-    if (tableExists($conn, 'silver_rate_history')) {
-        $stmt = $conn->prepare("
-            SELECT rate_per_gram
-            FROM silver_rate_history
-            WHERE business_id = ?
-            ORDER BY rate_date DESC, id DESC
-            LIMIT 1
-        ");
+    $stmt->bind_param('i', $businessId);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
 
-        if ($stmt) {
-            $stmt->bind_param('i', $businessId);
-            $stmt->execute();
-            $res = $stmt->get_result();
-
-            if ($res && ($row = $res->fetch_assoc())) {
-                $stmt->close();
-                return (float)$row['rate_per_gram'];
-            }
-
-            $stmt->close();
-        }
-    }
-
-    return 0.00;
+    return $row ?: null;
 }
 
-/* -------------------------------------------------------
-   CUSTOMERS
-------------------------------------------------------- */
-$customers = [];
+function getLatestSilverRate(
+    mysqli $conn,
+    int $businessId,
+    int $branchId,
+    int $metalId,
+    float $defaultPurity
+): float {
+    if (!tableExists($conn, 'metal_rates')) {
+        return 0.00;
+    }
 
+    $stmt = $conn->prepare(
+        "SELECT rate_per_gram
+         FROM metal_rates
+         WHERE business_id = ?
+           AND metal_id = ?
+           AND (branch_id = ? OR branch_id IS NULL)
+           AND is_current = 1
+         ORDER BY
+            CASE WHEN branch_id = ? THEN 0 ELSE 1 END,
+            ABS(purity - ?),
+            effective_from DESC,
+            id DESC
+         LIMIT 1"
+    );
+
+    if (!$stmt) {
+        return 0.00;
+    }
+
+    $stmt->bind_param('iiiid', $businessId, $metalId, $branchId, $branchId, $defaultPurity);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    return (float)($row['rate_per_gram'] ?? 0);
+}
+
+$silverMetal = getSilverMetal($conn, $businessId);
+
+if (!$silverMetal) {
+    die('Silver metal master was not found. Add an active Silver metal in the Metals master.');
+}
+
+$silverMetalId = (int)$silverMetal['id'];
+$defaultPurity = (float)($silverMetal['default_purity'] ?? 92.5);
+$defaultRate = getLatestSilverRate(
+    $conn,
+    $businessId,
+    $branchId,
+    $silverMetalId,
+    $defaultPurity
+);
+
+$customers = [];
 if (tableExists($conn, 'customers')) {
-    $stmt = $conn->prepare("
-        SELECT id, customer_name, mobile
-        FROM customers
-        WHERE business_id = ?
-          AND is_active = 1
-        ORDER BY customer_name ASC
-        LIMIT 500
-    ");
+    $stmt = $conn->prepare(
+        "SELECT id, customer_code, customer_name, mobile
+         FROM customers
+         WHERE business_id = ?
+           AND is_active = 1
+           AND (home_branch_id = ? OR home_branch_id IS NULL)
+         ORDER BY customer_name
+         LIMIT 500"
+    );
 
     if ($stmt) {
-        $stmt->bind_param('i', $businessId);
+        $stmt->bind_param('ii', $businessId, $branchId);
         $stmt->execute();
-        $res = $stmt->get_result();
+        $result = $stmt->get_result();
 
-        while ($res && ($row = $res->fetch_assoc())) {
+        while ($result && $row = $result->fetch_assoc()) {
             $customers[] = $row;
         }
 
@@ -344,48 +322,32 @@ if (tableExists($conn, 'customers')) {
     }
 }
 
-$defaultRate = latestSilverRate($conn, $businessId);
+$success = (string)($_SESSION['flash_success'] ?? '');
+$error = (string)($_SESSION['flash_error'] ?? '');
+unset($_SESSION['flash_success'], $_SESSION['flash_error']);
 
-/* -------------------------------------------------------
-   FORM DEFAULTS
-------------------------------------------------------- */
-$entryNo = generateOldSilverEntryNo($conn, $businessId);
+$entryNo = generateOldMetalEntryNo($conn, $businessId, $branchId);
 $entryDate = date('Y-m-d');
-$customerId = 0;
-$customerName = '';
-$customerMobile = '';
-$idProofType = '';
-$idProofNumber = '';
-$ratePerGram = $defaultRate;
-$deductionPercent = '0';
-$adjustmentType = 'Exchange';
-$linkedSaleId = '';
-$notes = '';
 
-/* -------------------------------------------------------
-   SAVE ENTRY - POST REDIRECT GET
-------------------------------------------------------- */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_old_silver'])) {
-    $entryNo = trim((string)($_POST['entry_no'] ?? generateOldSilverEntryNo($conn, $businessId)));
-    $entryDate = trim((string)($_POST['entry_date'] ?? date('Y-m-d')));
+    $entryNo = trim((string)($_POST['entry_no'] ?? ''));
+    $entryDate = trim((string)($_POST['entry_date'] ?? ''));
     $customerId = (int)($_POST['customer_id'] ?? 0);
     $customerName = trim((string)($_POST['customer_name'] ?? ''));
-    $customerMobile = trim((string)($_POST['customer_mobile'] ?? ''));
-    $idProofType = trim((string)($_POST['id_proof_type'] ?? ''));
-    $idProofNumber = trim((string)($_POST['id_proof_number'] ?? ''));
-    $ratePerGram = (float)($_POST['rate_per_gram'] ?? 0);
-    $deductionPercent = (float)($_POST['deduction_percent'] ?? 0);
-    $adjustmentType = trim((string)($_POST['adjustment_type'] ?? 'Exchange'));
-    $linkedSaleId = (int)($_POST['linked_sale_id'] ?? 0);
-    $notes = trim((string)($_POST['notes'] ?? ''));
+    $remarks = trim((string)($_POST['remarks'] ?? ''));
 
-    $itemNames = $_POST['item_name'] ?? [];
+    $descriptions = $_POST['description'] ?? [];
     $purities = $_POST['purity'] ?? [];
     $grossWeights = $_POST['gross_weight'] ?? [];
-    $lessWeights = $_POST['less_weight'] ?? [];
-    $remarksList = $_POST['item_remarks'] ?? [];
+    $stoneWeights = $_POST['stone_weight'] ?? [];
+    $deductionWeights = $_POST['deduction_weight'] ?? [];
+    $rates = $_POST['rate_per_gram'] ?? [];
 
     $errors = [];
+    $items = [];
+    $totalGrossWeight = 0.0;
+    $totalNetWeight = 0.0;
+    $totalValue = 0.0;
 
     if ($entryNo === '') {
         $errors[] = 'Entry number is required.';
@@ -399,97 +361,107 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_old_silver'])) {
         $errors[] = 'Customer name is required.';
     }
 
-    if ($ratePerGram <= 0) {
-        $errors[] = 'Rate per gram must be greater than zero.';
-    }
+    $rowCount = max(
+        count($descriptions),
+        count($purities),
+        count($grossWeights),
+        count($stoneWeights),
+        count($deductionWeights),
+        count($rates)
+    );
 
-    if ($deductionPercent < 0) {
-        $errors[] = 'Deduction percent cannot be negative.';
-    }
+    for ($index = 0; $index < $rowCount; $index++) {
+        $description = trim((string)($descriptions[$index] ?? 'Old Silver'));
+        $purity = is_numeric($purities[$index] ?? null)
+            ? (float)$purities[$index]
+            : $defaultPurity;
+        $grossWeight = is_numeric($grossWeights[$index] ?? null)
+            ? (float)$grossWeights[$index]
+            : 0.0;
+        $stoneWeight = is_numeric($stoneWeights[$index] ?? null)
+            ? (float)$stoneWeights[$index]
+            : 0.0;
+        $deductionWeight = is_numeric($deductionWeights[$index] ?? null)
+            ? (float)$deductionWeights[$index]
+            : 0.0;
+        $ratePerGram = is_numeric($rates[$index] ?? null)
+            ? (float)$rates[$index]
+            : 0.0;
 
-    if (!in_array($adjustmentType, ['Cash', 'Exchange', 'Pending'], true)) {
-        $adjustmentType = 'Exchange';
-    }
-
-    $items = [];
-    $totalGrossWeight = 0.000;
-    $totalLessWeight = 0.000;
-    $totalNetWeight = 0.000;
-
-    for ($i = 0; $i < count($itemNames); $i++) {
-        $itemName = trim((string)($itemNames[$i] ?? ''));
-        $purity = trim((string)($purities[$i] ?? ''));
-        $gross = is_numeric($grossWeights[$i] ?? null) ? (float)$grossWeights[$i] : 0.000;
-        $less = is_numeric($lessWeights[$i] ?? null) ? (float)$lessWeights[$i] : 0.000;
-        $itemRemarks = trim((string)($remarksList[$i] ?? ''));
-
-        if ($itemName === '' && $gross <= 0 && $less <= 0) {
+        if ($description === '' && $grossWeight <= 0) {
             continue;
         }
 
-        if ($itemName === '') {
-            $errors[] = 'Item name is required in row ' . ($i + 1) . '.';
+        if ($description === '') {
+            $errors[] = 'Description is required in item row ' . ($index + 1) . '.';
             continue;
         }
 
-        if ($gross <= 0) {
-            $errors[] = 'Gross weight must be greater than zero in row ' . ($i + 1) . '.';
+        if ($purity <= 0 || $purity > 100) {
+            $errors[] = 'Purity must be between 0 and 100 in item row ' . ($index + 1) . '.';
             continue;
         }
 
-        if ($less < 0) {
-            $errors[] = 'Less weight cannot be negative in row ' . ($i + 1) . '.';
+        if ($grossWeight <= 0) {
+            $errors[] = 'Gross weight must be greater than zero in item row ' . ($index + 1) . '.';
             continue;
         }
 
-        if ($less > $gross) {
-            $errors[] = 'Less weight cannot be greater than gross weight in row ' . ($i + 1) . '.';
+        if ($stoneWeight < 0 || $deductionWeight < 0) {
+            $errors[] = 'Stone and deduction weights cannot be negative in item row ' . ($index + 1) . '.';
             continue;
         }
 
-        $net = $gross - $less;
+        $netWeight = $grossWeight - $stoneWeight - $deductionWeight;
+
+        if ($netWeight <= 0) {
+            $errors[] = 'Net weight must be greater than zero in item row ' . ($index + 1) . '.';
+            continue;
+        }
+
+        if ($ratePerGram <= 0) {
+            $errors[] = 'Rate per gram must be greater than zero in item row ' . ($index + 1) . '.';
+            continue;
+        }
+
+        $valueAmount = $netWeight * $ratePerGram;
 
         $items[] = [
-            'item_name' => $itemName,
+            'description' => $description,
             'purity' => $purity,
-            'gross_weight' => $gross,
-            'less_weight' => $less,
-            'net_weight' => $net,
-            'remarks' => $itemRemarks
+            'gross_weight' => $grossWeight,
+            'stone_weight' => $stoneWeight,
+            'deduction_weight' => $deductionWeight,
+            'net_weight' => $netWeight,
+            'rate_per_gram' => $ratePerGram,
+            'value_amount' => $valueAmount,
         ];
 
-        $totalGrossWeight += $gross;
-        $totalLessWeight += $less;
-        $totalNetWeight += $net;
+        $totalGrossWeight += $grossWeight;
+        $totalNetWeight += $netWeight;
+        $totalValue += $valueAmount;
     }
 
-    if (empty($items)) {
-        $errors[] = 'Please add at least one old silver item.';
+    if (!$items) {
+        $errors[] = 'Please add at least one valid old silver item.';
     }
 
-    $grossAmount = $totalNetWeight * $ratePerGram;
-    $deductionAmount = ($grossAmount * $deductionPercent) / 100;
-    $finalAmount = $grossAmount - $deductionAmount;
+    if (!$errors) {
+        $stmt = $conn->prepare(
+            "SELECT id
+             FROM old_metal_entries
+             WHERE business_id = ?
+               AND entry_no = ?
+             LIMIT 1"
+        );
 
-    if ($finalAmount < 0) {
-        $finalAmount = 0;
-    }
-
-    if (empty($errors)) {
-        $stmt = $conn->prepare("
-            SELECT id
-            FROM old_silver_entries
-            WHERE business_id = ?
-              AND entry_no = ?
-            LIMIT 1
-        ");
-
-        if ($stmt) {
+        if (!$stmt) {
+            $errors[] = 'Unable to validate entry number: ' . $conn->error;
+        } else {
             $stmt->bind_param('is', $businessId, $entryNo);
             $stmt->execute();
-            $res = $stmt->get_result();
 
-            if ($res && $res->num_rows > 0) {
+            if ($stmt->get_result()->num_rows > 0) {
                 $errors[] = 'Entry number already exists.';
             }
 
@@ -497,131 +469,99 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_old_silver'])) {
         }
     }
 
-    if (!empty($errors)) {
+    if ($errors) {
         $_SESSION['flash_error'] = implode('<br>', array_map('h', $errors));
         header('Location: old-silver-entry.php');
         exit;
     }
 
     $customerIdDb = $customerId > 0 ? $customerId : null;
-    $linkedSaleIdDb = $linkedSaleId > 0 ? $linkedSaleId : null;
 
     $conn->begin_transaction();
 
     try {
-        $stmt = $conn->prepare("
-            INSERT INTO old_silver_entries
-            (
+        $stmt = $conn->prepare(
+            "INSERT INTO old_metal_entries (
                 business_id,
+                branch_id,
                 entry_no,
                 entry_date,
                 customer_id,
                 customer_name,
-                customer_mobile,
-                id_proof_type,
-                id_proof_number,
                 total_gross_weight,
-                total_less_weight,
                 total_net_weight,
-                rate_per_gram,
-                deduction_percent,
-                deduction_amount,
-                final_amount,
-                adjustment_type,
+                total_value,
                 linked_sale_id,
-                notes,
+                workflow_status,
+                remarks,
                 created_by
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ");
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'Posted', ?, ?)"
+        );
 
         if (!$stmt) {
-            throw new Exception('Failed to prepare old silver entry insert: ' . $conn->error);
+            throw new RuntimeException('Unable to prepare old metal entry insert: ' . $conn->error);
         }
 
-        /*
-            IMPORTANT FIX:
-            Old wrong type string:
-            ississssddddddsisii
-
-            Correct type string:
-            ississssdddddddsisi
-
-            Because:
-            final_amount = double
-            adjustment_type = string
-            linked_sale_id = integer
-            notes = string
-            created_by = integer
-        */
         $stmt->bind_param(
-            'ississssdddddddsisi',
+            'iissisdddsi',
             $businessId,
+            $branchId,
             $entryNo,
             $entryDate,
             $customerIdDb,
             $customerName,
-            $customerMobile,
-            $idProofType,
-            $idProofNumber,
             $totalGrossWeight,
-            $totalLessWeight,
             $totalNetWeight,
-            $ratePerGram,
-            $deductionPercent,
-            $deductionAmount,
-            $finalAmount,
-            $adjustmentType,
-            $linkedSaleIdDb,
-            $notes,
+            $totalValue,
+            $remarks,
             $userId
         );
 
         if (!$stmt->execute()) {
-            $stmtError = $stmt->error;
-            $stmt->close();
-            throw new Exception('Failed to save old silver entry: ' . $stmtError);
+            throw new RuntimeException('Failed to save old silver entry: ' . $stmt->error);
         }
 
-        $oldSilverEntryId = (int)$stmt->insert_id;
+        $entryId = (int)$stmt->insert_id;
         $stmt->close();
 
-        $itemStmt = $conn->prepare("
-            INSERT INTO old_silver_items
-            (
+        $itemStmt = $conn->prepare(
+            "INSERT INTO old_metal_items (
                 business_id,
-                old_silver_entry_id,
-                item_name,
+                old_metal_entry_id,
+                metal_id,
                 purity,
                 gross_weight,
-                less_weight,
+                stone_weight,
+                deduction_weight,
                 net_weight,
-                remarks
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ");
+                rate_per_gram,
+                value_amount,
+                description
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        );
 
         if (!$itemStmt) {
-            throw new Exception('Failed to prepare old silver item insert: ' . $conn->error);
+            throw new RuntimeException('Unable to prepare old metal item insert: ' . $conn->error);
         }
 
         foreach ($items as $item) {
             $itemStmt->bind_param(
-                'iissddds',
+                'iiiddddddds',
                 $businessId,
-                $oldSilverEntryId,
-                $item['item_name'],
+                $entryId,
+                $silverMetalId,
                 $item['purity'],
                 $item['gross_weight'],
-                $item['less_weight'],
+                $item['stone_weight'],
+                $item['deduction_weight'],
                 $item['net_weight'],
-                $item['remarks']
+                $item['rate_per_gram'],
+                $item['value_amount'],
+                $item['description']
             );
 
             if (!$itemStmt->execute()) {
-                $stmtError = $itemStmt->error;
-                $itemStmt->close();
-                throw new Exception('Failed to save old silver item: ' . $stmtError);
+                throw new RuntimeException('Failed to save old silver item: ' . $itemStmt->error);
             }
         }
 
@@ -630,65 +570,59 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_old_silver'])) {
         addAuditLogSafe(
             $conn,
             $businessId,
+            $branchId,
             $userId,
-            'Old Silver',
-            'Create',
-            $oldSilverEntryId,
-            'Created old silver entry ' . $entryNo . ' for ' . $customerName
+            $entryId,
+            $entryNo
         );
 
         $conn->commit();
 
         $_SESSION['flash_success'] = 'Old silver entry saved successfully. Entry No: ' . $entryNo;
-        header('Location: old-silver-entry.php?entry_id=' . $oldSilverEntryId);
+        header('Location: old-silver-entry.php?entry_id=' . $entryId);
         exit;
-    } catch (Throwable $e) {
+    } catch (Throwable $exception) {
         $conn->rollback();
-
-        $_SESSION['flash_error'] = $e->getMessage();
+        $_SESSION['flash_error'] = $exception->getMessage();
         header('Location: old-silver-entry.php');
         exit;
     }
 }
 
-/* -------------------------------------------------------
-   RECENT ENTRIES
-------------------------------------------------------- */
 $recentEntries = [];
-
-$stmt = $conn->prepare("
-    SELECT
+$stmt = $conn->prepare(
+    "SELECT
         id,
         entry_no,
         entry_date,
         customer_name,
-        customer_mobile,
+        total_gross_weight,
         total_net_weight,
-        rate_per_gram,
-        deduction_amount,
-        final_amount,
-        adjustment_type,
+        total_value,
+        workflow_status,
         created_at
-    FROM old_silver_entries
-    WHERE business_id = ?
-    ORDER BY id DESC
-    LIMIT 10
-");
+     FROM old_metal_entries
+     WHERE business_id = ?
+       AND branch_id = ?
+     ORDER BY id DESC
+     LIMIT 10"
+);
 
 if ($stmt) {
-    $stmt->bind_param('i', $businessId);
+    $stmt->bind_param('ii', $businessId, $branchId);
     $stmt->execute();
-    $res = $stmt->get_result();
+    $result = $stmt->get_result();
 
-    while ($res && ($row = $res->fetch_assoc())) {
+    while ($result && $row = $result->fetch_assoc()) {
         $recentEntries[] = $row;
     }
 
     $stmt->close();
 }
 
-
-
+$pageTitle = 'Old Silver Entry';
+$page_title = 'Old Silver Entry';
+$currentPage = 'old-silver-entry';
 
 $theme = [
     'primary_color' => '#d89416',
@@ -707,7 +641,7 @@ $theme = [
     'border_radius_px' => 14,
 ];
 
-if (function_exists('tableExists') && tableExists($conn, 'business_theme_settings')) {
+if (tableExists($conn, 'business_theme_settings')) {
     $themeStmt = $conn->prepare(
         'SELECT * FROM business_theme_settings WHERE business_id = ? LIMIT 1'
     );
@@ -718,708 +652,306 @@ if (function_exists('tableExists') && tableExists($conn, 'business_theme_setting
         $themeRow = $themeStmt->get_result()->fetch_assoc() ?: [];
         $themeStmt->close();
 
-        foreach ($theme as $themeKey => $themeDefault) {
-            if (isset($themeRow[$themeKey]) && $themeRow[$themeKey] !== '') {
-                $theme[$themeKey] = $themeRow[$themeKey];
+        foreach ($theme as $key => $defaultValue) {
+            if (isset($themeRow[$key]) && $themeRow[$key] !== '') {
+                $theme[$key] = $themeRow[$key];
             }
         }
     }
 }
 
 $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
-
 ?>
 <!doctype html>
 <html lang="en">
 <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title><?php echo h($businessName); ?> - Old Silver Entry</title>
-
-    <?php include('includes/links.php'); ?>
-
-    
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title><?php echo h($businessName); ?> - Old Silver Entry</title>
+<?php include 'includes/links.php'; ?>
 <style>
-:root {
-    --brand: <?php echo h($theme['primary_color']); ?>;
-    --brand-dark: <?php echo h($theme['primary_dark_color']); ?>;
-    --brand-soft: <?php echo h($theme['primary_soft_color']); ?>;
-    --page-bg: <?php echo h($theme['page_background']); ?>;
-    --card-bg: <?php echo h($theme['card_background']); ?>;
-    --text: <?php echo h($theme['text_color']); ?>;
-    --muted: <?php echo h($theme['muted_text_color']); ?>;
-    --line: <?php echo h($theme['border_color']); ?>;
-    --radius: <?php echo (int)$theme['border_radius_px']; ?>px;
+:root{
+    --brand:<?php echo h($theme['primary_color']); ?>;
+    --brand-dark:<?php echo h($theme['primary_dark_color']); ?>;
+    --page-bg:<?php echo h($theme['page_background']); ?>;
+    --card-bg:<?php echo h($theme['card_background']); ?>;
+    --text:<?php echo h($theme['text_color']); ?>;
+    --muted:<?php echo h($theme['muted_text_color']); ?>;
+    --line:<?php echo h($theme['border_color']); ?>;
+    --radius:<?php echo (int)$theme['border_radius_px']; ?>px;
 }
-
-body {
-    background: var(--page-bg);
-    color: var(--text);
-    font-family: <?php echo json_encode((string)$theme['font_family']); ?>, sans-serif;
-}
-
-.sidebar {
-    background: linear-gradient(
-        180deg,
-        <?php echo h($theme['sidebar_gradient_1']); ?>,
-        <?php echo h($theme['sidebar_gradient_2']); ?>,
-        <?php echo h($theme['sidebar_gradient_3']); ?>
-    ) !important;
-}
-
-.content-wrap {
-    padding-top: 16px;
-}
-
-.page-new-header {
-    margin-bottom: 14px;
-}
-
-.page-new-title {
-    margin: 0;
-    font-family: <?php echo json_encode((string)$theme['heading_font_family']); ?>, serif;
-    font-size: 24px;
-    line-height: 1.1;
-    font-weight: 800;
-}
-
-.page-new-subtitle {
-    margin-top: 4px;
-    color: var(--muted);
-    font-size: 11px;
-}
-
-.card,
-.report-card,
-.invoice-header-box {
-    background: var(--card-bg) !important;
-    border: 1px solid var(--line) !important;
-    border-radius: var(--radius) !important;
-    box-shadow: none !important;
-}
-
-.card-header,
-.report-card .card-header {
-    background: #f7f7f8 !important;
-    border-bottom: 1px solid var(--line) !important;
-    color: var(--text);
-    border-radius: var(--radius) var(--radius) 0 0 !important;
-}
-
-.card-body,
-.report-card .card-body {
-    padding: 14px !important;
-}
-
-h1, h2, h3, h4, h5, h6,
-.card-title {
-    color: var(--text);
-}
-
-.form-label {
-    margin-bottom: 5px;
-    color: var(--text);
-    font-size: 10px;
-    font-weight: 700;
-}
-
-.form-control,
-.form-select {
-    min-height: 40px;
-    border: 1px solid var(--line);
-    border-radius: 10px;
-    background: var(--card-bg);
-    color: var(--text);
-    font-size: 11px;
-    box-shadow: none;
-}
-
-.form-control:focus,
-.form-select:focus {
-    border-color: var(--brand);
-    box-shadow: 0 0 0 .18rem rgba(216, 148, 22, .12);
-}
-
-.btn {
-    min-height: 38px;
-    border-radius: 10px;
-    font-size: 11px;
-    font-weight: 700;
-}
-
-.btn-primary,
-.btn-info {
-    border-color: transparent !important;
-    background: linear-gradient(135deg, var(--brand), var(--brand-dark)) !important;
-    color: #fff !important;
-}
-
-.btn-secondary,
-.btn-light {
-    border: 1px solid var(--line) !important;
-    background: #fff !important;
-    color: var(--text) !important;
-}
-
-.table-responsive {
-    border-radius: 12px;
-}
-
-.table {
-    margin-bottom: 0;
-    color: var(--text);
-    font-size: 10px;
-}
-
-.table thead th {
-    padding: 12px 13px;
-    border-color: var(--line);
-    background: #f7f7f8;
-    color: #738096;
-    font-size: 9px;
-    font-weight: 800;
-    letter-spacing: .035em;
-    text-transform: uppercase;
-    white-space: nowrap;
-}
-
-.table tbody td {
-    padding: 11px 13px;
-    border-color: var(--line);
-    background: var(--card-bg) !important;
-    color: var(--text);
-    vertical-align: middle;
-}
-
-.badge {
-    border-radius: 999px;
-    padding: 5px 9px;
-    font-size: 9px;
-    font-weight: 800;
-}
-
-.alert {
-    border: 0;
-    border-radius: 10px;
-    font-size: 11px;
-}
-
-.text-muted {
-    color: var(--muted) !important;
-}
-
-.row > [class*="col-"] > .card {
-    height: calc(100% - 12px);
-    margin-bottom: 12px;
-}
-
-body.dark-mode,
-body[data-theme="dark"],
-html.dark-mode body,
-html[data-theme="dark"] body {
-    --page-bg: #0f151b;
-    --card-bg: #182129;
-    --text: #f3f6f8;
-    --muted: #9aa7b3;
-    --line: #2c3944;
-}
-
-@media (max-width: 767px) {
-    .content-wrap {
-        padding-left: 10px;
-        padding-right: 10px;
-    }
-}
-
-@media print {
-    .sidebar,
-    .app-nav,
-    .footer,
-    .no-print {
-        display: none !important;
-    }
-
-    .app-main {
-        margin-left: 0 !important;
-    }
-
-    .content-wrap {
-        padding: 0 !important;
-    }
-
-    .table-responsive {
-        overflow: visible !important;
-    }
-}
+body{background:var(--page-bg);color:var(--text);font-family:<?php echo json_encode((string)$theme['font_family']); ?>,sans-serif}
+.sidebar{background:linear-gradient(180deg,<?php echo h($theme['sidebar_gradient_1']); ?>,<?php echo h($theme['sidebar_gradient_2']); ?>,<?php echo h($theme['sidebar_gradient_3']); ?>)!important}
+.page-header{margin-bottom:14px}.page-title{margin:0;font-family:<?php echo json_encode((string)$theme['heading_font_family']); ?>,serif;font-size:22px;font-weight:800}.page-subtitle{margin-top:4px;color:var(--muted);font-size:10px}
+.card{background:var(--card-bg)!important;border:1px solid var(--line)!important;border-radius:var(--radius)!important;box-shadow:none!important}
+.card-header{background:color-mix(in srgb,var(--muted) 6%,var(--card-bg))!important;border-bottom:1px solid var(--line)!important}.card-body{padding:14px!important}
+.form-label{margin-bottom:5px;font-size:10px;font-weight:700}.form-control,.form-select{min-height:39px;border:1px solid var(--line);border-radius:10px;background:var(--card-bg);color:var(--text);font-size:10px}.form-control:focus,.form-select:focus{border-color:var(--brand);box-shadow:0 0 0 .18rem rgba(216,148,22,.12)}
+.btn{min-height:37px;border-radius:10px;font-size:10px;font-weight:700}.btn-primary{border-color:transparent!important;background:linear-gradient(135deg,var(--brand),var(--brand-dark))!important}.table{margin-bottom:0;color:var(--text);font-size:10px}.table thead th{padding:10px 11px;background:color-mix(in srgb,var(--muted) 6%,var(--card-bg));color:var(--muted);font-size:9px;text-transform:uppercase;white-space:nowrap}.table tbody td{padding:10px 11px;background:var(--card-bg)!important;color:var(--text);vertical-align:middle}
+.alert{border:0;border-radius:10px;font-size:10px}.text-muted{color:var(--muted)!important}
+body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark"] body{--page-bg:#0f151b;--card-bg:#182129;--text:#f3f6f8;--muted:#9aa7b3;--line:#2c3944}
+@media(max-width:767px){.content-wrap{padding-left:10px;padding-right:10px}}
 </style>
-
-    
 </head>
-
 <body>
-<?php include('includes/sidebar.php'); ?>
+<?php include 'includes/sidebar.php'; ?>
 
 <main class="app-main">
-    <?php include('includes/nav.php'); ?>
+<?php include 'includes/nav.php'; ?>
 
-    <div class="content-wrap">
-        <div class="page-new-header">
-            <h1 class="page-new-title">Old Silver Entry</h1>
-            <div class="page-new-subtitle">
-                <?php echo h($businessName); ?> &nbsp;•&nbsp; Inventory
-            </div>
+<div class="content-wrap">
+    <div class="page-header">
+        <h1 class="page-title">Old Silver Entry</h1>
+        <div class="page-subtitle"><?php echo h($businessName); ?> · Inventory</div>
+    </div>
+
+    <?php if ($success !== ''): ?>
+        <div class="alert alert-success alert-dismissible fade show">
+            <?php echo h($success); ?>
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
         </div>
+    <?php endif; ?>
 
-        
+    <?php if ($error !== ''): ?>
+        <div class="alert alert-danger alert-dismissible fade show">
+            <?php echo $error; ?>
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        </div>
+    <?php endif; ?>
 
-                <div class="row">
-                    <div class="col-12">
-                        <div class="page-title-box d-sm-flex align-items-center justify-content-between">
-                            <h4 class="mb-sm-0">Old Silver Entry</h4>
-                            <div class="page-title-right">
-                                <ol class="breadcrumb m-0">
-                                    <li class="breadcrumb-item"><a href="index.php">Dashboard</a></li>
-                                    <li class="breadcrumb-item active">Old Silver Entry</li>
-                                </ol>
+    <form method="post" id="oldSilverForm">
+        <div class="row g-3">
+            <div class="col-xl-8">
+                <div class="card mb-3">
+                    <div class="card-header"><strong>Customer Details</strong></div>
+                    <div class="card-body">
+                        <div class="row g-3">
+                            <div class="col-md-4">
+                                <label class="form-label">Entry No *</label>
+                                <input type="text" name="entry_no" class="form-control" value="<?php echo h($entryNo); ?>" required>
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label">Entry Date *</label>
+                                <input type="date" name="entry_date" class="form-control" value="<?php echo h($entryDate); ?>" required>
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label">Silver Metal</label>
+                                <input type="text" class="form-control" value="<?php echo h($silverMetal['metal_name']); ?>" readonly>
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label">Existing Customer</label>
+                                <select name="customer_id" id="customer_id" class="form-select">
+                                    <option value="">Walk-in / New Customer</option>
+                                    <?php foreach ($customers as $customer): ?>
+                                        <option
+                                            value="<?php echo (int)$customer['id']; ?>"
+                                            data-name="<?php echo h($customer['customer_name']); ?>"
+                                        >
+                                            <?php echo h(
+                                                ($customer['customer_code'] ?? '') . ' - ' .
+                                                $customer['customer_name'] .
+                                                (!empty($customer['mobile']) ? ' - ' . $customer['mobile'] : '')
+                                            ); ?>
+                                        </option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label">Customer Name *</label>
+                                <input type="text" name="customer_name" id="customer_name" class="form-control" required>
+                            </div>
+                            <div class="col-12">
+                                <label class="form-label">Remarks</label>
+                                <textarea name="remarks" class="form-control" rows="2"></textarea>
                             </div>
                         </div>
                     </div>
                 </div>
 
-                <?php if ($success !== ''): ?>
-                    <div class="alert alert-success alert-dismissible fade show" role="alert">
-                        <i class="fas fa-check-circle"></i> <?php echo h($success); ?>
-                        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                <div class="card mb-3">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <strong>Old Silver Items</strong>
+                        <button type="button" class="btn btn-sm btn-primary" onclick="addItemRow()">Add Item</button>
                     </div>
-                <?php endif; ?>
-
-                <?php if ($error !== ''): ?>
-                    <div class="alert alert-danger alert-dismissible fade show" role="alert">
-                        <i class="fas fa-exclamation-circle"></i> <?php echo $error; ?>
-                        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-                    </div>
-                <?php endif; ?>
-
-                <form method="post" action="old-silver-entry.php" id="oldSilverForm">
-                    <div class="row">
-                        <div class="col-xl-8">
-
-                            <div class="card">
-                                <div class="card-header">
-                                    <h5 class="card-title mb-0">
-                                        <i class="fas fa-user"></i> Customer Details
-                                    </h5>
-                                </div>
-
-                                <div class="card-body">
-                                    <div class="row g-3">
-                                        <div class="col-md-4">
-                                            <label class="form-label">Entry No <span class="text-danger">*</span></label>
-                                            <input type="text" name="entry_no" class="form-control" value="<?php echo h($entryNo); ?>" required>
-                                        </div>
-
-                                        <div class="col-md-4">
-                                            <label class="form-label">Entry Date <span class="text-danger">*</span></label>
-                                            <input type="date" name="entry_date" class="form-control" value="<?php echo h($entryDate); ?>" required>
-                                        </div>
-
-                                        <div class="col-md-4">
-                                            <label class="form-label">Adjustment Type</label>
-                                            <select name="adjustment_type" class="form-select">
-                                                <option value="Cash">Cash</option>
-                                                <option value="Exchange" selected>Exchange</option>
-                                                <option value="Pending">Pending</option>
-                                            </select>
-                                        </div>
-
-                                        <div class="col-md-6">
-                                            <label class="form-label">Existing Customer</label>
-                                            <select name="customer_id" id="customer_id" class="form-select">
-                                                <option value="">Walk-in / New Customer</option>
-                                                <?php foreach ($customers as $cust): ?>
-                                                    <option
-                                                        value="<?php echo (int)$cust['id']; ?>"
-                                                        data-name="<?php echo h($cust['customer_name'] ?? ''); ?>"
-                                                        data-mobile="<?php echo h($cust['mobile'] ?? ''); ?>"
-                                                    >
-                                                        <?php echo h(($cust['customer_name'] ?? '') . (!empty($cust['mobile']) ? ' - ' . $cust['mobile'] : '')); ?>
-                                                    </option>
-                                                <?php endforeach; ?>
-                                            </select>
-                                        </div>
-
-                                        <div class="col-md-6">
-                                            <label class="form-label">Customer Name <span class="text-danger">*</span></label>
-                                            <input type="text" name="customer_name" id="customer_name" class="form-control" required>
-                                        </div>
-
-                                        <div class="col-md-4">
-                                            <label class="form-label">Mobile</label>
-                                            <input type="text" name="customer_mobile" id="customer_mobile" class="form-control">
-                                        </div>
-
-                                        <div class="col-md-4">
-                                            <label class="form-label">ID Proof Type</label>
-                                            <select name="id_proof_type" class="form-select">
-                                                <option value="">Select</option>
-                                                <option value="Aadhaar">Aadhaar</option>
-                                                <option value="PAN">PAN</option>
-                                                <option value="Voter ID">Voter ID</option>
-                                                <option value="Driving License">Driving License</option>
-                                                <option value="Other">Other</option>
-                                            </select>
-                                        </div>
-
-                                        <div class="col-md-4">
-                                            <label class="form-label">ID Proof Number</label>
-                                            <input type="text" name="id_proof_number" class="form-control">
-                                        </div>
-
-                                        <div class="col-md-12">
-                                            <label class="form-label">Notes</label>
-                                            <textarea name="notes" class="form-control" rows="2"></textarea>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div class="card">
-                                <div class="card-header d-flex justify-content-between align-items-center">
-                                    <h5 class="card-title mb-0">
-                                        <i class="fas fa-ring"></i> Old Silver Items
-                                    </h5>
-                                    <button type="button" class="btn btn-sm btn-primary" onclick="addItemRow()">
-                                        <i class="fas fa-plus"></i> Add Item
-                                    </button>
-                                </div>
-
-                                <div class="card-body">
-                                    <div class="table-responsive">
-                                        <table class="table table-bordered align-middle mb-0" id="itemsTable">
-                                            <thead>
-                                                <tr>
-                                                    <th style="min-width: 180px;">Item Name</th>
-                                                    <th style="min-width: 100px;">Purity</th>
-                                                    <th style="min-width: 120px;">Gross Wt</th>
-                                                    <th style="min-width: 120px;">Less Wt</th>
-                                                    <th style="min-width: 120px;">Net Wt</th>
-                                                    <th style="min-width: 160px;">Remarks</th>
-                                                    <th width="60">Action</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody id="itemsBody">
-                                                <tr>
-                                                    <td>
-                                                        <input type="text" name="item_name[]" class="form-control" placeholder="Item name" required>
-                                                    </td>
-                                                    <td>
-                                                        <input type="text" name="purity[]" class="form-control" value="925">
-                                                    </td>
-                                                    <td>
-                                                        <input type="number" step="0.001" min="0" name="gross_weight[]" class="form-control gross-weight" value="0" oninput="calculateTotals()" required>
-                                                    </td>
-                                                    <td>
-                                                        <input type="number" step="0.001" min="0" name="less_weight[]" class="form-control less-weight" value="0" oninput="calculateTotals()">
-                                                    </td>
-                                                    <td>
-                                                        <input type="number" step="0.001" name="net_weight_display[]" class="form-control net-weight" value="0.000" readonly>
-                                                    </td>
-                                                    <td>
-                                                        <input type="text" name="item_remarks[]" class="form-control" placeholder="Remarks">
-                                                    </td>
-                                                    <td class="text-center">
-                                                        <button type="button" class="btn btn-sm btn-danger" onclick="removeItemRow(this)">
-                                                            <i class="fas fa-trash"></i>
-                                                        </button>
-                                                    </td>
-                                                </tr>
-                                            </tbody>
-                                        </table>
-                                    </div>
-
-                                    <small class="text-muted d-block mt-2">
-                                        Net weight is calculated automatically as Gross Weight - Less Weight.
-                                    </small>
-                                </div>
-                            </div>
-
-                        </div>
-
-                        <div class="col-xl-4">
-
-                            <div class="card">
-                                <div class="card-header">
-                                    <h5 class="card-title mb-0">
-                                        <i class="fas fa-calculator"></i> Calculation
-                                    </h5>
-                                </div>
-
-                                <div class="card-body">
-                                    <div class="mb-3">
-                                        <label class="form-label">Rate Per Gram ₹ <span class="text-danger">*</span></label>
-                                        <input type="number" step="0.01" min="0" name="rate_per_gram" id="rate_per_gram" class="form-control" value="<?php echo h(number_format((float)$ratePerGram, 2, '.', '')); ?>" oninput="calculateTotals()" required>
-                                    </div>
-
-                                    <div class="mb-3">
-                                        <label class="form-label">Deduction %</label>
-                                        <input type="number" step="0.01" min="0" name="deduction_percent" id="deduction_percent" class="form-control" value="0" oninput="calculateTotals()">
-                                    </div>
-
-                                    <div class="table-responsive">
-                                        <table class="table table-bordered mb-0">
-                                            <tr>
-                                                <th>Total Gross Weight</th>
-                                                <td class="text-end"><span id="total_gross">0.000</span> g</td>
-                                            </tr>
-                                            <tr>
-                                                <th>Total Less Weight</th>
-                                                <td class="text-end"><span id="total_less">0.000</span> g</td>
-                                            </tr>
-                                            <tr>
-                                                <th>Total Net Weight</th>
-                                                <td class="text-end"><strong><span id="total_net">0.000</span> g</strong></td>
-                                            </tr>
-                                            <tr>
-                                                <th>Gross Amount</th>
-                                                <td class="text-end">₹<span id="gross_amount">0.00</span></td>
-                                            </tr>
-                                            <tr>
-                                                <th>Deduction Amount</th>
-                                                <td class="text-end text-danger">₹<span id="deduction_amount">0.00</span></td>
-                                            </tr>
-                                            <tr>
-                                                <th>Final Amount</th>
-                                                <td class="text-end text-success">
-                                                    <strong>₹<span id="final_amount">0.00</span></strong>
-                                                </td>
-                                            </tr>
-                                        </table>
-                                    </div>
-
-                                    <div class="d-grid gap-2 mt-3">
-                                        <button type="submit" name="save_old_silver" value="1" class="btn btn-primary">
-                                            <i class="fas fa-save"></i> Save Old Silver Entry
-                                        </button>
-
-                                        <a href="old-silver-entry.php" class="btn btn-secondary">
-                                            <i class="fas fa-sync-alt"></i> Reset
-                                        </a>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div class="card">
-                                <div class="card-header">
-                                    <h5 class="card-title mb-0">
-                                        <i class="fas fa-info-circle"></i> Notes
-                                    </h5>
-                                </div>
-
-                                <div class="card-body">
-                                    <ul class="mb-0 ps-3">
-                                        <li>Entry number is auto-generated but editable.</li>
-                                        <li>Final amount = Net Weight × Rate - Deduction.</li>
-                                        <li>Use Exchange if the value is adjusted against a sale bill.</li>
-                                        <li>Use Cash if old silver amount is paid directly.</li>
-                                    </ul>
-                                </div>
-                            </div>
-
-                        </div>
-                    </div>
-                </form>
-
-                <div class="card">
-                    <div class="card-header">
-                        <h5 class="card-title mb-0">
-                            <i class="fas fa-history"></i> Recent Old Silver Entries
-                        </h5>
-                    </div>
-
                     <div class="card-body">
                         <div class="table-responsive">
-                            <table class="table table-bordered table-striped align-middle mb-0">
+                            <table class="table table-bordered align-middle" id="itemsTable">
                                 <thead>
-                                    <tr>
-                                        <th>#</th>
-                                        <th>Entry No</th>
-                                        <th>Date</th>
-                                        <th>Customer</th>
-                                        <th>Net Weight</th>
-                                        <th>Rate</th>
-                                        <th>Deduction</th>
-                                        <th>Final Amount</th>
-                                        <th>Type</th>
-                                    </tr>
+                                <tr>
+                                    <th>Description</th>
+                                    <th>Purity %</th>
+                                    <th>Gross Wt</th>
+                                    <th>Stone Wt</th>
+                                    <th>Deduction Wt</th>
+                                    <th>Net Wt</th>
+                                    <th>Rate/g</th>
+                                    <th>Value</th>
+                                    <th></th>
+                                </tr>
                                 </thead>
-                                <tbody>
-                                    <?php if (!empty($recentEntries)): ?>
-                                        <?php foreach ($recentEntries as $index => $row): ?>
-                                            <tr>
-                                                <td><?php echo $index + 1; ?></td>
-                                                <td><strong><?php echo h($row['entry_no']); ?></strong></td>
-                                                <td><?php echo !empty($row['entry_date']) ? date('d-m-Y', strtotime($row['entry_date'])) : '-'; ?></td>
-                                                <td>
-                                                    <?php echo h($row['customer_name']); ?>
-                                                    <?php if (!empty($row['customer_mobile'])): ?>
-                                                        <br><small class="text-muted"><?php echo h($row['customer_mobile']); ?></small>
-                                                    <?php endif; ?>
-                                                </td>
-                                                <td><?php echo number_format((float)$row['total_net_weight'], 3); ?> g</td>
-                                                <td>₹<?php echo number_format((float)$row['rate_per_gram'], 2); ?></td>
-                                                <td>₹<?php echo number_format((float)$row['deduction_amount'], 2); ?></td>
-                                                <td><strong>₹<?php echo number_format((float)$row['final_amount'], 2); ?></strong></td>
-                                                <td>
-                                                    <?php
-                                                    $type = trim((string)($row['adjustment_type'] ?? ''));
-
-                                                    /*
-                                                       For old records already saved with blank type
-                                                       because of the wrong bind_param, show Exchange instead of empty.
-                                                    */
-                                                    if ($type === '') {
-                                                        $type = 'Exchange';
-                                                    }
-
-                                                    $badge = 'secondary';
-
-                                                    if ($type === 'Cash') {
-                                                        $badge = 'success';
-                                                    } elseif ($type === 'Exchange') {
-                                                        $badge = 'primary';
-                                                    } elseif ($type === 'Pending') {
-                                                        $badge = 'warning';
-                                                    }
-                                                    ?>
-                                                    <span class="badge bg-<?php echo h($badge); ?>"><?php echo h($type); ?></span>
-                                                </td>
-                                            </tr>
-                                        <?php endforeach; ?>
-                                    <?php else: ?>
-                                        <tr>
-                                            <td colspan="9" class="text-center text-muted">No old silver entries found.</td>
-                                        </tr>
-                                    <?php endif; ?>
+                                <tbody id="itemsBody">
+                                <tr>
+                                    <td><input type="text" name="description[]" class="form-control" value="Old Silver" required></td>
+                                    <td><input type="number" step="0.0001" min="0.0001" max="100" name="purity[]" class="form-control purity" value="<?php echo h(number_format($defaultPurity, 4, '.', '')); ?>" required></td>
+                                    <td><input type="number" step="0.001" min="0" name="gross_weight[]" class="form-control gross-weight" value="0.000" required></td>
+                                    <td><input type="number" step="0.001" min="0" name="stone_weight[]" class="form-control stone-weight" value="0.000"></td>
+                                    <td><input type="number" step="0.001" min="0" name="deduction_weight[]" class="form-control deduction-weight" value="0.000"></td>
+                                    <td><input type="text" class="form-control net-weight" value="0.000" readonly></td>
+                                    <td><input type="number" step="0.01" min="0" name="rate_per_gram[]" class="form-control rate" value="<?php echo h(number_format($defaultRate, 2, '.', '')); ?>" required></td>
+                                    <td><input type="text" class="form-control value-amount" value="0.00" readonly></td>
+                                    <td><button type="button" class="btn btn-sm btn-danger" onclick="removeItemRow(this)">×</button></td>
+                                </tr>
                                 </tbody>
                             </table>
                         </div>
                     </div>
                 </div>
+            </div>
 
-        <?php include('includes/footer.php'); ?>
+            <div class="col-xl-4">
+                <div class="card mb-3">
+                    <div class="card-header"><strong>Calculation</strong></div>
+                    <div class="card-body">
+                        <table class="table table-bordered">
+                            <tr><th>Total Gross Weight</th><td class="text-end"><span id="totalGross">0.000</span> g</td></tr>
+                            <tr><th>Total Net Weight</th><td class="text-end"><strong><span id="totalNet">0.000</span> g</strong></td></tr>
+                            <tr><th>Total Value</th><td class="text-end"><strong>₹<span id="totalValue">0.00</span></strong></td></tr>
+                        </table>
+
+                        <div class="d-grid gap-2 mt-3">
+                            <button type="submit" name="save_old_silver" value="1" class="btn btn-primary">
+                                Save Old Silver Entry
+                            </button>
+                            <a href="old-silver-entry.php" class="btn btn-secondary">Reset</a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </form>
+
+    <div class="card">
+        <div class="card-header"><strong>Recent Old Silver Entries</strong></div>
+        <div class="card-body">
+            <div class="table-responsive">
+                <table class="table table-bordered">
+                    <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Entry No</th>
+                        <th>Date</th>
+                        <th>Customer</th>
+                        <th>Gross Weight</th>
+                        <th>Net Weight</th>
+                        <th>Total Value</th>
+                        <th>Status</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    <?php if ($recentEntries): ?>
+                        <?php foreach ($recentEntries as $index => $row): ?>
+                            <tr>
+                                <td><?php echo $index + 1; ?></td>
+                                <td><strong><?php echo h($row['entry_no']); ?></strong></td>
+                                <td><?php echo h(date('d-m-Y', strtotime($row['entry_date']))); ?></td>
+                                <td><?php echo h($row['customer_name']); ?></td>
+                                <td><?php echo number_format((float)$row['total_gross_weight'], 3); ?> g</td>
+                                <td><?php echo number_format((float)$row['total_net_weight'], 3); ?> g</td>
+                                <td>₹<?php echo number_format((float)$row['total_value'], 2); ?></td>
+                                <td><?php echo h($row['workflow_status']); ?></td>
+                            </tr>
+                        <?php endforeach; ?>
+                    <?php else: ?>
+                        <tr><td colspan="8" class="text-center text-muted">No old silver entries found.</td></tr>
+                    <?php endif; ?>
+                    </tbody>
+                </table>
+            </div>
+        </div>
     </div>
+
+    <?php include 'includes/footer.php'; ?>
+</div>
 </main>
 
-<?php include('includes/script.php'); ?>
+<?php include 'includes/script.php'; ?>
 <script src="assets/js/script.js"></script>
 <script>
-document.addEventListener('DOMContentLoaded', function () {
-    const customerSelect = document.getElementById('customer_id');
+(function(){
+    'use strict';
 
-    if (customerSelect) {
-        customerSelect.addEventListener('change', function () {
-            const selected = this.options[this.selectedIndex];
+    const defaultPurity=<?php echo json_encode($defaultPurity); ?>;
+    const defaultRate=<?php echo json_encode($defaultRate); ?>;
 
-            if (selected && selected.value) {
-                document.getElementById('customer_name').value = selected.getAttribute('data-name') || '';
-                document.getElementById('customer_mobile').value = selected.getAttribute('data-mobile') || '';
-            }
+    function number(value){
+        const parsed=parseFloat(value);
+        return Number.isFinite(parsed)?parsed:0;
+    }
+
+    function calculateTotals(){
+        let totalGross=0;
+        let totalNet=0;
+        let totalValue=0;
+
+        document.querySelectorAll('#itemsBody tr').forEach(function(row){
+            const gross=number(row.querySelector('.gross-weight')?.value);
+            const stone=number(row.querySelector('.stone-weight')?.value);
+            const deduction=number(row.querySelector('.deduction-weight')?.value);
+            const rate=number(row.querySelector('.rate')?.value);
+            const net=Math.max(gross-stone-deduction,0);
+            const value=net*rate;
+
+            row.querySelector('.net-weight').value=net.toFixed(3);
+            row.querySelector('.value-amount').value=value.toFixed(2);
+
+            totalGross+=gross;
+            totalNet+=net;
+            totalValue+=value;
         });
+
+        document.getElementById('totalGross').textContent=totalGross.toFixed(3);
+        document.getElementById('totalNet').textContent=totalNet.toFixed(3);
+        document.getElementById('totalValue').textContent=totalValue.toFixed(2);
     }
 
-    calculateTotals();
-});
+    window.addItemRow=function(){
+        const row=document.createElement('tr');
+        row.innerHTML=`
+            <td><input type="text" name="description[]" class="form-control" value="Old Silver" required></td>
+            <td><input type="number" step="0.0001" min="0.0001" max="100" name="purity[]" class="form-control purity" value="${Number(defaultPurity).toFixed(4)}" required></td>
+            <td><input type="number" step="0.001" min="0" name="gross_weight[]" class="form-control gross-weight" value="0.000" required></td>
+            <td><input type="number" step="0.001" min="0" name="stone_weight[]" class="form-control stone-weight" value="0.000"></td>
+            <td><input type="number" step="0.001" min="0" name="deduction_weight[]" class="form-control deduction-weight" value="0.000"></td>
+            <td><input type="text" class="form-control net-weight" value="0.000" readonly></td>
+            <td><input type="number" step="0.01" min="0" name="rate_per_gram[]" class="form-control rate" value="${Number(defaultRate).toFixed(2)}" required></td>
+            <td><input type="text" class="form-control value-amount" value="0.00" readonly></td>
+            <td><button type="button" class="btn btn-sm btn-danger" onclick="removeItemRow(this)">×</button></td>
+        `;
+        document.getElementById('itemsBody').appendChild(row);
+        calculateTotals();
+    };
 
-function parseNumber(value) {
-    const n = parseFloat(value);
-    return isNaN(n) ? 0 : n;
-}
-
-function addItemRow() {
-    const tbody = document.getElementById('itemsBody');
-
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-        <td>
-            <input type="text" name="item_name[]" class="form-control" placeholder="Item name" required>
-        </td>
-        <td>
-            <input type="text" name="purity[]" class="form-control" value="925">
-        </td>
-        <td>
-            <input type="number" step="0.001" min="0" name="gross_weight[]" class="form-control gross-weight" value="0" oninput="calculateTotals()" required>
-        </td>
-        <td>
-            <input type="number" step="0.001" min="0" name="less_weight[]" class="form-control less-weight" value="0" oninput="calculateTotals()">
-        </td>
-        <td>
-            <input type="number" step="0.001" name="net_weight_display[]" class="form-control net-weight" value="0.000" readonly>
-        </td>
-        <td>
-            <input type="text" name="item_remarks[]" class="form-control" placeholder="Remarks">
-        </td>
-        <td class="text-center">
-            <button type="button" class="btn btn-sm btn-danger" onclick="removeItemRow(this)">
-                <i class="fas fa-trash"></i>
-            </button>
-        </td>
-    `;
-
-    tbody.appendChild(tr);
-    calculateTotals();
-}
-
-function removeItemRow(button) {
-    const tbody = document.getElementById('itemsBody');
-
-    if (tbody.rows.length <= 1) {
-        alert('At least one item row is required.');
-        return;
-    }
-
-    button.closest('tr').remove();
-    calculateTotals();
-}
-
-function calculateTotals() {
-    let totalGross = 0;
-    let totalLess = 0;
-    let totalNet = 0;
-
-    const rows = document.querySelectorAll('#itemsBody tr');
-
-    rows.forEach(function (row) {
-        const grossInput = row.querySelector('.gross-weight');
-        const lessInput = row.querySelector('.less-weight');
-        const netInput = row.querySelector('.net-weight');
-
-        const gross = parseNumber(grossInput ? grossInput.value : 0);
-        const less = parseNumber(lessInput ? lessInput.value : 0);
-        const net = Math.max(gross - less, 0);
-
-        if (netInput) {
-            netInput.value = net.toFixed(3);
+    window.removeItemRow=function(button){
+        const body=document.getElementById('itemsBody');
+        if(body.rows.length<=1){
+            alert('At least one item row is required.');
+            return;
         }
+        button.closest('tr').remove();
+        calculateTotals();
+    };
 
-        totalGross += gross;
-        totalLess += less;
-        totalNet += net;
+    document.getElementById('itemsBody').addEventListener('input',calculateTotals);
+
+    const customerSelect=document.getElementById('customer_id');
+    customerSelect.addEventListener('change',function(){
+        const option=this.options[this.selectedIndex];
+        if(option&&option.value){
+            document.getElementById('customer_name').value=option.dataset.name||'';
+        }
     });
 
-    const rate = parseNumber(document.getElementById('rate_per_gram').value);
-    const deductionPercent = parseNumber(document.getElementById('deduction_percent').value);
-
-    const grossAmount = totalNet * rate;
-    const deductionAmount = grossAmount * deductionPercent / 100;
-    const finalAmount = Math.max(grossAmount - deductionAmount, 0);
-
-    document.getElementById('total_gross').innerText = totalGross.toFixed(3);
-    document.getElementById('total_less').innerText = totalLess.toFixed(3);
-    document.getElementById('total_net').innerText = totalNet.toFixed(3);
-    document.getElementById('gross_amount').innerText = grossAmount.toFixed(2);
-    document.getElementById('deduction_amount').innerText = deductionAmount.toFixed(2);
-    document.getElementById('final_amount').innerText = finalAmount.toFixed(2);
-}
+    calculateTotals();
+})();
 </script>
 </body>
 </html>

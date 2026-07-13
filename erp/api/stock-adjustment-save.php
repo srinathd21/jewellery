@@ -1,485 +1,703 @@
 <?php
-declare(strict_types=1);
-
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
-
-date_default_timezone_set((string)($_SESSION['timezone'] ?? 'Asia/Kolkata'));
 header('Content-Type: application/json; charset=utf-8');
+function respond(bool $success,string $message,array $extra=[],int $status=200):void{http_response_code($status);echo json_encode(array_merge(['success'=>$success,'message'=>$message],$extra));exit;}
 
-$configCandidates = [
-    dirname(__DIR__) . '/config/config.php',
-    dirname(__DIR__) . '/config.php',
-    dirname(__DIR__) . '/includes/config.php',
-    dirname(__DIR__) . '/super-admin/includes/config.php',
-];
+if (session_status() === PHP_SESSION_NONE) { session_start(); }
+date_default_timezone_set((string)($_SESSION['timezone'] ?? 'Asia/Kolkata'));
 
-$configLoaded = false;
+$configCandidates=[dirname(__DIR__).'/config/config.php',dirname(__DIR__).'/config.php',dirname(__DIR__).'/includes/config.php',dirname(__DIR__).'/super-admin/includes/config.php']; foreach($configCandidates as $configFile){if(is_file($configFile)){require_once $configFile;break;}}
 
-foreach ($configCandidates as $configFile) {
-    if (is_file($configFile)) {
-        require_once $configFile;
-        $configLoaded = true;
-        break;
-    }
-}
-
-if (!$configLoaded || !isset($conn) || !($conn instanceof mysqli)) {
-    apiResponse(false, 'Database configuration is not available.', [], 500);
+if (!isset($conn) || !($conn instanceof mysqli)) {
+    die('Database connection not available. Check includes/config.php');
 }
 
 mysqli_report(MYSQLI_REPORT_OFF);
 $conn->set_charset('utf8mb4');
 
-function apiResponse(bool $success, string $message, array $data = [], int $status = 200): never
-{
-    http_response_code($status);
-    echo json_encode(
-        [
-            'success' => $success,
-            'message' => $message,
-            'data' => $data,
-        ],
-        JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
-    );
-    exit;
-}
-
-function tableExists(mysqli $conn, string $table): bool
-{
-    $safe = $conn->real_escape_string($table);
-    $result = $conn->query("SHOW TABLES LIKE '{$safe}'");
-    return $result && $result->num_rows > 0;
-}
-
-function hasColumn(mysqli $conn, string $table, string $column): bool
-{
-    $safeTable = $conn->real_escape_string($table);
-    $safeColumn = $conn->real_escape_string($column);
-    $result = $conn->query("SHOW COLUMNS FROM `{$safeTable}` LIKE '{$safeColumn}'");
-    return $result && $result->num_rows > 0;
-}
-
-function inputData(): array
-{
-    $contentType = strtolower((string)($_SERVER['CONTENT_TYPE'] ?? ''));
-
-    if (str_contains($contentType, 'application/json')) {
-        $decoded = json_decode((string)file_get_contents('php://input'), true);
-        return is_array($decoded) ? $decoded : [];
-    }
-
-    return $_POST;
-}
-
-function requireLogin(): array
-{
-    $userId = (int)($_SESSION['user_id'] ?? 0);
-    $businessId = (int)($_SESSION['business_id'] ?? 0);
-    $branchId = (int)($_SESSION['branch_id'] ?? 0);
-
-    if ($userId <= 0) {
-        apiResponse(false, 'Login session expired.', [], 401);
-    }
-
-    if ($businessId <= 0) {
-        apiResponse(false, 'Business session not found.', [], 401);
-    }
-
-    return [$userId, $businessId, $branchId];
-}
-
-function hasAnyPermission(array $permissionCodes, array $actions): bool
-{
-    if (($_SESSION['user_type'] ?? '') === 'Platform Admin') {
-        return true;
-    }
-
-    $roleName = strtolower(trim((string)($_SESSION['role_name'] ?? '')));
-    $roleCode = strtolower(trim((string)($_SESSION['role_code'] ?? '')));
-
-    if (
-        in_array($roleName, ['admin', 'business admin', 'manager', 'stock', 'staff', 'sales'], true) ||
-        in_array($roleCode, ['admin', 'business_admin', 'manager', 'stock', 'staff', 'sales'], true)
-    ) {
-        return true;
-    }
-
-    $permissions = $_SESSION['permissions'] ?? [];
-
-    foreach ($permissionCodes as $code) {
-        if (!isset($permissions[$code])) {
-            continue;
-        }
-
-        foreach ($actions as $action) {
-            if ((int)($permissions[$code][$action] ?? 0) === 1) {
-                return true;
-            }
-        }
-    }
-
-    return false;
-}
-
-function requirePermission(array $permissionCodes, array $actions): void
-{
-    if (!hasAnyPermission($permissionCodes, $actions)) {
-        apiResponse(false, 'Access denied.', [], 403);
+if (!function_exists('h')) {
+    function h($value): string
+    {
+        return htmlspecialchars((string)($value ?? ''), ENT_QUOTES, 'UTF-8');
     }
 }
 
-function bindDynamic(mysqli_stmt $stmt, string $types, array &$values): void
+if (!function_exists('tableExists')) {
+    function tableExists(mysqli $conn, string $table): bool
+    {
+        $table = $conn->real_escape_string($table);
+        $res = $conn->query("SHOW TABLES LIKE '{$table}'");
+        return $res && $res->num_rows > 0;
+    }
+}
+
+if (!function_exists('hasColumn')) {
+    function hasColumn(mysqli $conn, string $table, string $column): bool
+    {
+        $table = $conn->real_escape_string($table);
+        $column = $conn->real_escape_string($column);
+        $res = $conn->query("SHOW COLUMNS FROM `{$table}` LIKE '{$column}'");
+        return $res && $res->num_rows > 0;
+    }
+}
+
+$pageTitle = 'Stock Adjustment';
+$page_title = 'Stock Adjustment';
+$currentPage = 'stock-adjustment';
+
+/* -------------------------------------------------------
+   AUTH CHECK
+------------------------------------------------------- */
+if (!isset($_SESSION['user_id']) || (int)$_SESSION['user_id'] <= 0) {
+    respond(false,'Your session has expired. Please log in again.',[],401);
+}
+
+$userId = (int)$_SESSION['user_id'];
+$businessId = (int)($_SESSION['business_id'] ?? 0);
+
+if ($businessId <= 0) {
+    die('Business session not found. Please login again.');
+}
+
+/* -------------------------------------------------------
+   REQUIRED TABLES
+------------------------------------------------------- */
+if (!tableExists($conn, 'products')) {
+    die('Required table `products` not found. Please import the SQL first.');
+}
+
+if (!tableExists($conn, 'stock_movements')) {
+    die('Required table `stock_movements` not found. Please import the SQL first.');
+}
+
+if (!tableExists($conn, 'product_stock')) {
+    die('Required table `product_stock` not found. Please import the SQL first.');
+}
+
+/* -------------------------------------------------------
+   COLUMN CHECKS
+------------------------------------------------------- */
+$prodHasBusinessId      = hasColumn($conn, 'products', 'business_id');
+$prodHasProductCode     = hasColumn($conn, 'products', 'product_code');
+$prodHasBarcode         = hasColumn($conn, 'products', 'barcode');
+$prodHasPurity          = hasColumn($conn, 'products', 'purity');
+$prodHasUnit            = hasColumn($conn, 'products', 'unit');
+$prodHasCurrentStockQty = hasColumn($conn, 'products', 'current_stock_qty');
+$prodHasIsActive        = hasColumn($conn, 'products', 'is_active');
+$prodHasUpdatedAt       = hasColumn($conn, 'products', 'updated_at');
+
+$psHasBusinessId        = hasColumn($conn, 'product_stock', 'business_id');
+$psHasProductId         = hasColumn($conn, 'product_stock', 'product_id');
+$psHasOpeningQty        = hasColumn($conn, 'product_stock', 'opening_qty');
+$psHasOpeningWeight     = hasColumn($conn, 'product_stock', 'opening_weight');
+$psHasInQty             = hasColumn($conn, 'product_stock', 'in_qty');
+$psHasInWeight          = hasColumn($conn, 'product_stock', 'in_weight');
+$psHasOutQty            = hasColumn($conn, 'product_stock', 'out_qty');
+$psHasOutWeight         = hasColumn($conn, 'product_stock', 'out_weight');
+$psHasClosingQty        = hasColumn($conn, 'product_stock', 'closing_qty');
+$psHasClosingWeight     = hasColumn($conn, 'product_stock', 'closing_weight');
+$psHasUpdatedAt         = hasColumn($conn, 'product_stock', 'updated_at');
+
+$smHasBusinessId        = hasColumn($conn, 'stock_movements', 'business_id');
+$smHasMovementDate      = hasColumn($conn, 'stock_movements', 'movement_date');
+$smHasProductId         = hasColumn($conn, 'stock_movements', 'product_id');
+$smHasMovementType      = hasColumn($conn, 'stock_movements', 'movement_type');
+$smHasRefTable          = hasColumn($conn, 'stock_movements', 'ref_table');
+$smHasRefId             = hasColumn($conn, 'stock_movements', 'ref_id');
+$smHasQtyIn             = hasColumn($conn, 'stock_movements', 'qty_in');
+$smHasQtyOut            = hasColumn($conn, 'stock_movements', 'qty_out');
+$smHasWeightIn          = hasColumn($conn, 'stock_movements', 'weight_in');
+$smHasWeightOut         = hasColumn($conn, 'stock_movements', 'weight_out');
+$smHasRemarks           = hasColumn($conn, 'stock_movements', 'remarks');
+$smHasCreatedBy         = hasColumn($conn, 'stock_movements', 'created_by');
+$smHasCreatedAt         = hasColumn($conn, 'stock_movements', 'created_at');
+
+/* -------------------------------------------------------
+   HELPERS
+------------------------------------------------------- */
+function addAuditLogSafe(mysqli $conn, int $businessId, int $userId, string $module, string $action, int $refId, string $desc): void
 {
-    if ($types === '' || empty($values)) {
+    if (function_exists('addAuditLog')) {
+        addAuditLog($conn, $businessId, $userId, $module, $action, $refId, $desc);
         return;
     }
 
-    $bind = [$types];
-
-    foreach ($values as $index => $value) {
-        $bind[] = &$values[$index];
-    }
-
-    call_user_func_array([$stmt, 'bind_param'], $bind);
-}
-
-function addAuditLogSafe(
-    mysqli $conn,
-    int $businessId,
-    int $userId,
-    string $module,
-    string $action,
-    int $referenceId,
-    string $description
-): void {
     if (!tableExists($conn, 'audit_logs')) {
         return;
     }
 
-    $fields = [];
+    $columns = [];
     $placeholders = [];
     $types = '';
     $values = [];
 
-    $map = [
-        'business_id' => [$businessId, 'i'],
-        'user_id' => [$userId, 'i'],
-        'module_name' => [$module, 's'],
-        'action_type' => [$action, 's'],
-        'reference_id' => [$referenceId, 'i'],
-        'description' => [$description, 's'],
-        'ip_address' => [(string)($_SERVER['REMOTE_ADDR'] ?? ''), 's'],
-        'user_agent' => [(string)($_SERVER['HTTP_USER_AGENT'] ?? ''), 's'],
-    ];
-
-    foreach ($map as $field => [$value, $type]) {
-        if (!hasColumn($conn, 'audit_logs', $field)) {
-            continue;
-        }
-
-        $fields[] = $field;
+    if (hasColumn($conn, 'audit_logs', 'business_id')) {
+        $columns[] = 'business_id';
         $placeholders[] = '?';
-        $types .= $type;
-        $values[] = $value;
+        $types .= 'i';
+        $values[] = $businessId;
     }
 
-    if (empty($fields)) {
+    if (hasColumn($conn, 'audit_logs', 'user_id')) {
+        $columns[] = 'user_id';
+        $placeholders[] = '?';
+        $types .= 'i';
+        $values[] = $userId;
+    }
+
+    if (hasColumn($conn, 'audit_logs', 'module_name')) {
+        $columns[] = 'module_name';
+        $placeholders[] = '?';
+        $types .= 's';
+        $values[] = $module;
+    }
+
+    if (hasColumn($conn, 'audit_logs', 'action_type')) {
+        $columns[] = 'action_type';
+        $placeholders[] = '?';
+        $types .= 's';
+        $values[] = $action;
+    }
+
+    if (hasColumn($conn, 'audit_logs', 'reference_id')) {
+        $columns[] = 'reference_id';
+        $placeholders[] = '?';
+        $types .= 'i';
+        $values[] = $refId;
+    }
+
+    if (hasColumn($conn, 'audit_logs', 'description')) {
+        $columns[] = 'description';
+        $placeholders[] = '?';
+        $types .= 's';
+        $values[] = $desc;
+    }
+
+    if (hasColumn($conn, 'audit_logs', 'ip_address')) {
+        $columns[] = 'ip_address';
+        $placeholders[] = '?';
+        $types .= 's';
+        $values[] = (string)($_SERVER['REMOTE_ADDR'] ?? '');
+    }
+
+    if (hasColumn($conn, 'audit_logs', 'user_agent')) {
+        $columns[] = 'user_agent';
+        $placeholders[] = '?';
+        $types .= 's';
+        $values[] = (string)($_SERVER['HTTP_USER_AGENT'] ?? '');
+    }
+
+    if (empty($columns)) {
         return;
     }
 
-    $sql = 'INSERT INTO audit_logs (' . implode(', ', $fields) . ')
-            VALUES (' . implode(', ', $placeholders) . ')';
-
+    $sql = "INSERT INTO audit_logs (" . implode(', ', $columns) . ") VALUES (" . implode(', ', $placeholders) . ")";
     $stmt = $conn->prepare($sql);
 
     if (!$stmt) {
         return;
     }
 
-    bindDynamic($stmt, $types, $values);
+    if ($types !== '') {
+        $bindParams = [];
+        $bindParams[] = $types;
+
+        foreach ($values as $k => $v) {
+            $bindParams[] = &$values[$k];
+        }
+
+        call_user_func_array([$stmt, 'bind_param'], $bindParams);
+    }
+
     $stmt->execute();
     $stmt->close();
 }
 
-function generateReferenceNo(
-    mysqli $conn,
-    string $table,
-    string $column,
-    int $businessId,
-    string $prefix
-): string {
-    $like = $prefix . '%';
-    $sql = "SELECT `{$column}`
-            FROM `{$table}`
-            WHERE business_id = ?
-              AND `{$column}` LIKE ?
-            ORDER BY id DESC
-            LIMIT 1";
+function ensureProductStockRow(mysqli $conn, int $businessId, int $productId, bool $psHasBusinessId): bool
+{
+    if ($psHasBusinessId) {
+        $stmt = $conn->prepare("SELECT id FROM product_stock WHERE product_id = ? AND business_id = ? LIMIT 1");
+    } else {
+        $stmt = $conn->prepare("SELECT id FROM product_stock WHERE product_id = ? LIMIT 1");
+    }
 
+    if (!$stmt) {
+        return false;
+    }
+
+    if ($psHasBusinessId) {
+        $stmt->bind_param('ii', $productId, $businessId);
+    } else {
+        $stmt->bind_param('i', $productId);
+    }
+
+    $stmt->execute();
+    $res = $stmt->get_result();
+    $exists = $res && $res->fetch_assoc();
+    $stmt->close();
+
+    if ($exists) {
+        return true;
+    }
+
+    $columns = [];
+    $placeholders = [];
+    $types = '';
+    $values = [];
+
+    if ($psHasBusinessId && hasColumn($conn, 'product_stock', 'business_id')) {
+        $columns[] = 'business_id';
+        $placeholders[] = '?';
+        $types .= 'i';
+        $values[] = $businessId;
+    }
+
+    if (hasColumn($conn, 'product_stock', 'product_id')) {
+        $columns[] = 'product_id';
+        $placeholders[] = '?';
+        $types .= 'i';
+        $values[] = $productId;
+    }
+
+    $zeroColumns = [
+        'opening_qty',
+        'opening_weight',
+        'in_qty',
+        'in_weight',
+        'out_qty',
+        'out_weight',
+        'closing_qty',
+        'closing_weight'
+    ];
+
+    foreach ($zeroColumns as $col) {
+        if (hasColumn($conn, 'product_stock', $col)) {
+            $columns[] = $col;
+            $placeholders[] = '0';
+        }
+    }
+
+    if (empty($columns)) {
+        return false;
+    }
+
+    $sql = "INSERT INTO product_stock (" . implode(', ', $columns) . ") VALUES (" . implode(', ', $placeholders) . ")";
     $stmt = $conn->prepare($sql);
-    $last = '';
+
+    if (!$stmt) {
+        return false;
+    }
+
+    if ($types !== '') {
+        $bindParams = [];
+        $bindParams[] = $types;
+
+        foreach ($values as $k => $v) {
+            $bindParams[] = &$values[$k];
+        }
+
+        call_user_func_array([$stmt, 'bind_param'], $bindParams);
+    }
+
+    $ok = $stmt->execute();
+    $stmt->close();
+
+    return $ok;
+}
+
+/* -------------------------------------------------------
+   HANDLE SUBMIT - POST REDIRECT GET
+------------------------------------------------------- */
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') respond(false,'Invalid request method.',[],405);
+if (!hash_equals((string)($_SESSION['stock_adjustment_csrf']??''),(string)($_POST['csrf_token']??''))) respond(false,'Invalid or expired request token. Refresh the page and try again.',[],419);
+
+function stockAdjustmentPermission(mysqli $conn,string $action):bool{if(($_SESSION['user_type']??'')==='Platform Admin')return true;$map=['create'=>'can_create','update'=>'can_update'];$field=$map[$action]??'';foreach(['perm.inventory.stock_adjustment','perm.inventory.stock','perm.inventory'] as $key){if(isset($_SESSION['permissions'][$key][$field]))return (int)$_SESSION['permissions'][$key][$field]===1;}$businessId=(int)($_SESSION['business_id']??0);$roleId=(int)($_SESSION['role_id']??0);if($businessId<=0||$roleId<=0)return false;$sql="SELECT rp.`{$field}` FROM role_permissions rp INNER JOIN permissions p ON p.id=rp.permission_id WHERE rp.business_id=? AND rp.role_id=? AND p.is_active=1 AND p.permission_code IN ('perm.inventory.stock_adjustment','perm.inventory.stock','perm.inventory') ORDER BY FIELD(p.permission_code,'perm.inventory.stock_adjustment','perm.inventory.stock','perm.inventory') LIMIT 1";$stmt=$conn->prepare($sql);if(!$stmt)return false;$stmt->bind_param('ii',$businessId,$roleId);$stmt->execute();$row=$stmt->get_result()->fetch_assoc();$stmt->close();return (int)($row[$field]??0)===1;}
+if(!stockAdjustmentPermission($conn,'create')&&!stockAdjustmentPermission($conn,'update'))respond(false,'You do not have permission to create stock adjustments.',[],403);
+
+if (($_POST['action'] ?? '') === 'save') {
+    $selectedProductId = (int)($_POST['product_id'] ?? 0);
+    $adjustmentMode = trim((string)($_POST['adjustment_mode'] ?? 'add'));
+    $adjustmentQty = trim((string)($_POST['adjustment_qty'] ?? '0'));
+    $adjustmentWeight = trim((string)($_POST['adjustment_weight'] ?? '0'));
+    $remarks = trim((string)($_POST['remarks'] ?? ''));
+    $movementDate = trim((string)($_POST['movement_date'] ?? date('Y-m-d\TH:i')));
+
+    $qtyValue = is_numeric($adjustmentQty) ? (float)$adjustmentQty : 0;
+    $weightValue = is_numeric($adjustmentWeight) ? (float)$adjustmentWeight : 0;
+
+    $redirectProduct = $selectedProductId > 0 ? '&product_id=' . $selectedProductId : '';
+
+    if ($selectedProductId <= 0) {
+        respond(false, 'Please select a product.', [], 400);
+    } elseif (!in_array($adjustmentMode, ['add', 'subtract', 'set'], true)) {
+        respond(false, 'Invalid adjustment mode.', [], 400);
+    } elseif ($qtyValue < 0 || $weightValue < 0) {
+        respond(false, 'Quantity and weight cannot be negative.', [], 400);
+    } elseif ($qtyValue == 0 && $weightValue == 0) {
+        respond(false, 'Enter quantity or weight for adjustment.', [], 400);
+    }
+
+    $stmt = $conn->prepare("
+        SELECT
+            p.id,
+            p.product_name,
+            " . ($prodHasProductCode ? "p.product_code," : "'' AS product_code,") . "
+            " . ($prodHasUnit ? "p.unit," : "'pcs' AS unit,") . "
+            " . ($prodHasCurrentStockQty ? "IFNULL(p.current_stock_qty, 0) AS current_stock_qty," : "0 AS current_stock_qty,") . "
+            IFNULL(ps.closing_qty, 0) AS ps_closing_qty,
+            IFNULL(ps.closing_weight, 0) AS ps_closing_weight
+        FROM products p
+        LEFT JOIN product_stock ps ON ps.product_id = p.id
+            " . ($psHasBusinessId && $prodHasBusinessId ? "AND ps.business_id = p.business_id" : "") . "
+        WHERE p.id = ?
+        " . ($prodHasBusinessId ? "AND p.business_id = ?" : "") . "
+        LIMIT 1
+    ");
+
+    $productRow = null;
 
     if ($stmt) {
-        $stmt->bind_param('is', $businessId, $like);
+        if ($prodHasBusinessId) {
+            $stmt->bind_param('ii', $selectedProductId, $businessId);
+        } else {
+            $stmt->bind_param('i', $selectedProductId);
+        }
+
         $stmt->execute();
-        $row = $stmt->get_result()->fetch_assoc();
-        $last = (string)($row[$column] ?? '');
+        $res = $stmt->get_result();
+        $productRow = $res ? $res->fetch_assoc() : null;
         $stmt->close();
     }
 
-    $running = 1;
-
-    if ($last !== '' && preg_match('/(\d{4})$/', $last, $match)) {
-        $running = ((int)$match[1]) + 1;
+    if (!$productRow) {
+        respond(false, 'Selected product not found.', [], 404);
     }
 
-    return $prefix . str_pad((string)$running, 4, '0', STR_PAD_LEFT);
-}
+    $currentQty = (float)($productRow['ps_closing_qty'] ?? 0);
+    $currentWeight = (float)($productRow['ps_closing_weight'] ?? 0);
 
-[$userId, $businessId, $branchId] = requireLogin();
-requirePermission(['perm.stock', 'perm.inventory'], ['can_open', 'can_create', 'can_edit']);
-
-if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-    apiResponse(false, 'POST method required.', [], 405);
-}
-
-if (
-    !tableExists($conn, 'products') ||
-    !tableExists($conn, 'product_stock') ||
-    !tableExists($conn, 'stock_movements')
-) {
-    apiResponse(false, 'Required stock tables are missing.', [], 500);
-}
-
-$data = inputData();
-
-$productId = (int)($data['product_id'] ?? 0);
-$mode = strtolower(trim((string)($data['adjustment_mode'] ?? 'add')));
-$quantity = (float)($data['adjustment_qty'] ?? 0);
-$weight = (float)($data['adjustment_weight'] ?? 0);
-$rate = (float)($data['rate'] ?? 0);
-$remarks = trim((string)($data['remarks'] ?? ''));
-$movementDate = trim((string)($data['movement_date'] ?? date('Y-m-d H:i:s')));
-
-if ($productId <= 0) {
-    apiResponse(false, 'Please select a product.', [], 422);
-}
-
-if (!in_array($mode, ['add', 'subtract', 'set'], true)) {
-    apiResponse(false, 'Invalid adjustment mode.', [], 422);
-}
-
-if ($quantity < 0 || $weight < 0 || $rate < 0) {
-    apiResponse(false, 'Quantity, weight and rate cannot be negative.', [], 422);
-}
-
-if ($quantity == 0.0 && $weight == 0.0) {
-    apiResponse(false, 'Enter quantity or weight.', [], 422);
-}
-
-$stmt = $conn->prepare(
-    'SELECT id, product_name
-     FROM products
-     WHERE id = ? AND business_id = ?
-     LIMIT 1'
-);
-
-if (!$stmt) {
-    apiResponse(false, 'Unable to prepare product query: ' . $conn->error, [], 500);
-}
-
-$stmt->bind_param('ii', $productId, $businessId);
-$stmt->execute();
-$product = $stmt->get_result()->fetch_assoc();
-$stmt->close();
-
-if (!$product) {
-    apiResponse(false, 'Product not found.', [], 404);
-}
-
-$conn->begin_transaction();
-
-try {
-    $stmt = $conn->prepare(
-        'SELECT id, quantity, gross_weight, net_weight, stock_value
-         FROM product_stock
-         WHERE business_id = ? AND branch_id = ? AND product_id = ?
-         LIMIT 1
-         FOR UPDATE'
-    );
-
-    if (!$stmt) {
-        throw new Exception('Unable to prepare stock lookup: ' . $conn->error);
+    if ($currentQty == 0 && $prodHasCurrentStockQty) {
+        $currentQty = (float)($productRow['current_stock_qty'] ?? 0);
     }
 
-    $stmt->bind_param('iii', $businessId, $branchId, $productId);
-    $stmt->execute();
-    $stock = $stmt->get_result()->fetch_assoc();
-    $stmt->close();
+    $newQty = $currentQty;
+    $newWeight = $currentWeight;
 
-    $oldQty = (float)($stock['quantity'] ?? 0);
-    $oldGross = (float)($stock['gross_weight'] ?? 0);
-    $oldNet = (float)($stock['net_weight'] ?? 0);
-    $oldValue = (float)($stock['stock_value'] ?? 0);
+    $qtyIn = 0.0;
+    $qtyOut = 0.0;
+    $weightIn = 0.0;
+    $weightOut = 0.0;
 
-    if ($mode === 'add') {
-        $newQty = $oldQty + $quantity;
-        $newGross = $oldGross + $weight;
-        $newNet = $oldNet + $weight;
-        $qtyIn = $quantity;
-        $qtyOut = 0.0;
-        $weightIn = $weight;
-        $weightOut = 0.0;
-    } elseif ($mode === 'subtract') {
-        if ($quantity > $oldQty || $weight > $oldNet) {
-            throw new Exception('Adjustment exceeds available stock.');
+    if ($adjustmentMode === 'add') {
+        $newQty = $currentQty + $qtyValue;
+        $newWeight = $currentWeight + $weightValue;
+        $qtyIn = $qtyValue;
+        $weightIn = $weightValue;
+    } elseif ($adjustmentMode === 'subtract') {
+        if ($qtyValue > $currentQty) {
+            respond(false, 'Adjustment quantity cannot be greater than current stock quantity.', [], 409);
         }
 
-        $newQty = $oldQty - $quantity;
-        $newGross = max(0, $oldGross - $weight);
-        $newNet = max(0, $oldNet - $weight);
-        $qtyIn = 0.0;
-        $qtyOut = $quantity;
-        $weightIn = 0.0;
-        $weightOut = $weight;
-    } else {
-        $newQty = $quantity;
-        $newGross = $weight;
-        $newNet = $weight;
-        $qtyDifference = $newQty - $oldQty;
-        $weightDifference = $newNet - $oldNet;
-        $qtyIn = max(0, $qtyDifference);
-        $qtyOut = max(0, -$qtyDifference);
-        $weightIn = max(0, $weightDifference);
-        $weightOut = max(0, -$weightDifference);
+        if ($weightValue > $currentWeight) {
+            respond(false, 'Adjustment weight cannot be greater than current stock weight.', [], 409);
+        }
+
+        $newQty = $currentQty - $qtyValue;
+        $newWeight = $currentWeight - $weightValue;
+        $qtyOut = $qtyValue;
+        $weightOut = $weightValue;
+    } elseif ($adjustmentMode === 'set') {
+        $newQty = $qtyValue;
+        $newWeight = $weightValue;
+
+        if ($newQty >= $currentQty) {
+            $qtyIn = $newQty - $currentQty;
+        } else {
+            $qtyOut = $currentQty - $newQty;
+        }
+
+        if ($newWeight >= $currentWeight) {
+            $weightIn = $newWeight - $currentWeight;
+        } else {
+            $weightOut = $currentWeight - $newWeight;
+        }
     }
 
-    $valueAmount = ($qtyIn - $qtyOut) * $rate;
-    $newStockValue = max(0, $oldValue + $valueAmount);
-    $averageCost = $newQty > 0 ? $newStockValue / $newQty : 0.0;
+    $conn->begin_transaction();
 
-    if ($stock) {
-        $stockId = (int)$stock['id'];
+    try {
+        if (!ensureProductStockRow($conn, $businessId, $selectedProductId, $psHasBusinessId)) {
+            throw new Exception('Unable to create stock row.');
+        }
 
-        $stmt = $conn->prepare(
-            'UPDATE product_stock
-             SET quantity = ?, gross_weight = ?, net_weight = ?,
-                 average_cost = ?, stock_value = ?
-             WHERE id = ?'
-        );
+        $updateParts = [];
+        $types = '';
+        $values = [];
+
+        if ($psHasInQty) {
+            $updateParts[] = "in_qty = IFNULL(in_qty, 0) + ?";
+            $types .= 'd';
+            $values[] = $qtyIn;
+        }
+
+        if ($psHasInWeight) {
+            $updateParts[] = "in_weight = IFNULL(in_weight, 0) + ?";
+            $types .= 'd';
+            $values[] = $weightIn;
+        }
+
+        if ($psHasOutQty) {
+            $updateParts[] = "out_qty = IFNULL(out_qty, 0) + ?";
+            $types .= 'd';
+            $values[] = $qtyOut;
+        }
+
+        if ($psHasOutWeight) {
+            $updateParts[] = "out_weight = IFNULL(out_weight, 0) + ?";
+            $types .= 'd';
+            $values[] = $weightOut;
+        }
+
+        if ($psHasClosingQty) {
+            $updateParts[] = "closing_qty = ?";
+            $types .= 'd';
+            $values[] = $newQty;
+        }
+
+        if ($psHasClosingWeight) {
+            $updateParts[] = "closing_weight = ?";
+            $types .= 'd';
+            $values[] = $newWeight;
+        }
+
+        if ($psHasUpdatedAt) {
+            $updateParts[] = "updated_at = NOW()";
+        }
+
+        if (empty($updateParts)) {
+            throw new Exception('No editable columns found in product_stock.');
+        }
+
+        $sql = "UPDATE product_stock SET " . implode(', ', $updateParts) . " WHERE product_id = ?";
+        $types .= 'i';
+        $values[] = $selectedProductId;
+
+        if ($psHasBusinessId) {
+            $sql .= " AND business_id = ?";
+            $types .= 'i';
+            $values[] = $businessId;
+        }
+
+        $sql .= " LIMIT 1";
+
+        $stmt = $conn->prepare($sql);
 
         if (!$stmt) {
-            throw new Exception('Unable to prepare stock update: ' . $conn->error);
+            throw new Exception('Failed to prepare product_stock update: ' . $conn->error);
         }
 
-        $stmt->bind_param(
-            'dddddi',
-            $newQty,
-            $newGross,
-            $newNet,
-            $averageCost,
-            $newStockValue,
-            $stockId
-        );
-    } else {
-        $stmt = $conn->prepare(
-            'INSERT INTO product_stock
-             (business_id, branch_id, product_id, quantity, gross_weight,
-              net_weight, average_cost, stock_value)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-        );
+        $bindValues = [];
+        $bindValues[] = $types;
+
+        foreach ($values as $k => $v) {
+            $bindValues[] = &$values[$k];
+        }
+
+        call_user_func_array([$stmt, 'bind_param'], $bindValues);
+
+        if (!$stmt->execute()) {
+            $stmt->close();
+            throw new Exception('Failed to update product_stock.');
+        }
+
+        $stmt->close();
+
+        if ($prodHasCurrentStockQty) {
+            $sql = "UPDATE products SET current_stock_qty = ?";
+
+            if ($prodHasUpdatedAt) {
+                $sql .= ", updated_at = NOW()";
+            }
+
+            $sql .= " WHERE id = ?";
+
+            if ($prodHasBusinessId) {
+                $sql .= " AND business_id = ?";
+            }
+
+            $sql .= " LIMIT 1";
+
+            $stmt = $conn->prepare($sql);
+
+            if (!$stmt) {
+                throw new Exception('Failed to prepare products update.');
+            }
+
+            if ($prodHasBusinessId) {
+                $stmt->bind_param('dii', $newQty, $selectedProductId, $businessId);
+            } else {
+                $stmt->bind_param('di', $newQty, $selectedProductId);
+            }
+
+            if (!$stmt->execute()) {
+                $stmt->close();
+                throw new Exception('Failed to update products stock.');
+            }
+
+            $stmt->close();
+        }
+
+        $movementType = 'Adjustment';
+        $refTable = 'stock_adjustment';
+        $refId = 0;
+        $movementDateSql = date('Y-m-d H:i:s', strtotime($movementDate));
+
+        $remarksText = trim($remarks);
+        if ($remarksText === '') {
+            $remarksText = 'Manual stock adjustment';
+        }
+
+        $columns = [];
+        $placeholders = [];
+        $types = '';
+        $values = [];
+
+        if ($smHasBusinessId) {
+            $columns[] = 'business_id';
+            $placeholders[] = '?';
+            $types .= 'i';
+            $values[] = $businessId;
+        }
+
+        if ($smHasMovementDate) {
+            $columns[] = 'movement_date';
+            $placeholders[] = '?';
+            $types .= 's';
+            $values[] = $movementDateSql;
+        }
+
+        if ($smHasProductId) {
+            $columns[] = 'product_id';
+            $placeholders[] = '?';
+            $types .= 'i';
+            $values[] = $selectedProductId;
+        }
+
+        if ($smHasMovementType) {
+            $columns[] = 'movement_type';
+            $placeholders[] = '?';
+            $types .= 's';
+            $values[] = $movementType;
+        }
+
+        if ($smHasRefTable) {
+            $columns[] = 'ref_table';
+            $placeholders[] = '?';
+            $types .= 's';
+            $values[] = $refTable;
+        }
+
+        if ($smHasRefId) {
+            $columns[] = 'ref_id';
+            $placeholders[] = '?';
+            $types .= 'i';
+            $values[] = $refId;
+        }
+
+        if ($smHasQtyIn) {
+            $columns[] = 'qty_in';
+            $placeholders[] = '?';
+            $types .= 'd';
+            $values[] = $qtyIn;
+        }
+
+        if ($smHasQtyOut) {
+            $columns[] = 'qty_out';
+            $placeholders[] = '?';
+            $types .= 'd';
+            $values[] = $qtyOut;
+        }
+
+        if ($smHasWeightIn) {
+            $columns[] = 'weight_in';
+            $placeholders[] = '?';
+            $types .= 'd';
+            $values[] = $weightIn;
+        }
+
+        if ($smHasWeightOut) {
+            $columns[] = 'weight_out';
+            $placeholders[] = '?';
+            $types .= 'd';
+            $values[] = $weightOut;
+        }
+
+        if ($smHasRemarks) {
+            $columns[] = 'remarks';
+            $placeholders[] = '?';
+            $types .= 's';
+            $values[] = $remarksText;
+        }
+
+        if ($smHasCreatedBy) {
+            $columns[] = 'created_by';
+            $placeholders[] = '?';
+            $types .= 'i';
+            $values[] = $userId;
+        }
+
+        if ($smHasCreatedAt) {
+            $columns[] = 'created_at';
+            $placeholders[] = 'NOW()';
+        }
+
+        if (empty($columns)) {
+            throw new Exception('No columns found for stock movement insert.');
+        }
+
+        $sql = "INSERT INTO stock_movements (" . implode(', ', $columns) . ") VALUES (" . implode(', ', $placeholders) . ")";
+        $stmt = $conn->prepare($sql);
 
         if (!$stmt) {
-            throw new Exception('Unable to prepare stock insert: ' . $conn->error);
+            throw new Exception('Failed to prepare stock_movements insert: ' . $conn->error);
         }
 
-        $stmt->bind_param(
-            'iiiddddd',
+        if ($types !== '') {
+            $bindValues = [];
+            $bindValues[] = $types;
+
+            foreach ($values as $k => $v) {
+                $bindValues[] = &$values[$k];
+            }
+
+            call_user_func_array([$stmt, 'bind_param'], $bindValues);
+        }
+
+        if (!$stmt->execute()) {
+            $stmt->close();
+            throw new Exception('Failed to insert stock movement.');
+        }
+
+        $movementInsertId = (int)$stmt->insert_id;
+        $stmt->close();
+
+        addAuditLogSafe(
+            $conn,
             $businessId,
-            $branchId,
-            $productId,
-            $newQty,
-            $newGross,
-            $newNet,
-            $averageCost,
-            $newStockValue
+            $userId,
+            'Stock Adjustment',
+            'Create',
+            $movementInsertId,
+            'Stock adjusted for product ID ' . $selectedProductId
         );
+
+        $conn->commit();
+
+        respond(true, 'Stock adjustment saved successfully.', ['product_id' => $selectedProductId, 'movement_id' => $movementInsertId]);
+    } catch (Throwable $e) {
+        $conn->rollback();
+
+        respond(false, 'Failed to save stock adjustment: ' . $e->getMessage(), [], 500);
     }
-
-    if (!$stmt->execute()) {
-        throw new Exception('Unable to save product stock: ' . $stmt->error);
-    }
-
-    $stockId = $stock ? (int)$stock['id'] : (int)$stmt->insert_id;
-    $stmt->close();
-
-    $stmt = $conn->prepare(
-        "INSERT INTO stock_movements
-         (
-            business_id, branch_id, product_id, movement_date,
-            movement_type, reference_table, reference_id,
-            quantity_in, quantity_out, weight_in, weight_out,
-            rate, value_amount, remarks, created_by
-         )
-         VALUES (?, ?, ?, ?, 'Adjustment', 'product_stock', ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-    );
-
-    if (!$stmt) {
-        throw new Exception('Unable to prepare movement insert: ' . $conn->error);
-    }
-
-    $stmt->bind_param(
-        'iiisiddddddsi',
-        $businessId,
-        $branchId,
-        $productId,
-        $movementDate,
-        $stockId,
-        $qtyIn,
-        $qtyOut,
-        $weightIn,
-        $weightOut,
-        $rate,
-        $valueAmount,
-        $remarks,
-        $userId
-    );
-
-    if (!$stmt->execute()) {
-        throw new Exception('Unable to insert stock movement: ' . $stmt->error);
-    }
-
-    $movementId = (int)$stmt->insert_id;
-    $stmt->close();
-
-    addAuditLogSafe(
-        $conn,
-        $businessId,
-        $userId,
-        'Stock',
-        'Adjustment',
-        $movementId,
-        'Adjusted stock for ' . (string)$product['product_name']
-    );
-
-    $conn->commit();
-
-    apiResponse(
-        true,
-        'Stock adjustment saved successfully.',
-        [
-            'movement_id' => $movementId,
-            'product_id' => $productId,
-            'quantity' => $newQty,
-            'gross_weight' => $newGross,
-            'net_weight' => $newNet,
-            'average_cost' => $averageCost,
-            'stock_value' => $newStockValue,
-        ]
-    );
-} catch (Throwable $e) {
-    $conn->rollback();
-    apiResponse(false, $e->getMessage(), [], 500);
 }
+
+respond(false,'Invalid action.',[],400);
