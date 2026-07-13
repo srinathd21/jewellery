@@ -509,513 +509,169 @@ if (function_exists('tableExists') && tableExists($conn, 'business_theme_setting
 $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
 
 ?>
+
 <!doctype html>
 <html lang="en">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title><?php echo h($businessName); ?> - Stock Overview</title>
-
     <?php include('includes/links.php'); ?>
-
-    
-<style>
-:root {
-    --brand: <?php echo h($theme['primary_color']); ?>;
-    --brand-dark: <?php echo h($theme['primary_dark_color']); ?>;
-    --brand-soft: <?php echo h($theme['primary_soft_color']); ?>;
-    --page-bg: <?php echo h($theme['page_background']); ?>;
-    --card-bg: <?php echo h($theme['card_background']); ?>;
-    --text: <?php echo h($theme['text_color']); ?>;
-    --muted: <?php echo h($theme['muted_text_color']); ?>;
-    --line: <?php echo h($theme['border_color']); ?>;
-    --radius: <?php echo (int)$theme['border_radius_px']; ?>px;
-}
-
-body {
-    background: var(--page-bg);
-    color: var(--text);
-    font-family: <?php echo json_encode((string)$theme['font_family']); ?>, sans-serif;
-}
-
-.sidebar {
-    background: linear-gradient(
-        180deg,
-        <?php echo h($theme['sidebar_gradient_1']); ?>,
-        <?php echo h($theme['sidebar_gradient_2']); ?>,
-        <?php echo h($theme['sidebar_gradient_3']); ?>
-    ) !important;
-}
-
-.content-wrap {
-    padding-top: 16px;
-}
-
-.page-new-header {
-    margin-bottom: 14px;
-}
-
-.page-new-title {
-    margin: 0;
-    font-family: <?php echo json_encode((string)$theme['heading_font_family']); ?>, serif;
-    font-size: 24px;
-    line-height: 1.1;
-    font-weight: 800;
-}
-
-.page-new-subtitle {
-    margin-top: 4px;
-    color: var(--muted);
-    font-size: 11px;
-}
-
-.card,
-.report-card,
-.invoice-header-box {
-    background: var(--card-bg) !important;
-    border: 1px solid var(--line) !important;
-    border-radius: var(--radius) !important;
-    box-shadow: none !important;
-}
-
-.card-header,
-.report-card .card-header {
-    background: #f7f7f8 !important;
-    border-bottom: 1px solid var(--line) !important;
-    color: var(--text);
-    border-radius: var(--radius) var(--radius) 0 0 !important;
-}
-
-.card-body,
-.report-card .card-body {
-    padding: 14px !important;
-}
-
-h1, h2, h3, h4, h5, h6,
-.card-title {
-    color: var(--text);
-}
-
-.form-label {
-    margin-bottom: 5px;
-    color: var(--text);
-    font-size: 10px;
-    font-weight: 700;
-}
-
-.form-control,
-.form-select {
-    min-height: 40px;
-    border: 1px solid var(--line);
-    border-radius: 10px;
-    background: var(--card-bg);
-    color: var(--text);
-    font-size: 11px;
-    box-shadow: none;
-}
-
-.form-control:focus,
-.form-select:focus {
-    border-color: var(--brand);
-    box-shadow: 0 0 0 .18rem rgba(216, 148, 22, .12);
-}
-
-.btn {
-    min-height: 38px;
-    border-radius: 10px;
-    font-size: 11px;
-    font-weight: 700;
-}
-
-.btn-primary,
-.btn-info {
-    border-color: transparent !important;
-    background: linear-gradient(135deg, var(--brand), var(--brand-dark)) !important;
-    color: #fff !important;
-}
-
-.btn-secondary,
-.btn-light {
-    border: 1px solid var(--line) !important;
-    background: #fff !important;
-    color: var(--text) !important;
-}
-
-.table-responsive {
-    border-radius: 12px;
-}
-
-.table {
-    margin-bottom: 0;
-    color: var(--text);
-    font-size: 10px;
-}
-
-.table thead th {
-    padding: 12px 13px;
-    border-color: var(--line);
-    background: #f7f7f8;
-    color: #738096;
-    font-size: 9px;
-    font-weight: 800;
-    letter-spacing: .035em;
-    text-transform: uppercase;
-    white-space: nowrap;
-}
-
-.table tbody td {
-    padding: 11px 13px;
-    border-color: var(--line);
-    background: var(--card-bg) !important;
-    color: var(--text);
-    vertical-align: middle;
-}
-
-.badge {
-    border-radius: 999px;
-    padding: 5px 9px;
-    font-size: 9px;
-    font-weight: 800;
-}
-
-.alert {
-    border: 0;
-    border-radius: 10px;
-    font-size: 11px;
-}
-
-.text-muted {
-    color: var(--muted) !important;
-}
-
-.row > [class*="col-"] > .card {
-    height: calc(100% - 12px);
-    margin-bottom: 12px;
-}
-
-body.dark-mode,
-body[data-theme="dark"],
-html.dark-mode body,
-html[data-theme="dark"] body {
-    --page-bg: #0f151b;
-    --card-bg: #182129;
-    --text: #f3f6f8;
-    --muted: #9aa7b3;
-    --line: #2c3944;
-}
-
-@media (max-width: 767px) {
-    .content-wrap {
-        padding-left: 10px;
-        padding-right: 10px;
-    }
-}
-
-@media print {
-    .sidebar,
-    .app-nav,
-    .footer,
-    .no-print {
-        display: none !important;
-    }
-
-    .app-main {
-        margin-left: 0 !important;
-    }
-
-    .content-wrap {
-        padding: 0 !important;
-    }
-
-    .table-responsive {
-        overflow: visible !important;
-    }
-}
-</style>
-
-    
+    <style>
+        :root{
+            --primary:<?php echo h($theme['primary_color']); ?>;
+            --primary-dark:<?php echo h($theme['primary_dark_color']); ?>;
+            --primary-soft:<?php echo h($theme['primary_soft_color']); ?>;
+            --sidebar-gradient-1:<?php echo h($theme['sidebar_gradient_1']); ?>;
+            --sidebar-gradient-2:<?php echo h($theme['sidebar_gradient_2']); ?>;
+            --sidebar-gradient-3:<?php echo h($theme['sidebar_gradient_3']); ?>;
+            --page-bg:<?php echo h($theme['page_background']); ?>;
+            --card-bg:<?php echo h($theme['card_background']); ?>;
+            --text-color:<?php echo h($theme['text_color']); ?>;
+            --muted-color:<?php echo h($theme['muted_text_color']); ?>;
+            --border-color:<?php echo h($theme['border_color']); ?>;
+            --radius:<?php echo (int)$theme['border_radius_px']; ?>px;
+        }
+        body{background:var(--page-bg);color:var(--text-color);font-family:<?php echo json_encode((string)$theme['font_family']); ?>,sans-serif;}
+        .sidebar{background:linear-gradient(180deg,var(--sidebar-gradient-1),var(--sidebar-gradient-2),var(--sidebar-gradient-3))!important;}
+        .page-heading{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin-bottom:10px;}
+        .page-title{margin:0;font-family:<?php echo json_encode((string)$theme['heading_font_family']); ?>,serif;font-size:20px;font-weight:800;}
+        .page-subtitle{margin-top:3px;color:var(--muted-color);font-size:10px;}
+        .stat-grid{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px;margin-bottom:10px;}
+        .stat-card{background:var(--card-bg);border:1px solid var(--border-color);border-radius:var(--radius);padding:12px;min-height:78px;display:flex;align-items:center;gap:10px;}
+        .stat-icon{width:40px;height:40px;flex:0 0 40px;display:flex;align-items:center;justify-content:center;border-radius:calc(var(--radius)*.72);background:var(--primary-soft);color:var(--primary-dark);font-size:15px;}
+        .stat-label{font-size:9px;color:var(--muted-color);}
+        .stat-value{font-size:18px;line-height:1.1;font-weight:800;margin-top:4px;white-space:nowrap;}
+        .stock-toolbar{display:flex;align-items:end;gap:8px;flex-wrap:wrap;background:var(--card-bg);border:1px solid var(--border-color);border-radius:var(--radius);padding:10px 12px;margin-bottom:10px;}
+        .toolbar-field{min-width:150px;flex:1 1 150px;}
+        .toolbar-search{min-width:240px;flex:2 1 240px;position:relative;}
+        .toolbar-search i{position:absolute;left:11px;bottom:11px;color:var(--muted-color);font-size:11px;}
+        .toolbar-search input{padding-left:32px;}
+        .field-label{display:block;font-size:9px;font-weight:700;margin-bottom:5px;color:var(--muted-color);}
+        .form-control,.form-select{font-size:10px;min-height:36px;border-radius:9px;border-color:var(--border-color);background:var(--card-bg);color:var(--text-color);}
+        .btn-theme{background:linear-gradient(135deg,var(--primary),var(--primary-dark));border:0;color:#fff;border-radius:calc(var(--radius)*.65);font-size:10px;font-weight:700;padding:9px 13px;}
+        .btn-soft{background:var(--card-bg);border:1px solid var(--border-color);color:var(--text-color);border-radius:calc(var(--radius)*.65);font-size:10px;font-weight:700;padding:8px 12px;}
+        .stock-card{background:var(--card-bg);border:1px solid var(--border-color);border-radius:var(--radius);overflow:hidden;}
+        .stock-table{margin:0;font-size:10px;}
+        .stock-table th{font-size:9px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted-color);background:color-mix(in srgb,var(--muted-color) 6%,transparent);white-space:nowrap;padding:10px;border-color:var(--border-color);}
+        .stock-table td{padding:10px;vertical-align:middle;color:var(--text-color);background:var(--card-bg)!important;border-color:var(--border-color);white-space:nowrap;}
+        .product-cell{min-width:220px;white-space:normal!important;}
+        .product-wrap{display:flex;align-items:center;gap:9px;}
+        .product-image{width:38px;height:38px;object-fit:cover;border-radius:9px;border:1px solid var(--border-color);}
+        .product-placeholder{width:38px;height:38px;flex:0 0 38px;display:flex;align-items:center;justify-content:center;border-radius:9px;background:var(--primary-soft);color:var(--primary-dark);}
+        .product-name{font-size:10px;font-weight:800;}
+        .product-sub{font-size:8px;color:var(--muted-color);margin-top:2px;}
+        .status-badge{display:inline-flex;align-items:center;border-radius:999px;padding:4px 8px;font-size:8px;font-weight:800;}
+        .status-in{background:#eaf8f0;color:#168449;}.status-low{background:#fff4db;color:#a76500;}.status-out{background:#fdecec;color:#bd2d2d;}
+        .number-in{color:#168449;font-weight:700;}.number-out{color:#bd2d2d;font-weight:700;}.number-main{font-weight:800;}
+        .empty-state{padding:48px 20px;text-align:center;color:var(--muted-color);}.empty-state i{font-size:32px;margin-bottom:10px;}
+        .notice{margin-top:10px;padding:10px 12px;border-radius:10px;background:#fff8e8;color:#8a5a00;font-size:10px;border:1px solid #f5dfaa;}
+        body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark"] body{--page-bg:#0f151b;--card-bg:#182129;--text-color:#f3f6f8;--muted-color:#9aa7b3;--border-color:#2c3944;}
+        @media(max-width:1199.98px){.stat-grid{grid-template-columns:repeat(3,minmax(0,1fr));}}
+        @media(max-width:991.98px){
+            .stat-grid{grid-template-columns:repeat(2,minmax(0,1fr));}
+            .stock-toolbar{align-items:stretch;}
+            .toolbar-field,.toolbar-search{min-width:calc(50% - 8px);}
+            .stock-card{background:transparent;border:0;overflow:visible;}
+            .table-responsive{overflow:visible;}
+            .stock-table{display:block;background:transparent;}
+            .stock-table thead{display:none;}
+            .stock-table tbody{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;}
+            .stock-table tbody tr{display:grid;grid-template-columns:1fr 1fr;background:var(--card-bg);border:1px solid var(--border-color);border-radius:var(--radius);padding:12px;}
+            .stock-table tbody td{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;min-width:0;padding:7px 0;border:0;border-bottom:1px dashed var(--border-color);text-align:right!important;white-space:normal;}
+            .stock-table tbody td::before{content:attr(data-label);font-size:8px;font-weight:700;text-transform:uppercase;color:var(--muted-color);text-align:left;}
+            .stock-table tbody td.product-cell{grid-column:1/-1;display:block;padding:0 0 10px;}
+            .stock-table tbody td.product-cell::before{display:none;}
+            .stock-table tbody td:last-child{border-bottom:0;}
+        }
+        @media(max-width:767.98px){
+            .content-wrap{padding-left:10px;padding-right:10px;}
+            .page-heading{align-items:flex-start;flex-direction:column;}
+            .stat-grid{grid-template-columns:1fr 1fr;}
+            .toolbar-field,.toolbar-search{min-width:100%;flex-basis:100%;}
+            .stock-table tbody{grid-template-columns:1fr;}
+            .stock-table tbody tr{grid-template-columns:1fr;}
+            .stock-table tbody td{grid-column:1/-1;}
+        }
+        @media print{.sidebar,.app-nav,.footer,.no-print{display:none!important}.app-main{margin-left:0!important}.content-wrap{padding:0!important}.stock-card{border:0}.table-responsive{overflow:visible!important}.stock-table{display:table!important}.stock-table thead{display:table-header-group!important}.stock-table tbody{display:table-row-group!important}.stock-table tbody tr{display:table-row!important}.stock-table tbody td{display:table-cell!important}.stock-table tbody td::before{display:none!important}}
+    </style>
 </head>
-
 <body>
 <?php include('includes/sidebar.php'); ?>
-
 <main class="app-main">
     <?php include('includes/nav.php'); ?>
-
     <div class="content-wrap">
-        <div class="page-new-header">
-            <h1 class="page-new-title">Stock Overview</h1>
-            <div class="page-new-subtitle">
-                <?php echo h($businessName); ?> &nbsp;•&nbsp; Inventory
+        <div class="page-heading">
+            <div>
+                <h1 class="page-title">Stock Overview</h1>
+                <div class="page-subtitle"><?php echo h($businessName); ?> · Inventory stock position and movement summary</div>
             </div>
+            <button type="button" class="btn btn-soft no-print" onclick="window.print()"><i class="fa-solid fa-print me-2"></i>Print</button>
         </div>
 
-        
-                </div>
+        <div class="stat-grid">
+            <div class="stat-card"><div class="stat-icon"><i class="fa-solid fa-boxes-stacked"></i></div><div><div class="stat-label">Total Products</div><div class="stat-value"><?php echo (int)$totalProducts; ?></div></div></div>
+            <div class="stat-card"><div class="stat-icon"><i class="fa-solid fa-circle-check"></i></div><div><div class="stat-label">In Stock</div><div class="stat-value"><?php echo (int)$inStockCount; ?></div></div></div>
+            <div class="stat-card"><div class="stat-icon"><i class="fa-solid fa-triangle-exclamation"></i></div><div><div class="stat-label">Low Stock</div><div class="stat-value"><?php echo (int)$lowStockCount; ?></div></div></div>
+            <div class="stat-card"><div class="stat-icon"><i class="fa-solid fa-circle-xmark"></i></div><div><div class="stat-label">Out of Stock</div><div class="stat-value"><?php echo (int)$outOfStockCount; ?></div></div></div>
+            <div class="stat-card"><div class="stat-icon"><i class="fa-solid fa-cubes"></i></div><div><div class="stat-label">Total Stock Qty</div><div class="stat-value"><?php echo number_format($totalStockQty, 3); ?></div></div></div>
+            <div class="stat-card"><div class="stat-icon"><i class="fa-solid fa-weight-hanging"></i></div><div><div class="stat-label">Total Weight</div><div class="stat-value"><?php echo number_format($totalStockWeight, 3); ?></div></div></div>
+        </div>
 
-                <?php if ($success !== ''): ?>
-                    <div class="alert alert-success alert-dismissible fade show" role="alert">
-                        <?php echo h($success); ?>
-                        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-                    </div>
-                <?php endif; ?>
+        <form method="get" class="stock-toolbar no-print">
+            <div class="toolbar-search"><label class="field-label">Search</label><i class="fa-solid fa-magnifying-glass"></i><input type="search" name="search" class="form-control" placeholder="Product, code, barcode or category" value="<?php echo h($search); ?>"></div>
+            <div class="toolbar-field"><label class="field-label">Category</label><select name="category_id" class="form-select"><option value="0">All Categories</option><?php foreach ($categories as $cat): ?><option value="<?php echo (int)$cat['id']; ?>" <?php echo $categoryFilter === (int)$cat['id'] ? 'selected' : ''; ?>><?php echo h($cat['category_name']); ?></option><?php endforeach; ?></select></div>
+            <div class="toolbar-field"><label class="field-label">Stock Status</label><select name="stock_status" class="form-select"><option value="all" <?php echo $stockStatus === 'all' ? 'selected' : ''; ?>>All Stock</option><option value="in_stock" <?php echo $stockStatus === 'in_stock' ? 'selected' : ''; ?>>In Stock</option><option value="low_stock" <?php echo $stockStatus === 'low_stock' ? 'selected' : ''; ?>>Low Stock</option><option value="out_of_stock" <?php echo $stockStatus === 'out_of_stock' ? 'selected' : ''; ?>>Out of Stock</option></select></div>
+            <div class="toolbar-field"><label class="field-label">Product Status</label><select name="status" class="form-select"><option value="all" <?php echo $productStatus === 'all' ? 'selected' : ''; ?>>All Status</option><option value="active" <?php echo $productStatus === 'active' ? 'selected' : ''; ?>>Active</option><option value="inactive" <?php echo $productStatus === 'inactive' ? 'selected' : ''; ?>>Inactive</option></select></div>
+            <div class="d-flex gap-2"><button type="submit" class="btn btn-theme"><i class="fa-solid fa-filter me-2"></i>Apply</button><a href="stock-overview.php" class="btn btn-soft">Reset</a></div>
+        </form>
 
-                <?php if ($error !== ''): ?>
-                    <div class="alert alert-danger alert-dismissible fade show" role="alert">
-                        <?php echo h($error); ?>
-                        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-                    </div>
-                <?php endif; ?>
+        <div class="stock-card">
+            <?php if (!empty($products)): ?>
+            <div class="table-responsive">
+                <table class="table stock-table align-middle">
+                    <thead><tr><th>#</th><th>Product</th><th>Category</th><?php if ($prodHasBarcode): ?><th>Barcode</th><?php endif; ?><?php if ($prodHasPurity): ?><th>Purity</th><?php endif; ?><th>Opening</th><th>In</th><th>Out</th><th>Closing</th><th>Minimum</th><th>Weight</th><?php if ($prodHasSaleRate): ?><th>Sale Rate</th><?php endif; ?><th>Status</th><th>Last Movement</th><th>Updated</th></tr></thead>
+                    <tbody>
+                    <?php foreach ($products as $index => $product): ?>
+                        <?php
+                            $stockQty = (float)($product['stock_qty'] ?? 0);
+                            $minQty = (float)($product['min_stock_qty'] ?? 0);
+                            $stockWeight = (float)($product['stock_weight'] ?? 0);
+                            $statusText = 'In Stock'; $statusClass = 'status-in';
+                            if ($stockQty <= 0) { $statusText = 'Out of Stock'; $statusClass = 'status-out'; }
+                            elseif ($minQty > 0 && $stockQty <= $minQty) { $statusText = 'Low Stock'; $statusClass = 'status-low'; }
+                        ?>
+                        <tr>
+                            <td data-label="#"><?php echo $index + 1; ?></td>
+                            <td class="product-cell" data-label="Product"><div class="product-wrap"><?php if (!empty($product['image_path'])): ?><img src="<?php echo h($product['image_path']); ?>" alt="" class="product-image"><?php else: ?><div class="product-placeholder"><i class="fa-solid fa-gem"></i></div><?php endif; ?><div><div class="product-name"><?php echo h($product['product_name']); ?></div><div class="product-sub"><?php echo h($product['product_code']); ?><?php if (!empty($product['design_name'])): ?> · <?php echo h($product['design_name']); ?><?php endif; ?></div></div></div></td>
+                            <td data-label="Category"><?php echo h($product['category_name'] ?: '—'); ?></td>
+                            <?php if ($prodHasBarcode): ?><td data-label="Barcode"><?php echo h($product['barcode'] ?: '—'); ?></td><?php endif; ?>
+                            <?php if ($prodHasPurity): ?><td data-label="Purity"><?php echo h($product['purity'] ?: '—'); ?></td><?php endif; ?>
+                            <td data-label="Opening"><?php echo number_format((float)($product['opening_qty'] ?? 0), 3); ?></td>
+                            <td data-label="In" class="number-in"><?php echo number_format((float)($product['in_qty'] ?? 0), 3); ?></td>
+                            <td data-label="Out" class="number-out"><?php echo number_format((float)($product['out_qty'] ?? 0), 3); ?></td>
+                            <td data-label="Closing" class="number-main"><?php echo number_format($stockQty, 3); ?> <?php echo h($product['unit'] ?? ''); ?></td>
+                            <td data-label="Minimum"><?php echo number_format($minQty, 3); ?></td>
+                            <td data-label="Weight"><?php echo number_format($stockWeight, 3); ?></td>
+                            <?php if ($prodHasSaleRate): ?><td data-label="Sale Rate">₹<?php echo number_format((float)($product['sale_rate'] ?? 0), 2); ?></td><?php endif; ?>
+                            <td data-label="Status"><span class="status-badge <?php echo $statusClass; ?>"><?php echo $statusText; ?></span></td>
+                            <td data-label="Last Movement"><?php echo !empty($product['last_movement_date']) ? date('d-m-Y h:i A', strtotime($product['last_movement_date'])) : '—'; ?></td>
+                            <td data-label="Updated"><?php echo !empty($product['stock_updated_at']) ? date('d-m-Y h:i A', strtotime($product['stock_updated_at'])) : '—'; ?></td>
+                        </tr>
+                    <?php endforeach; ?>
+                    </tbody>
+                </table>
+            </div>
+            <?php else: ?>
+                <div class="empty-state"><i class="fa-regular fa-folder-open"></i><div>No stock records found.</div></div>
+            <?php endif; ?>
+        </div>
 
-                <div class="row">
-                    <div class="col-md-3 col-xl-3">
-                        <div class="card text-center">
-                            <div class="card-body">
-                                <h3 class="text-primary mt-2"><?php echo $totalProducts; ?></h3>
-                                <p class="text-muted mb-0">Total Products</p>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="col-md-3 col-xl-3">
-                        <div class="card text-center">
-                            <div class="card-body">
-                                <h3 class="text-success mt-2"><?php echo $inStockCount; ?></h3>
-                                <p class="text-muted mb-0">In Stock</p>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="col-md-3 col-xl-3">
-                        <div class="card text-center">
-                            <div class="card-body">
-                                <h3 class="text-warning mt-2"><?php echo $lowStockCount; ?></h3>
-                                <p class="text-muted mb-0">Low Stock</p>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="col-md-3 col-xl-3">
-                        <div class="card text-center">
-                            <div class="card-body">
-                                <h3 class="text-danger mt-2"><?php echo $outOfStockCount; ?></h3>
-                                <p class="text-muted mb-0">Out of Stock</p>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="col-md-6 col-xl-6">
-                        <div class="card text-center">
-                            <div class="card-body">
-                                <h3 class="text-info mt-2"><?php echo number_format($totalStockQty, 3); ?></h3>
-                                <p class="text-muted mb-0">Total Stock Qty</p>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="col-md-6 col-xl-6">
-                        <div class="card text-center">
-                            <div class="card-body">
-                                <h3 class="text-dark mt-2"><?php echo number_format($totalStockWeight, 3); ?></h3>
-                                <p class="text-muted mb-0">Total Stock Weight</p>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="card">
-                    <div class="card-body">
-                        <form method="get" class="row g-2 align-items-end">
-                            <div class="col-md-3">
-                                <label class="form-label">Search</label>
-                                <input
-                                    type="text"
-                                    name="search"
-                                    class="form-control"
-                                    placeholder="Product name, code, barcode..."
-                                    value="<?php echo h($search); ?>"
-                                >
-                            </div>
-
-                            <div class="col-md-2">
-                                <label class="form-label">Category</label>
-                                <select name="category_id" class="form-select">
-                                    <option value="0">All Categories</option>
-                                    <?php foreach ($categories as $cat): ?>
-                                        <option value="<?php echo (int)$cat['id']; ?>" <?php echo $categoryFilter === (int)$cat['id'] ? 'selected' : ''; ?>>
-                                            <?php echo h($cat['category_name']); ?>
-                                        </option>
-                                    <?php endforeach; ?>
-                                </select>
-                            </div>
-
-                            <div class="col-md-2">
-                                <label class="form-label">Stock Status</label>
-                                <select name="stock_status" class="form-select">
-                                    <option value="all" <?php echo $stockStatus === 'all' ? 'selected' : ''; ?>>All</option>
-                                    <option value="in_stock" <?php echo $stockStatus === 'in_stock' ? 'selected' : ''; ?>>In Stock</option>
-                                    <option value="low_stock" <?php echo $stockStatus === 'low_stock' ? 'selected' : ''; ?>>Low Stock</option>
-                                    <option value="out_of_stock" <?php echo $stockStatus === 'out_of_stock' ? 'selected' : ''; ?>>Out of Stock</option>
-                                </select>
-                            </div>
-
-                            <div class="col-md-2">
-                                <label class="form-label">Product Status</label>
-                                <select name="status" class="form-select">
-                                    <option value="all" <?php echo $productStatus === 'all' ? 'selected' : ''; ?>>All</option>
-                                    <option value="active" <?php echo $productStatus === 'active' ? 'selected' : ''; ?>>Active</option>
-                                    <option value="inactive" <?php echo $productStatus === 'inactive' ? 'selected' : ''; ?>>Inactive</option>
-                                </select>
-                            </div>
-
-                            <div class="col-md-3">
-                                <div class="d-flex gap-2">
-                                    <button type="submit" class="btn btn-primary w-100">Search</button>
-                                    <a href="stock-overview.php" class="btn btn-secondary w-100">Reset</a>
-                                </div>
-                            </div>
-                        </form>
-                    </div>
-                </div>
-
-                <div class="card">
-                    <div class="card-body">
-                        <div class="table-responsive">
-                            <table class="table table-bordered table-striped align-middle mb-0">
-                                <thead>
-                                    <tr>
-                                        <th>#</th>
-                                        <th>Product</th>
-                                        <th>Category</th>
-                                        <?php if ($prodHasBarcode): ?><th>Barcode</th><?php endif; ?>
-                                        <?php if ($prodHasPurity): ?><th>Purity</th><?php endif; ?>
-                                        <th>Opening Qty</th>
-                                        <th>In Qty</th>
-                                        <th>Out Qty</th>
-                                        <th>Closing Qty</th>
-                                        <th>Min Qty</th>
-                                        <th>Stock Weight</th>
-                                        <?php if ($prodHasSaleRate): ?><th>Sale Rate</th><?php endif; ?>
-                                        <th>Stock Status</th>
-                                        <th>Last Movement</th>
-                                        <th>Last Updated</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <?php if (!empty($products)): ?>
-                                        <?php foreach ($products as $index => $product): ?>
-                                            <?php
-                                                $stockQty = (float)($product['stock_qty'] ?? 0);
-                                                $minQty   = (float)($product['min_stock_qty'] ?? 0);
-                                                $stockWeight = (float)($product['stock_weight'] ?? 0);
-
-                                                $stockBadge = '<span class="badge bg-success">In Stock</span>';
-                                                if ($stockQty <= 0) {
-                                                    $stockBadge = '<span class="badge bg-danger">Out of Stock</span>';
-                                                } elseif ($minQty > 0 && $stockQty <= $minQty) {
-                                                    $stockBadge = '<span class="badge bg-warning text-dark">Low Stock</span>';
-                                                }
-                                            ?>
-                                            <tr>
-                                                <td><?php echo $index + 1; ?></td>
-
-                                                <td>
-                                                    <div class="d-flex align-items-center">
-                                                        <?php if (!empty($product['image_path'])): ?>
-                                                            <img
-                                                                src="<?php echo h($product['image_path']); ?>"
-                                                                alt="Product"
-                                                                class="rounded me-2"
-                                                                style="width:50px;height:50px;object-fit:cover;"
-                                                            >
-                                                        <?php endif; ?>
-
-                                                        <div>
-                                                            <strong><?php echo h($product['product_name']); ?></strong><br>
-                                                            <small class="text-muted"><?php echo h($product['product_code']); ?></small>
-                                                            <?php if (!empty($product['design_name'])): ?>
-                                                                <br><small class="text-muted"><?php echo h($product['design_name']); ?></small>
-                                                            <?php endif; ?>
-                                                        </div>
-                                                    </div>
-                                                </td>
-
-                                                <td><?php echo h($product['category_name'] ?? ''); ?></td>
-
-                                                <?php if ($prodHasBarcode): ?>
-                                                    <td><?php echo h($product['barcode'] ?? ''); ?></td>
-                                                <?php endif; ?>
-
-                                                <?php if ($prodHasPurity): ?>
-                                                    <td><?php echo h($product['purity'] ?? ''); ?></td>
-                                                <?php endif; ?>
-
-                                                <td><?php echo number_format((float)($product['opening_qty'] ?? 0), 3); ?></td>
-                                                <td class="text-success"><?php echo number_format((float)($product['in_qty'] ?? 0), 3); ?></td>
-                                                <td class="text-danger"><?php echo number_format((float)($product['out_qty'] ?? 0), 3); ?></td>
-                                                <td><strong><?php echo number_format($stockQty, 3); ?></strong> <?php echo h($product['unit'] ?? ''); ?></td>
-                                                <td><?php echo number_format($minQty, 3); ?></td>
-                                                <td><?php echo number_format($stockWeight, 3); ?></td>
-
-                                                <?php if ($prodHasSaleRate): ?>
-                                                    <td>₹<?php echo number_format((float)($product['sale_rate'] ?? 0), 2); ?></td>
-                                                <?php endif; ?>
-
-                                                <td><?php echo $stockBadge; ?></td>
-
-                                                <td>
-                                                    <?php
-                                                    if (!empty($product['last_movement_date'])) {
-                                                        echo date('d-m-Y h:i A', strtotime($product['last_movement_date']));
-                                                    } else {
-                                                        echo '-';
-                                                    }
-                                                    ?>
-                                                </td>
-
-                                                <td>
-                                                    <?php
-                                                    if (!empty($product['stock_updated_at'])) {
-                                                        echo date('d-m-Y h:i A', strtotime($product['stock_updated_at']));
-                                                    } else {
-                                                        echo '-';
-                                                    }
-                                                    ?>
-                                                </td>
-                                            </tr>
-                                        <?php endforeach; ?>
-                                    <?php else: ?>
-                                        <?php
-                                            $colspan = 12;
-                                            if ($prodHasBarcode) $colspan++;
-                                            if ($prodHasPurity) $colspan++;
-                                            if ($prodHasSaleRate) $colspan++;
-                                        ?>
-                                        <tr>
-                                            <td colspan="<?php echo $colspan; ?>" class="text-center text-muted">
-                                                No stock records found.
-                                            </td>
-                                        </tr>
-                                    <?php endif; ?>
-                                </tbody>
-                            </table>
-                        </div>
-
-                        <?php if (!$hasProductStockTable): ?>
-                            <div class="alert alert-warning mt-3 mb-0">
-                                <strong>Note:</strong> `product_stock` table not found. Closing quantity is currently shown from `products.current_stock_qty`.
-                            </div>
-                        <?php endif; ?>
-
-                    </div>
-                </div>
-
+        <?php if (!$hasProductStockTable): ?><div class="notice"><strong>Note:</strong> The <code>product_stock</code> table was not found. Closing quantity is currently taken from <code>products.current_stock_qty</code>.</div><?php endif; ?>
         <?php include('includes/footer.php'); ?>
     </div>
 </main>
-
 <?php include('includes/script.php'); ?>
 <script src="assets/js/script.js"></script>
-
 </body>
 </html>
