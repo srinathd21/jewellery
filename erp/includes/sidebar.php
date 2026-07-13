@@ -295,6 +295,7 @@ usort($rootMenus, static function (array $a, array $b): int {
     return [(int)$a['sort_order'], (int)$a['id']] <=> [(int)$b['sort_order'], (int)$b['id']];
 });
 
+$rootMenus = $childrenByParent[0] ?? [];
 $businessShort = sidebar_initials($businessName);
 ?>
 
@@ -410,16 +411,16 @@ $businessShort = sidebar_initials($businessName);
         width: 100%;
         display: flex;
         align-items: center;
-        gap: 12px;
-        min-height: 44px;
-        padding: 10px 12px;
+        gap: 10px;
+        min-height: 42px;
+        padding: 9px 10px;
         margin-bottom: 3px;
         border: 0;
         border-radius: calc(var(--sidebar-radius) * .72);
         background: transparent;
         color: rgba(255,255,255,.82);
         text-decoration: none;
-        font-size: 14px;
+        font-size: 13px;
         font-weight: 600;
         text-align: left;
         transition: background .2s ease, color .2s ease, transform .2s ease;
@@ -445,6 +446,19 @@ $businessShort = sidebar_initials($businessName);
         text-align: center;
     }
 
+
+    .app-sidebar .sidebar-label {
+        min-width: 0;
+        flex: 1 1 auto;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .app-sidebar .sidebar-submenu .sidebar-label {
+        font-size: 11px;
+    }
+
     .app-sidebar .submenu-toggle .submenu-arrow {
         margin-left: auto;
         font-size: 10px;
@@ -462,9 +476,9 @@ $businessShort = sidebar_initials($businessName);
     }
 
     .app-sidebar .sidebar-submenu .nav-link {
-        min-height: 38px;
-        padding: 8px 10px;
-        font-size: 12px;
+        min-height: 36px;
+        padding: 7px 8px;
+        font-size: 11px;
         color: rgba(255,255,255,.68);
     }
 
@@ -541,9 +555,42 @@ $businessShort = sidebar_initials($businessName);
         box-shadow: 0 0 0 2px color-mix(in srgb, var(--sidebar-primary) 35%, transparent);
     }
 
+    .sidebar-hover-card {
+        position: fixed;
+        z-index: 30000;
+        display: none;
+        max-width: 260px;
+        padding: 8px 11px;
+        border: 1px solid rgba(255,255,255,.12);
+        border-radius: 8px;
+        background: #20272d;
+        color: #fff;
+        font-size: 11px;
+        font-weight: 600;
+        line-height: 1.35;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        box-shadow: 0 10px 28px rgba(0,0,0,.28);
+        pointer-events: none;
+    }
+    .sidebar-hover-card.show { display: block; }
+
     @media (prefers-reduced-motion: reduce) {
         .app-sidebar .sidebar-submenu,
-        .app-sidebar .submenu-toggle .submenu-arrow {
+    
+    .app-sidebar .sidebar-label {
+        min-width: 0;
+        flex: 1 1 auto;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .app-sidebar .sidebar-submenu .sidebar-label {
+        font-size: 11px;
+    }
+
+    .app-sidebar .submenu-toggle .submenu-arrow {
             transition: none !important;
         }
     }
@@ -577,6 +624,212 @@ $businessShort = sidebar_initials($businessName);
             $routeUrl = trim((string)($menu['route_url'] ?? ''));
             $iconClass = trim((string)($menu['icon_class'] ?? 'fa-regular fa-circle'));
             $children = $childrenByParent[$menuId] ?? [];
+
+            /*
+             * Add rate-management pages inside the Products module.
+             * The sidebar is database-driven, so these virtual children are added only
+             * when the current root menu is the Products module. Existing database menu
+             * rows with the same route are respected and will not be duplicated.
+             */
+            $menuCode = strtolower(trim((string)($menu['menu_code'] ?? '')));
+            $menuTitleKey = strtolower(trim($menuTitle));
+            $menuRouteFile = strtolower(basename(parse_url($routeUrl, PHP_URL_PATH) ?: ''));
+            $isProductsModule = (
+                $menuCode === 'products' ||
+                $menuCode === 'product' ||
+                strpos($menuCode, 'products') !== false ||
+                $menuTitleKey === 'products' ||
+                $menuTitleKey === 'product management' ||
+                strpos($menuTitleKey, 'product') !== false ||
+                in_array($menuRouteFile, ['products.php', 'manage-product.php', 'product1.php'], true)
+            );
+
+
+            $isPawnModule = (
+                $menuCode === 'pawn' ||
+                $menuCode === 'pawn.broking' ||
+                strpos($menuCode, 'pawn') !== false ||
+                $menuTitleKey === 'pawn broking' ||
+                $menuTitleKey === 'pawn' ||
+                strpos($menuTitleKey, 'pawn') !== false ||
+                in_array($menuRouteFile, ['pawn-list.php', 'pawn-entry.php', 'pawn-customers.php'], true)
+            );
+
+            if ($isProductsModule) {
+                $existingChildRoutes = [];
+                foreach ($children as $existingChild) {
+                    $existingRoute = strtolower(basename(parse_url((string)($existingChild['route_url'] ?? ''), PHP_URL_PATH) ?: ''));
+                    if ($existingRoute !== '') {
+                        $existingChildRoutes[$existingRoute] = true;
+                    }
+                }
+
+                $virtualProductChildren = [
+                    [
+                        'id' => -900001,
+                        'parent_id' => $menuId,
+                        'menu_type' => 'Menu',
+                        'menu_title' => 'Silver Rates',
+                        'route_url' => 'silver-rates.php',
+                        'icon_class' => 'fa-solid fa-coins',
+                        'sort_order' => 9001,
+                        'open_in_new_tab' => 0,
+                        'is_active' => 1,
+                        'is_visible' => 1,
+                    ],
+                    [
+                        'id' => -900002,
+                        'parent_id' => $menuId,
+                        'menu_type' => 'Menu',
+                        'menu_title' => 'Metal Rates',
+                        'route_url' => 'metal-rates.php',
+                        'icon_class' => 'fa-solid fa-scale-balanced',
+                        'sort_order' => 9002,
+                        'open_in_new_tab' => 0,
+                        'is_active' => 1,
+                        'is_visible' => 1,
+                    ],
+                ];
+
+                foreach ($virtualProductChildren as $virtualChild) {
+                    $virtualRoute = strtolower(basename((string)$virtualChild['route_url']));
+                    if (!isset($existingChildRoutes[$virtualRoute])) {
+                        $children[] = $virtualChild;
+                        $existingChildRoutes[$virtualRoute] = true;
+                    }
+                }
+            }
+
+
+            if ($isPawnModule) {
+                $existingChildRoutes = [];
+                foreach ($children as $existingChild) {
+                    $existingRoute = strtolower(basename(parse_url((string)($existingChild['route_url'] ?? ''), PHP_URL_PATH) ?: ''));
+                    if ($existingRoute !== '') {
+                        $existingChildRoutes[$existingRoute] = true;
+                    }
+                }
+
+                $virtualPawnChildren = [
+                    [
+                        'id' => -910001,
+                        'parent_id' => $menuId,
+                        'menu_type' => 'Menu',
+                        'menu_title' => 'Pawn Entries',
+                        'route_url' => 'pawn-list.php',
+                        'icon_class' => 'fa-solid fa-list',
+                        'sort_order' => 1,
+                        'open_in_new_tab' => 0,
+                        'is_active' => 1,
+                        'is_visible' => 1,
+                    ],
+                    [
+                        'id' => -910002,
+                        'parent_id' => $menuId,
+                        'menu_type' => 'Menu',
+                        'menu_title' => 'New Pawn Entry',
+                        'route_url' => 'pawn-entry.php',
+                        'icon_class' => 'fa-solid fa-plus-circle',
+                        'sort_order' => 2,
+                        'open_in_new_tab' => 0,
+                        'is_active' => 1,
+                        'is_visible' => 1,
+                    ],
+                    [
+                        'id' => -910003,
+                        'parent_id' => $menuId,
+                        'menu_type' => 'Menu',
+                        'menu_title' => 'Pawn Customers',
+                        'route_url' => 'pawn-customers.php',
+                        'icon_class' => 'fa-solid fa-users',
+                        'sort_order' => 3,
+                        'open_in_new_tab' => 0,
+                        'is_active' => 1,
+                        'is_visible' => 1,
+                    ],
+                    [
+                        'id' => -910004,
+                        'parent_id' => $menuId,
+                        'menu_type' => 'Menu',
+                        'menu_title' => 'Add Pawn Customer',
+                        'route_url' => 'pawn-customer-add.php',
+                        'icon_class' => 'fa-solid fa-user-plus',
+                        'sort_order' => 4,
+                        'open_in_new_tab' => 0,
+                        'is_active' => 1,
+                        'is_visible' => 1,
+                    ],
+                    [
+                        'id' => -910005,
+                        'parent_id' => $menuId,
+                        'menu_type' => 'Menu',
+                        'menu_title' => 'Pawn Categories',
+                        'route_url' => 'pawn-categories.php',
+                        'icon_class' => 'fa-solid fa-tags',
+                        'sort_order' => 5,
+                        'open_in_new_tab' => 0,
+                        'is_active' => 1,
+                        'is_visible' => 1,
+                    ],
+                    [
+                        'id' => -910006,
+                        'parent_id' => $menuId,
+                        'menu_type' => 'Menu',
+                        'menu_title' => 'Add Pawn Category',
+                        'route_url' => 'pawn-category-add.php',
+                        'icon_class' => 'fa-solid fa-tag',
+                        'sort_order' => 6,
+                        'open_in_new_tab' => 0,
+                        'is_active' => 1,
+                        'is_visible' => 1,
+                    ],
+                    [
+                        'id' => -910007,
+                        'parent_id' => $menuId,
+                        'menu_type' => 'Menu',
+                        'menu_title' => 'Pawn Payments',
+                        'route_url' => 'pawn-payment.php',
+                        'icon_class' => 'fa-solid fa-money-bill-transfer',
+                        'sort_order' => 7,
+                        'open_in_new_tab' => 0,
+                        'is_active' => 1,
+                        'is_visible' => 1,
+                    ],
+                    [
+                        'id' => -910008,
+                        'parent_id' => $menuId,
+                        'menu_type' => 'Menu',
+                        'menu_title' => 'Interest Collection',
+                        'route_url' => 'pawn-interest.php',
+                        'icon_class' => 'fa-solid fa-percent',
+                        'sort_order' => 8,
+                        'open_in_new_tab' => 0,
+                        'is_active' => 1,
+                        'is_visible' => 1,
+                    ],
+                    [
+                        'id' => -910009,
+                        'parent_id' => $menuId,
+                        'menu_type' => 'Menu',
+                        'menu_title' => 'Pawn Release',
+                        'route_url' => 'pawn-release.php',
+                        'icon_class' => 'fa-solid fa-box-open',
+                        'sort_order' => 9,
+                        'open_in_new_tab' => 0,
+                        'is_active' => 1,
+                        'is_visible' => 1,
+                    ],
+                ];
+
+                foreach ($virtualPawnChildren as $virtualChild) {
+                    $virtualRoute = strtolower(basename((string)$virtualChild['route_url']));
+                    if (!isset($existingChildRoutes[$virtualRoute])) {
+                        $children[] = $virtualChild;
+                        $existingChildRoutes[$virtualRoute] = true;
+                    }
+                }
+            }
+
             usort($children, static function (array $a, array $b): int {
                 return [(int)$a['sort_order'], (int)$a['id']] <=> [(int)$b['sort_order'], (int)$b['id']];
             });
@@ -610,7 +863,8 @@ $businessShort = sidebar_initials($businessName);
                     type="button"
                     data-submenu-target="<?php echo sidebar_e($collapseId); ?>"
                     aria-expanded="<?php echo $isActive ? 'true' : 'false'; ?>"
-                    aria-controls="<?php echo sidebar_e($collapseId); ?>">
+                    aria-controls="<?php echo sidebar_e($collapseId); ?>"
+                    data-sidebar-tooltip="<?php echo sidebar_e($menuTitle); ?>">
                     <i class="<?php echo sidebar_e($iconClass); ?>"></i>
                     <span class="sidebar-label"><?php echo sidebar_e($menuTitle); ?></span>
                     <i class="fa-solid fa-chevron-down submenu-arrow"></i>
@@ -626,6 +880,7 @@ $businessShort = sidebar_initials($businessName);
                         ?>
                         <a class="nav-link <?php echo $childCurrent ? 'active' : ''; ?>"
                            href="<?php echo sidebar_e($childRoute !== '' ? $childRoute : '#'); ?>"
+                           data-sidebar-tooltip="<?php echo sidebar_e($child['menu_title'] ?? 'Menu'); ?>"
                            <?php echo !empty($child['open_in_new_tab']) ? 'target="_blank" rel="noopener"' : ''; ?>>
                             <i class="<?php echo sidebar_e($childIcon); ?>"></i>
                             <span class="sidebar-label"><?php echo sidebar_e($child['menu_title'] ?? 'Menu'); ?></span>
@@ -636,6 +891,7 @@ $businessShort = sidebar_initials($businessName);
             <?php else: ?>
                 <a class="nav-link <?php echo $directActive ? 'active' : ''; ?>"
                    href="<?php echo sidebar_e($routeUrl !== '' ? $routeUrl : '#'); ?>"
+                   data-sidebar-tooltip="<?php echo sidebar_e($menuTitle); ?>"
                    <?php echo !empty($menu['open_in_new_tab']) ? 'target="_blank" rel="noopener"' : ''; ?>>
                     <i class="<?php echo sidebar_e($iconClass); ?>"></i>
                     <span class="sidebar-label"><?php echo sidebar_e($menuTitle); ?></span>
@@ -648,3 +904,40 @@ $businessShort = sidebar_initials($businessName);
         <?php endif; ?>
     </nav>
 </aside>
+<div class="sidebar-hover-card" id="sidebarHoverCard" role="tooltip"></div>
+<script>
+(function () {
+    'use strict';
+    const card = document.getElementById('sidebarHoverCard');
+    if (!card) return;
+    let activeTarget = null;
+    function showCard(target) {
+        const text = (target.getAttribute('data-sidebar-tooltip') || '').trim();
+        const label = target.querySelector('.sidebar-label');
+        if (!text || !label) return;
+        const isTruncated = label.scrollWidth > label.clientWidth + 1;
+        const isCollapsed = document.body.classList.contains('sidebar-collapsed');
+        if (!isTruncated && !isCollapsed) return;
+        activeTarget = target;
+        card.textContent = text;
+        card.classList.add('show');
+        const rect = target.getBoundingClientRect();
+        const cardRect = card.getBoundingClientRect();
+        let top = rect.top + (rect.height - cardRect.height) / 2;
+        top = Math.max(8, Math.min(top, window.innerHeight - cardRect.height - 8));
+        let left = rect.right + 8;
+        if (left + cardRect.width > window.innerWidth - 8) left = Math.max(8, rect.left - cardRect.width - 8);
+        card.style.top = top + 'px';
+        card.style.left = left + 'px';
+    }
+    function hideCard() { activeTarget = null; card.classList.remove('show'); }
+    document.querySelectorAll('.app-sidebar [data-sidebar-tooltip]').forEach(function (target) {
+        target.addEventListener('mouseenter', function () { showCard(target); });
+        target.addEventListener('mouseleave', hideCard);
+        target.addEventListener('focus', function () { showCard(target); });
+        target.addEventListener('blur', hideCard);
+    });
+    window.addEventListener('scroll', function () { if (activeTarget) showCard(activeTarget); }, true);
+    window.addEventListener('resize', hideCard);
+})();
+</script>
