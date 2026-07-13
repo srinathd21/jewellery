@@ -1,5 +1,242 @@
 <?php
-require_once __DIR__ . '/_bootstrap.php';
+declare(strict_types=1);
+
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+date_default_timezone_set((string)($_SESSION['timezone'] ?? 'Asia/Kolkata'));
+header('Content-Type: application/json; charset=utf-8');
+
+$configCandidates = [
+    dirname(__DIR__) . '/config/config.php',
+    dirname(__DIR__) . '/config.php',
+    dirname(__DIR__) . '/includes/config.php',
+    dirname(__DIR__) . '/super-admin/includes/config.php',
+];
+
+$configLoaded = false;
+
+foreach ($configCandidates as $configFile) {
+    if (is_file($configFile)) {
+        require_once $configFile;
+        $configLoaded = true;
+        break;
+    }
+}
+
+if (!$configLoaded || !isset($conn) || !($conn instanceof mysqli)) {
+    apiResponse(false, 'Database configuration is not available.', [], 500);
+}
+
+mysqli_report(MYSQLI_REPORT_OFF);
+$conn->set_charset('utf8mb4');
+
+function apiResponse(bool $success, string $message, array $data = [], int $status = 200): never
+{
+    http_response_code($status);
+    echo json_encode(
+        [
+            'success' => $success,
+            'message' => $message,
+            'data' => $data,
+        ],
+        JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+    );
+    exit;
+}
+
+function tableExists(mysqli $conn, string $table): bool
+{
+    $safe = $conn->real_escape_string($table);
+    $result = $conn->query("SHOW TABLES LIKE '{$safe}'");
+    return $result && $result->num_rows > 0;
+}
+
+function hasColumn(mysqli $conn, string $table, string $column): bool
+{
+    $safeTable = $conn->real_escape_string($table);
+    $safeColumn = $conn->real_escape_string($column);
+    $result = $conn->query("SHOW COLUMNS FROM `{$safeTable}` LIKE '{$safeColumn}'");
+    return $result && $result->num_rows > 0;
+}
+
+function inputData(): array
+{
+    $contentType = strtolower((string)($_SERVER['CONTENT_TYPE'] ?? ''));
+
+    if (str_contains($contentType, 'application/json')) {
+        $decoded = json_decode((string)file_get_contents('php://input'), true);
+        return is_array($decoded) ? $decoded : [];
+    }
+
+    return $_POST;
+}
+
+function requireLogin(): array
+{
+    $userId = (int)($_SESSION['user_id'] ?? 0);
+    $businessId = (int)($_SESSION['business_id'] ?? 0);
+    $branchId = (int)($_SESSION['branch_id'] ?? 0);
+
+    if ($userId <= 0) {
+        apiResponse(false, 'Login session expired.', [], 401);
+    }
+
+    if ($businessId <= 0) {
+        apiResponse(false, 'Business session not found.', [], 401);
+    }
+
+    return [$userId, $businessId, $branchId];
+}
+
+function hasAnyPermission(array $permissionCodes, array $actions): bool
+{
+    if (($_SESSION['user_type'] ?? '') === 'Platform Admin') {
+        return true;
+    }
+
+    $roleName = strtolower(trim((string)($_SESSION['role_name'] ?? '')));
+    $roleCode = strtolower(trim((string)($_SESSION['role_code'] ?? '')));
+
+    if (
+        in_array($roleName, ['admin', 'business admin', 'manager', 'stock', 'staff', 'sales'], true) ||
+        in_array($roleCode, ['admin', 'business_admin', 'manager', 'stock', 'staff', 'sales'], true)
+    ) {
+        return true;
+    }
+
+    $permissions = $_SESSION['permissions'] ?? [];
+
+    foreach ($permissionCodes as $code) {
+        if (!isset($permissions[$code])) {
+            continue;
+        }
+
+        foreach ($actions as $action) {
+            if ((int)($permissions[$code][$action] ?? 0) === 1) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+function requirePermission(array $permissionCodes, array $actions): void
+{
+    if (!hasAnyPermission($permissionCodes, $actions)) {
+        apiResponse(false, 'Access denied.', [], 403);
+    }
+}
+
+function bindDynamic(mysqli_stmt $stmt, string $types, array &$values): void
+{
+    if ($types === '' || empty($values)) {
+        return;
+    }
+
+    $bind = [$types];
+
+    foreach ($values as $index => $value) {
+        $bind[] = &$values[$index];
+    }
+
+    call_user_func_array([$stmt, 'bind_param'], $bind);
+}
+
+function addAuditLogSafe(
+    mysqli $conn,
+    int $businessId,
+    int $userId,
+    string $module,
+    string $action,
+    int $referenceId,
+    string $description
+): void {
+    if (!tableExists($conn, 'audit_logs')) {
+        return;
+    }
+
+    $fields = [];
+    $placeholders = [];
+    $types = '';
+    $values = [];
+
+    $map = [
+        'business_id' => [$businessId, 'i'],
+        'user_id' => [$userId, 'i'],
+        'module_name' => [$module, 's'],
+        'action_type' => [$action, 's'],
+        'reference_id' => [$referenceId, 'i'],
+        'description' => [$description, 's'],
+        'ip_address' => [(string)($_SERVER['REMOTE_ADDR'] ?? ''), 's'],
+        'user_agent' => [(string)($_SERVER['HTTP_USER_AGENT'] ?? ''), 's'],
+    ];
+
+    foreach ($map as $field => [$value, $type]) {
+        if (!hasColumn($conn, 'audit_logs', $field)) {
+            continue;
+        }
+
+        $fields[] = $field;
+        $placeholders[] = '?';
+        $types .= $type;
+        $values[] = $value;
+    }
+
+    if (empty($fields)) {
+        return;
+    }
+
+    $sql = 'INSERT INTO audit_logs (' . implode(', ', $fields) . ')
+            VALUES (' . implode(', ', $placeholders) . ')';
+
+    $stmt = $conn->prepare($sql);
+
+    if (!$stmt) {
+        return;
+    }
+
+    bindDynamic($stmt, $types, $values);
+    $stmt->execute();
+    $stmt->close();
+}
+
+function generateReferenceNo(
+    mysqli $conn,
+    string $table,
+    string $column,
+    int $businessId,
+    string $prefix
+): string {
+    $like = $prefix . '%';
+    $sql = "SELECT `{$column}`
+            FROM `{$table}`
+            WHERE business_id = ?
+              AND `{$column}` LIKE ?
+            ORDER BY id DESC
+            LIMIT 1";
+
+    $stmt = $conn->prepare($sql);
+    $last = '';
+
+    if ($stmt) {
+        $stmt->bind_param('is', $businessId, $like);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $last = (string)($row[$column] ?? '');
+        $stmt->close();
+    }
+
+    $running = 1;
+
+    if ($last !== '' && preg_match('/(\d{4})$/', $last, $match)) {
+        $running = ((int)$match[1]) + 1;
+    }
+
+    return $prefix . str_pad((string)$running, 4, '0', STR_PAD_LEFT);
+}
 
 [$userId, $businessId, $branchId] = requireLogin();
 
