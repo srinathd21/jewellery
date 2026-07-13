@@ -513,6 +513,71 @@ $businessShort = sidebar_initials($businessName);
             $routeUrl = trim((string)($menu['route_url'] ?? ''));
             $iconClass = trim((string)($menu['icon_class'] ?? 'fa-regular fa-circle'));
             $children = $childrenByParent[$menuId] ?? [];
+
+            /*
+             * Add rate-management pages inside the Products module.
+             * The sidebar is database-driven, so these virtual children are added only
+             * when the current root menu is the Products module. Existing database menu
+             * rows with the same route are respected and will not be duplicated.
+             */
+            $menuCode = strtolower(trim((string)($menu['menu_code'] ?? '')));
+            $menuTitleKey = strtolower(trim($menuTitle));
+            $menuRouteFile = strtolower(basename(parse_url($routeUrl, PHP_URL_PATH) ?: ''));
+            $isProductsModule = (
+                $menuCode === 'products' ||
+                $menuCode === 'product' ||
+                strpos($menuCode, 'products') !== false ||
+                $menuTitleKey === 'products' ||
+                $menuTitleKey === 'product management' ||
+                strpos($menuTitleKey, 'product') !== false ||
+                in_array($menuRouteFile, ['products.php', 'manage-product.php', 'product1.php'], true)
+            );
+
+            if ($isProductsModule) {
+                $existingChildRoutes = [];
+                foreach ($children as $existingChild) {
+                    $existingRoute = strtolower(basename(parse_url((string)($existingChild['route_url'] ?? ''), PHP_URL_PATH) ?: ''));
+                    if ($existingRoute !== '') {
+                        $existingChildRoutes[$existingRoute] = true;
+                    }
+                }
+
+                $virtualProductChildren = [
+                    [
+                        'id' => -900001,
+                        'parent_id' => $menuId,
+                        'menu_type' => 'Menu',
+                        'menu_title' => 'Silver Rates',
+                        'route_url' => 'silver-rates.php',
+                        'icon_class' => 'fa-solid fa-coins',
+                        'sort_order' => 9001,
+                        'open_in_new_tab' => 0,
+                        'is_active' => 1,
+                        'is_visible' => 1,
+                    ],
+                    [
+                        'id' => -900002,
+                        'parent_id' => $menuId,
+                        'menu_type' => 'Menu',
+                        'menu_title' => 'Metal Rates',
+                        'route_url' => 'metal-rates.php',
+                        'icon_class' => 'fa-solid fa-scale-balanced',
+                        'sort_order' => 9002,
+                        'open_in_new_tab' => 0,
+                        'is_active' => 1,
+                        'is_visible' => 1,
+                    ],
+                ];
+
+                foreach ($virtualProductChildren as $virtualChild) {
+                    $virtualRoute = strtolower(basename((string)$virtualChild['route_url']));
+                    if (!isset($existingChildRoutes[$virtualRoute])) {
+                        $children[] = $virtualChild;
+                        $existingChildRoutes[$virtualRoute] = true;
+                    }
+                }
+            }
+
             usort($children, static function (array $a, array $b): int {
                 return [(int)$a['sort_order'], (int)$a['id']] <=> [(int)$b['sort_order'], (int)$b['id']];
             });
