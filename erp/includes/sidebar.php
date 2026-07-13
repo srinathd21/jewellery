@@ -482,6 +482,17 @@ $businessShort = sidebar_initials($businessName);
                 in_array($menuRouteFile, ['products.php', 'manage-product.php', 'product1.php'], true)
             );
 
+
+            $isPawnModule = (
+                $menuCode === 'pawn' ||
+                $menuCode === 'pawn.broking' ||
+                strpos($menuCode, 'pawn') !== false ||
+                $menuTitleKey === 'pawn broking' ||
+                $menuTitleKey === 'pawn' ||
+                strpos($menuTitleKey, 'pawn') !== false ||
+                in_array($menuRouteFile, ['pawn-list.php', 'pawn-entry.php', 'pawn-customers.php'], true)
+            );
+
             if ($isProductsModule) {
                 $existingChildRoutes = [];
                 foreach ($children as $existingChild) {
@@ -519,6 +530,136 @@ $businessShort = sidebar_initials($businessName);
                 ];
 
                 foreach ($virtualProductChildren as $virtualChild) {
+                    $virtualRoute = strtolower(basename((string)$virtualChild['route_url']));
+                    if (!isset($existingChildRoutes[$virtualRoute])) {
+                        $children[] = $virtualChild;
+                        $existingChildRoutes[$virtualRoute] = true;
+                    }
+                }
+            }
+
+
+            if ($isPawnModule) {
+                $existingChildRoutes = [];
+                foreach ($children as $existingChild) {
+                    $existingRoute = strtolower(basename(parse_url((string)($existingChild['route_url'] ?? ''), PHP_URL_PATH) ?: ''));
+                    if ($existingRoute !== '') {
+                        $existingChildRoutes[$existingRoute] = true;
+                    }
+                }
+
+                $virtualPawnChildren = [
+                    [
+                        'id' => -910001,
+                        'parent_id' => $menuId,
+                        'menu_type' => 'Menu',
+                        'menu_title' => 'Pawn Entries',
+                        'route_url' => 'pawn-list.php',
+                        'icon_class' => 'fa-solid fa-list',
+                        'sort_order' => 1,
+                        'open_in_new_tab' => 0,
+                        'is_active' => 1,
+                        'is_visible' => 1,
+                    ],
+                    [
+                        'id' => -910002,
+                        'parent_id' => $menuId,
+                        'menu_type' => 'Menu',
+                        'menu_title' => 'New Pawn Entry',
+                        'route_url' => 'pawn-entry.php',
+                        'icon_class' => 'fa-solid fa-plus-circle',
+                        'sort_order' => 2,
+                        'open_in_new_tab' => 0,
+                        'is_active' => 1,
+                        'is_visible' => 1,
+                    ],
+                    [
+                        'id' => -910003,
+                        'parent_id' => $menuId,
+                        'menu_type' => 'Menu',
+                        'menu_title' => 'Pawn Customers',
+                        'route_url' => 'pawn-customers.php',
+                        'icon_class' => 'fa-solid fa-users',
+                        'sort_order' => 3,
+                        'open_in_new_tab' => 0,
+                        'is_active' => 1,
+                        'is_visible' => 1,
+                    ],
+                    [
+                        'id' => -910004,
+                        'parent_id' => $menuId,
+                        'menu_type' => 'Menu',
+                        'menu_title' => 'Add Pawn Customer',
+                        'route_url' => 'pawn-customer-add.php',
+                        'icon_class' => 'fa-solid fa-user-plus',
+                        'sort_order' => 4,
+                        'open_in_new_tab' => 0,
+                        'is_active' => 1,
+                        'is_visible' => 1,
+                    ],
+                    [
+                        'id' => -910005,
+                        'parent_id' => $menuId,
+                        'menu_type' => 'Menu',
+                        'menu_title' => 'Pawn Categories',
+                        'route_url' => 'pawn-categories.php',
+                        'icon_class' => 'fa-solid fa-tags',
+                        'sort_order' => 5,
+                        'open_in_new_tab' => 0,
+                        'is_active' => 1,
+                        'is_visible' => 1,
+                    ],
+                    [
+                        'id' => -910006,
+                        'parent_id' => $menuId,
+                        'menu_type' => 'Menu',
+                        'menu_title' => 'Add Pawn Category',
+                        'route_url' => 'pawn-category-add.php',
+                        'icon_class' => 'fa-solid fa-tag',
+                        'sort_order' => 6,
+                        'open_in_new_tab' => 0,
+                        'is_active' => 1,
+                        'is_visible' => 1,
+                    ],
+                    [
+                        'id' => -910007,
+                        'parent_id' => $menuId,
+                        'menu_type' => 'Menu',
+                        'menu_title' => 'Pawn Payments',
+                        'route_url' => 'pawn-payment.php',
+                        'icon_class' => 'fa-solid fa-money-bill-transfer',
+                        'sort_order' => 7,
+                        'open_in_new_tab' => 0,
+                        'is_active' => 1,
+                        'is_visible' => 1,
+                    ],
+                    [
+                        'id' => -910008,
+                        'parent_id' => $menuId,
+                        'menu_type' => 'Menu',
+                        'menu_title' => 'Interest Collection',
+                        'route_url' => 'pawn-interest.php',
+                        'icon_class' => 'fa-solid fa-percent',
+                        'sort_order' => 8,
+                        'open_in_new_tab' => 0,
+                        'is_active' => 1,
+                        'is_visible' => 1,
+                    ],
+                    [
+                        'id' => -910009,
+                        'parent_id' => $menuId,
+                        'menu_type' => 'Menu',
+                        'menu_title' => 'Pawn Release',
+                        'route_url' => 'pawn-release.php',
+                        'icon_class' => 'fa-solid fa-box-open',
+                        'sort_order' => 9,
+                        'open_in_new_tab' => 0,
+                        'is_active' => 1,
+                        'is_visible' => 1,
+                    ],
+                ];
+
+                foreach ($virtualPawnChildren as $virtualChild) {
                     $virtualRoute = strtolower(basename((string)$virtualChild['route_url']));
                     if (!isset($existingChildRoutes[$virtualRoute])) {
                         $children[] = $virtualChild;
