@@ -338,9 +338,33 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
     }
 
     function populatePaymentMethods(methods){
-        paymentMethodSelect.innerHTML='<option value="">Select Method</option>'+methods.map(row=>
-            `<option value="${Number(row.id)}">${escapeHtml(row.method_name)}</option>`
-        ).join('');
+        const normalized=(Array.isArray(methods)?methods:[]).map(row=>({
+            id:Number(
+                row.id ??
+                row.payment_method_id ??
+                row.method_id ??
+                0
+            ),
+            name:String(
+                row.method_name ??
+                row.payment_method_name ??
+                row.name ??
+                ''
+            ).trim()
+        })).filter(row=>row.id>0 && row.name!=='');
+
+        paymentMethodSelect.innerHTML=
+            '<option value="">Select Method</option>'+
+            normalized.map(row=>
+                `<option value="${row.id}">${escapeHtml(row.name)}</option>`
+            ).join('');
+
+        paymentMethodSelect.disabled=false;
+
+        if(!normalized.length){
+            paymentMethodSelect.innerHTML=
+                '<option value="">No active payment methods found</option>';
+        }
     }
 
     async function requestJson(url, options={}){
@@ -385,7 +409,13 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
 
             members=Array.isArray(result.members)?result.members:[];
             populateMembers();
-            populatePaymentMethods(Array.isArray(result.payment_methods)?result.payment_methods:[]);
+
+            const paymentMethods=
+                Array.isArray(result.payment_methods) ? result.payment_methods :
+                Array.isArray(result.methods) ? result.methods :
+                Array.isArray(result.rows) ? result.rows : [];
+
+            populatePaymentMethods(paymentMethods);
 
             memberSelect.disabled=false;
             paymentMethodSelect.disabled=false;

@@ -125,7 +125,7 @@ while ($r = $result->fetch_assoc()) $suppliers[] = $r;
 $stmt->close();
 
 $purchases = [];
-$stmt = $conn->prepare("SELECT p.id, p.purchase_no, p.supplier_invoice_no, p.purchase_date,
+$stmt = $conn->prepare("SELECT p.id, p.supplier_id, p.purchase_no, p.supplier_invoice_no, p.purchase_date,
         p.grand_total, p.paid_amount, p.balance_amount, p.payment_status, p.workflow_status,
         p.created_at, s.supplier_name, s.supplier_code, s.mobile AS supplier_mobile,
         COUNT(pi.id) AS item_count, COALESCE(SUM(pi.quantity),0) AS total_quantity,
@@ -134,7 +134,7 @@ $stmt = $conn->prepare("SELECT p.id, p.purchase_no, p.supplier_invoice_no, p.pur
     INNER JOIN suppliers s ON s.id = p.supplier_id AND s.business_id = p.business_id
     LEFT JOIN purchase_items pi ON pi.purchase_id = p.id AND pi.business_id = p.business_id AND pi.branch_id = p.branch_id
     WHERE p.business_id = ? AND p.branch_id = ?
-    GROUP BY p.id, p.purchase_no, p.supplier_invoice_no, p.purchase_date, p.grand_total,
+    GROUP BY p.id, p.supplier_id, p.purchase_no, p.supplier_invoice_no, p.purchase_date, p.grand_total,
              p.paid_amount, p.balance_amount, p.payment_status, p.workflow_status, p.created_at,
              s.supplier_name, s.supplier_code, s.mobile
     ORDER BY p.purchase_date DESC, p.id DESC");
@@ -173,12 +173,23 @@ $currency = (string)($_SESSION['currency_symbol'] ?? '₹');
         :root{--primary:<?php echo e($theme['primary_color']); ?>;--primary-dark:<?php echo e($theme['primary_dark_color']); ?>;--primary-soft:<?php echo e($theme['primary_soft_color']); ?>;--sidebar-gradient-1:<?php echo e($theme['sidebar_gradient_1']); ?>;--sidebar-gradient-2:<?php echo e($theme['sidebar_gradient_2']); ?>;--sidebar-gradient-3:<?php echo e($theme['sidebar_gradient_3']); ?>;--page-bg:<?php echo e($theme['page_background']); ?>;--card-bg:<?php echo e($theme['card_background']); ?>;--text-color:<?php echo e($theme['text_color']); ?>;--muted-color:<?php echo e($theme['muted_text_color']); ?>;--border-color:<?php echo e($theme['border_color']); ?>;--sidebar-width:<?php echo (int)$theme['sidebar_width_px']; ?>px;--radius:<?php echo (int)$theme['border_radius_px']; ?>px}
         body{background:var(--page-bg);color:var(--text-color);font-family:<?php echo json_encode((string)$theme['font_family']); ?>,sans-serif}.sidebar{background:linear-gradient(180deg,var(--sidebar-gradient-1),var(--sidebar-gradient-2),var(--sidebar-gradient-3))!important}
         .stat-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin-bottom:10px}.stat-card{background:var(--card-bg);border:1px solid var(--border-color);border-radius:var(--radius);padding:12px 14px;min-height:82px;display:flex;align-items:center;gap:12px}.stat-icon{width:42px;height:42px;flex:0 0 42px;display:flex;align-items:center;justify-content:center;border-radius:calc(var(--radius)*.75);background:var(--primary-soft);color:var(--primary-dark);font-size:16px}.stat-label{font-size:10px;color:var(--muted-color)}.stat-value{font-size:21px;line-height:1.1;font-weight:800;margin-top:4px}
-        .toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;background:var(--card-bg);border:1px solid var(--border-color);border-radius:var(--radius);padding:10px 12px;margin-bottom:10px}.toolbar-left{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.search-box{position:relative;min-width:250px}.search-box i{position:absolute;left:11px;top:50%;transform:translateY(-50%);color:var(--muted-color);font-size:11px}.search-box input{padding-left:32px}.form-control,.form-select{font-size:11px;min-height:36px;border-radius:9px;border-color:var(--border-color);background:var(--card-bg);color:var(--text-color)}.btn-theme{background:linear-gradient(135deg,var(--primary),var(--primary-dark));border:0;color:#fff;border-radius:calc(var(--radius)*.65);font-size:11px;font-weight:700;padding:9px 14px}
+        .toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;background:var(--card-bg);border:1px solid var(--border-color);border-radius:var(--radius);padding:10px 12px;margin-bottom:10px}
+        .toolbar-left{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
+        .search-box{position:relative;min-width:250px;flex:1 1 290px}
+        .search-box .search-leading-icon{position:absolute;z-index:3;left:6px;top:50%;width:28px;height:28px;display:grid;place-items:center;transform:translateY(-50%);border-radius:8px;background:var(--primary-soft);color:var(--primary-dark);font-size:10px;pointer-events:none}
+        .search-box input{width:100%;padding-left:42px!important;padding-right:14px!important;border-radius:12px}
+        
+        
+        
+        .search-box:focus-within .search-leading-icon{background:var(--primary);color:#fff}
+        .form-control,.form-select{font-size:11px;min-height:36px;border-radius:9px;border-color:var(--border-color);background:var(--card-bg);color:var(--text-color)}
+        .btn-theme{background:linear-gradient(135deg,var(--primary),var(--primary-dark));border:0;color:#fff;border-radius:calc(var(--radius)*.65);font-size:11px;font-weight:700;padding:9px 14px}
         .table-card{background:var(--card-bg);border:1px solid var(--border-color);border-radius:var(--radius);overflow:hidden}.purchase-table{margin:0;font-size:11px}.purchase-table th{font-size:9px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted-color);background:color-mix(in srgb,var(--muted-color) 6%,transparent);white-space:nowrap;padding:10px 11px;border-color:var(--border-color)}.purchase-table td{padding:10px 11px;vertical-align:middle;color:var(--text-color);background:var(--card-bg)!important;border-color:var(--border-color)}.main-text{font-size:11px;font-weight:800}.sub-text{font-size:9px;color:var(--muted-color);margin-top:2px}.badge-soft{display:inline-flex;align-items:center;border-radius:999px;padding:4px 8px;font-size:9px;font-weight:700}.paid{background:#eaf8f0;color:#168449}.partial{background:#fff4d9;color:#a86c00}.unpaid{background:#fdecec;color:#bd2d2d}.draft{background:#eef2f7;color:#55606d}.posted{background:#eaf8f0;color:#168449}.cancelled{background:#fdecec;color:#bd2d2d}.approval{background:#eff6ff;color:#1d4ed8}.action-btn{width:30px;height:30px;border:1px solid var(--border-color);border-radius:8px;background:var(--card-bg);display:inline-flex;align-items:center;justify-content:center;font-size:10px;color:var(--text-color)}.action-btn:hover{background:var(--primary-soft);color:var(--primary-dark)}.action-btn.danger:hover{background:#fdecec;color:#bd2d2d}.theme-toast{position:fixed;right:18px;top:78px;z-index:20000;display:flex;align-items:center;gap:9px;min-width:260px;max-width:420px;padding:11px 14px;border-radius:10px;color:#fff;font-size:11px;font-weight:600;box-shadow:0 14px 35px rgba(0,0,0,.22);opacity:0;transform:translateY(-10px);transition:.22s}.theme-toast.show{opacity:1;transform:translateY(0)}.theme-toast-success{background:#168449}.theme-toast-error{background:#c0392b}.empty-state{padding:50px 20px;text-align:center;color:var(--muted-color)}
         body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark"] body{--page-bg:#0f151b;--card-bg:#182129;--text-color:#f3f6f8;--muted-color:#9aa7b3;--border-color:#2c3944}
         @media(max-width:1199px){.stat-grid{grid-template-columns:repeat(3,1fr)}}
-        @media(max-width:991.98px){.stat-grid{grid-template-columns:repeat(2,1fr)}.toolbar{align-items:stretch;flex-direction:column}.toolbar-left{display:grid;grid-template-columns:1fr 160px 160px}.search-box{min-width:0}.table-card{background:transparent;border:0;overflow:visible}.table-responsive{overflow:visible}.purchase-table{display:block}.purchase-table thead{display:none}.purchase-table tbody{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.purchase-table tbody tr{display:grid;grid-template-columns:1fr 1fr;background:var(--card-bg);border:1px solid var(--border-color);border-radius:var(--radius);padding:14px}.purchase-table tbody td{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:9px 0;border:0;border-bottom:1px dashed var(--border-color);text-align:right!important}.purchase-table tbody td::before{content:attr(data-label);font-size:9px;font-weight:700;text-transform:uppercase;color:var(--muted-color);text-align:left}.purchase-table tbody td.purchase-column{grid-column:1/-1;display:block;text-align:left!important}.purchase-table tbody td.purchase-column::before{display:none}.purchase-table tbody td.actions-column{grid-column:1/-1;border-bottom:0;padding-top:12px}}
-        @media(max-width:767.98px){.stat-grid{grid-template-columns:1fr 1fr}.toolbar-left{grid-template-columns:1fr}.purchase-table tbody{grid-template-columns:1fr}.purchase-table tbody tr{grid-template-columns:1fr}.purchase-table tbody td{grid-column:1/-1}.theme-toast{left:12px;right:12px;top:70px;min-width:0;max-width:none}}
+        @media(max-width:991.98px){.stat-grid{grid-template-columns:repeat(2,1fr)}.toolbar{align-items:stretch;flex-direction:column}.toolbar-left{display:grid;grid-template-columns:minmax(220px,1fr) 160px 160px 145px 145px;width:100%}.search-box{min-width:0;width:100%}.table-card{background:transparent;border:0;overflow:visible}.table-responsive{overflow:visible}.purchase-table{display:block}.purchase-table thead{display:none}.purchase-table tbody{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.purchase-table tbody tr{display:grid;grid-template-columns:1fr 1fr;background:var(--card-bg);border:1px solid var(--border-color);border-radius:var(--radius);padding:14px}.purchase-table tbody td{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:9px 0;border:0;border-bottom:1px dashed var(--border-color);text-align:right!important}.purchase-table tbody td::before{content:attr(data-label);font-size:9px;font-weight:700;text-transform:uppercase;color:var(--muted-color);text-align:left}.purchase-table tbody td.purchase-column{grid-column:1/-1;display:block;text-align:left!important}.purchase-table tbody td.purchase-column::before{display:none}.purchase-table tbody td.actions-column{grid-column:1/-1;border-bottom:0;padding-top:12px}}
+        @media(max-width:1100px) and (min-width:768px){.toolbar-left{grid-template-columns:minmax(220px,1fr) 160px 160px}.toolbar-left #fromDate,.toolbar-left #toDate{width:100%!important}}
+        @media(max-width:767.98px){.stat-grid{grid-template-columns:1fr 1fr}.toolbar-left{grid-template-columns:1fr}.toolbar-left .form-select,.toolbar-left .form-control{width:100%!important}.search-box{width:100%;min-width:0}.purchase-table tbody{grid-template-columns:1fr}.purchase-table tbody tr{grid-template-columns:1fr}.purchase-table tbody td{grid-column:1/-1}.theme-toast{left:12px;right:12px;top:70px;min-width:0;max-width:none}}
     </style>
 </head>
 <body>
@@ -198,7 +209,11 @@ $currency = (string)($_SESSION['currency_symbol'] ?? '₹');
 </div>
 <div class="toolbar">
 <div class="toolbar-left">
-<div class="search-box"><i class="fa-solid fa-magnifying-glass"></i><input type="search" class="form-control" id="purchaseSearch" placeholder="Search purchase, invoice, supplier..."></div>
+<div class="search-box">
+<i class="fa-solid fa-magnifying-glass search-leading-icon"></i>
+<input type="search" class="form-control" id="purchaseSearch" placeholder="Search purchase, invoice, supplier..." autocomplete="off">
+
+</div>
 <select class="form-select" id="supplierFilter" style="width:180px"><option value="">All suppliers</option><?php foreach($suppliers as $s): ?><option value="<?php echo (int)$s['id']; ?>"><?php echo e($s['supplier_name']); ?></option><?php endforeach; ?></select>
 <select class="form-select" id="statusFilter" style="width:150px"><option value="">All payments</option><option>Paid</option><option>Partial</option><option>Unpaid</option></select>
 <input type="date" class="form-control" id="fromDate" style="width:145px"><input type="date" class="form-control" id="toDate" style="width:145px">
@@ -240,9 +255,46 @@ $searchText = strtolower(implode(' ', [$p['purchase_no'],$p['supplier_invoice_no
 <script>
 (() => {
 const rows=[...document.querySelectorAll('#purchasesTable tbody tr')];
-const search=document.getElementById('purchaseSearch'), supplier=document.getElementById('supplierFilter'), status=document.getElementById('statusFilter'), from=document.getElementById('fromDate'), to=document.getElementById('toDate');
-function filter(){const q=(search?.value||'').toLowerCase().trim(), sid=supplier?.value||'', st=status?.value||'', fd=from?.value||'', td=to?.value||'';rows.forEach(r=>{const ok=(!q||r.dataset.search.includes(q))&&(!sid||r.dataset.supplier===sid)&&(!st||r.dataset.payment===st)&&(!fd||r.dataset.date>=fd)&&(!td||r.dataset.date<=td);r.style.display=ok?'':'none';});}
-[search,supplier,status,from,to].forEach(x=>x&&x.addEventListener(x.tagName==='INPUT'?'input':'change',filter));
+const search=document.getElementById('purchaseSearch');
+const supplier=document.getElementById('supplierFilter');
+const status=document.getElementById('statusFilter');
+const from=document.getElementById('fromDate');
+const to=document.getElementById('toDate');
+
+function filter(){
+    const q=(search?.value||'').toLowerCase().trim();
+    const sid=String(supplier?.value||'');
+    const st=String(status?.value||'');
+    const fd=String(from?.value||'');
+    const td=String(to?.value||'');
+
+    rows.forEach(row=>{
+        const rowSearch=String(row.dataset.search||'').toLowerCase();
+        const rowSupplier=String(row.dataset.supplier||'');
+        const rowPayment=String(row.dataset.payment||'');
+        const rowDate=String(row.dataset.date||'');
+
+        const matchesSearch=!q||rowSearch.includes(q);
+        const matchesSupplier=!sid||rowSupplier===sid;
+        const matchesStatus=!st||rowPayment===st;
+        const matchesFrom=!fd||rowDate>=fd;
+        const matchesTo=!td||rowDate<=td;
+
+        row.style.display=
+            matchesSearch&&matchesSupplier&&matchesStatus&&matchesFrom&&matchesTo
+                ? ''
+                : 'none';
+    });
+
+}
+
+search?.addEventListener('input',filter);
+supplier?.addEventListener('change',filter);
+status?.addEventListener('change',filter);
+from?.addEventListener('change',filter);
+to?.addEventListener('change',filter);
+
+
 const toast=document.getElementById('themeToast'); function showToast(msg,ok){toast.className='theme-toast '+(ok?'theme-toast-success':'theme-toast-error');toast.querySelector('span').textContent=msg;toast.classList.add('show');setTimeout(()=>toast.classList.remove('show'),3200);}
 let deleteId=0; const modalEl=document.getElementById('confirmDeleteModal'); const modal=modalEl?new bootstrap.Modal(modalEl):null;
 document.querySelectorAll('.delete-purchase').forEach(btn=>btn.addEventListener('click',()=>{deleteId=Number(btn.dataset.id||0);document.getElementById('deletePurchaseNo').textContent=btn.dataset.no||'';modal?.show();}));

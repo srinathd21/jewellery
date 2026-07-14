@@ -189,6 +189,9 @@ if ($paymentDate === '') {
 if ($supplierId <= 0) {
     respond(false, 'Please select a supplier.');
 }
+if ($paymentMethodId <= 0) {
+    respond(false, 'Please select an active payment method.', [], 422);
+}
 if ($amount <= 0) {
     respond(false, 'Payment amount must be greater than zero.');
 }
@@ -223,6 +226,102 @@ $stmt->close();
 
 if (!$supplier) {
     respond(false, 'Invalid supplier selected.', [], 404);
+}
+
+/*
+ * Validate Payment Method before inserting.
+ *
+ * Supported schemas:
+ *  - payment_method_id, payment_method_name, status
+ *  - id, method_name, is_active
+ */
+if (!tableExists($conn, 'payment_methods')) {
+    respond(false, 'The payment_methods table was not found.', [], 500);
+}
+
+$paymentMethodIdColumn = hasColumn(
+    $conn,
+    'payment_methods',
+    'payment_method_id'
+)
+    ? 'payment_method_id'
+    : (hasColumn($conn, 'payment_methods', 'id') ? 'id' : '');
+
+$paymentMethodStatusColumn = hasColumn(
+    $conn,
+    'payment_methods',
+    'status'
+)
+    ? 'status'
+    : (
+        hasColumn($conn, 'payment_methods', 'is_active')
+            ? 'is_active'
+            : ''
+    );
+
+if ($paymentMethodIdColumn === '') {
+    respond(
+        false,
+        'The payment_methods table has no supported primary-key column.',
+        [],
+        500
+    );
+}
+
+$paymentMethodSql = "SELECT `{$paymentMethodIdColumn}` AS id
+                     FROM payment_methods
+                     WHERE `{$paymentMethodIdColumn}` = ?";
+
+$paymentMethodTypes = 'i';
+$paymentMethodParams = [$paymentMethodId];
+
+if ($paymentMethodStatusColumn !== '') {
+    $paymentMethodSql .=
+        " AND COALESCE(`{$paymentMethodStatusColumn}`,1) = 1";
+}
+
+/*
+ * Do not force business_id here. The page supports shared/default methods
+ * when the current business has none, so save validation must accept the
+ * same active method shown in the dropdown.
+ */
+$paymentMethodSql .= ' LIMIT 1';
+
+$stmt = $conn->prepare($paymentMethodSql);
+
+if (!$stmt) {
+    respond(
+        false,
+        'Payment method validation failed: ' . $conn->error,
+        [],
+        500
+    );
+}
+
+$stmt->bind_param($paymentMethodTypes, ...$paymentMethodParams);
+
+if (!$stmt->execute()) {
+    $error = $stmt->error;
+    $stmt->close();
+
+    respond(
+        false,
+        'Unable to validate payment method: ' . $error,
+        [],
+        500
+    );
+}
+
+$validPaymentMethod = $stmt->get_result()->fetch_assoc();
+$stmt->close();
+
+if (!$validPaymentMethod) {
+    respond(
+        false,
+        'The selected payment method is invalid or inactive.',
+        [],
+        422
+    );
 }
 
 if (hasColumn($conn, 'supplier_payments', 'payment_no')) {
@@ -288,7 +387,21 @@ if ($purchaseId > 0) {
 }
 
 $purchaseIdDb = $purchaseId > 0 ? $purchaseId : null;
-$paymentMethodIdDb = $paymentMethodId > 0 ? $paymentMethodId : null;
+
+/*
+ * payment_method_id is NOT NULL in the current database.
+ * It has already been required and validated above.
+ */
+$paymentMethodIdDb = $paymentMethodId;
+
+if (!hasColumn($conn, 'supplier_payments', 'payment_method_id')) {
+    respond(
+        false,
+        'The supplier_payments table is missing payment_method_id.',
+        [],
+        500
+    );
+}
 
 $conn->begin_transaction();
 
@@ -334,7 +447,9 @@ try {
     $stmt = $conn->prepare($sql);
 
     if (!$stmt) {
-        throw new RuntimeException('Failed to prepare supplier payment insert.');
+        throw new RuntimeException(
+            'Failed to prepare supplier payment insert: ' . $conn->error
+        );
     }
 
     if ($values) {

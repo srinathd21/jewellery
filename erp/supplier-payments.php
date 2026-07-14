@@ -196,6 +196,7 @@ $supHasMobile = hasColumn($conn, 'suppliers', 'mobile');
 $supHasOpeningBalance = hasColumn($conn, 'suppliers', 'opening_balance');
 $supHasBalanceType = hasColumn($conn, 'suppliers', 'balance_type');
 $supHasIsActive = hasColumn($conn, 'suppliers', 'is_active');
+$supHasStatus = hasColumn($conn, 'suppliers', 'status');
 
 $purHasBusinessId = hasColumn($conn, 'purchases', 'business_id');
 $purHasPurchaseNo = hasColumn($conn, 'purchases', 'purchase_no');
@@ -208,6 +209,28 @@ $purHasPaymentStatus = hasColumn($conn, 'purchases', 'payment_status');
 $payHasBusinessId = hasColumn($conn, 'supplier_payments', 'business_id');
 $payHasPurchaseId = hasColumn($conn, 'supplier_payments', 'purchase_id');
 $paymentMethodExists = tableExists($conn, 'payment_methods');
+
+$paymentMethodIdColumn = $paymentMethodExists
+    ? (hasColumn($conn, 'payment_methods', 'payment_method_id')
+        ? 'payment_method_id'
+        : (hasColumn($conn, 'payment_methods', 'id') ? 'id' : ''))
+    : '';
+
+$paymentMethodNameColumn = $paymentMethodExists
+    ? (hasColumn($conn, 'payment_methods', 'payment_method_name')
+        ? 'payment_method_name'
+        : (hasColumn($conn, 'payment_methods', 'method_name') ? 'method_name' : ''))
+    : '';
+
+$paymentMethodStatusColumn = $paymentMethodExists
+    ? (hasColumn($conn, 'payment_methods', 'status')
+        ? 'status'
+        : (hasColumn($conn, 'payment_methods', 'is_active') ? 'is_active' : ''))
+    : '';
+
+$supplierPaymentIdColumn = hasColumn($conn, 'supplier_payments', 'supplier_payment_id')
+    ? 'supplier_payment_id'
+    : (hasColumn($conn, 'supplier_payments', 'id') ? 'id' : '');
 
 $suppliers = [];
 $sql = "SELECT id, supplier_name,
@@ -222,6 +245,8 @@ if ($supHasBusinessId) {
 }
 if ($supHasIsActive) {
     $sql .= " AND is_active = 1";
+} elseif ($supHasStatus) {
+    $sql .= " AND (status = 1 OR status = 'Active')";
 }
 $sql .= " ORDER BY supplier_name ASC";
 
@@ -239,8 +264,18 @@ if ($stmt) {
 }
 
 $paymentMethods = [];
-if ($paymentMethodExists) {
-    $sql = "SELECT id, method_name FROM payment_methods WHERE 1=1";
+
+if (
+    $paymentMethodExists &&
+    $paymentMethodIdColumn !== '' &&
+    $paymentMethodNameColumn !== ''
+) {
+    $sql = "SELECT
+                `{$paymentMethodIdColumn}` AS id,
+                `{$paymentMethodNameColumn}` AS method_name
+            FROM payment_methods
+            WHERE 1=1";
+
     $pmParams = [];
     $pmTypes = '';
 
@@ -249,22 +284,54 @@ if ($paymentMethodExists) {
         $pmParams[] = $businessId;
         $pmTypes .= 'i';
     }
-    if (hasColumn($conn, 'payment_methods', 'is_active')) {
-        $sql .= " AND is_active = 1";
+
+    if ($paymentMethodStatusColumn !== '') {
+        $sql .= " AND COALESCE(`{$paymentMethodStatusColumn}`,1) = 1";
     }
-    $sql .= " ORDER BY method_name ASC";
+
+    $sql .= " ORDER BY `{$paymentMethodNameColumn}` ASC";
 
     $stmt = $conn->prepare($sql);
+
     if ($stmt) {
         if ($pmParams) {
             $stmt->bind_param($pmTypes, ...$pmParams);
         }
+
         $stmt->execute();
         $result = $stmt->get_result();
+
         while ($result && $row = $result->fetch_assoc()) {
+            $row['id'] = (int)$row['id'];
             $paymentMethods[] = $row;
         }
+
         $stmt->close();
+    }
+
+    /*
+     * Compatibility fallback for old shared payment methods that are stored
+     * under a different business_id.
+     */
+    if (!$paymentMethods) {
+        $sql = "SELECT
+                    `{$paymentMethodIdColumn}` AS id,
+                    `{$paymentMethodNameColumn}` AS method_name
+                FROM payment_methods
+                WHERE 1=1";
+
+        if ($paymentMethodStatusColumn !== '') {
+            $sql .= " AND COALESCE(`{$paymentMethodStatusColumn}`,1) = 1";
+        }
+
+        $sql .= " ORDER BY `{$paymentMethodNameColumn}` ASC";
+
+        $result = $conn->query($sql);
+
+        while ($result && $row = $result->fetch_assoc()) {
+            $row['id'] = (int)$row['id'];
+            $paymentMethods[] = $row;
+        }
     }
 }
 
@@ -294,37 +361,49 @@ if ($selectedSupplierId > 0) {
 }
 
 $pendingPurchases = [];
+
 if ($selectedSupplierId > 0) {
-    $sql = "SELECT id,
-            " . ($purHasPurchaseNo ? "purchase_no" : "'' AS purchase_no") . ",
-            " . ($purHasPurchaseDate ? "purchase_date" : "NULL AS purchase_date") . ",
-            " . ($purHasGrandTotal ? "grand_total" : "0 AS grand_total") . ",
-            " . ($purHasPaidAmount ? "paid_amount" : "0 AS paid_amount") . ",
-            " . ($purHasBalanceAmount ? "balance_amount" : "0 AS balance_amount") . ",
-            " . ($purHasPaymentStatus ? "payment_status" : "'Unpaid' AS payment_status") . "
+    $balanceExpression = $purHasBalanceAmount
+        ? "GREATEST(COALESCE(balance_amount,0), COALESCE(grand_total,0) - COALESCE(paid_amount,0))"
+        : "GREATEST(COALESCE(grand_total,0) - COALESCE(paid_amount,0),0)";
+
+    $sql = "SELECT
+                id,
+                " . ($purHasPurchaseNo ? "purchase_no" : "'' AS purchase_no") . ",
+                " . ($purHasPurchaseDate ? "purchase_date" : "NULL AS purchase_date") . ",
+                " . ($purHasGrandTotal ? "grand_total" : "0 AS grand_total") . ",
+                " . ($purHasPaidAmount ? "paid_amount" : "0 AS paid_amount") . ",
+                {$balanceExpression} AS balance_amount,
+                " . ($purHasPaymentStatus ? "payment_status" : "'Unpaid' AS payment_status") . "
             FROM purchases
             WHERE supplier_id = ?";
 
     if ($purHasBusinessId) {
         $sql .= " AND business_id = ?";
     }
-    if ($purHasBalanceAmount) {
-        $sql .= " AND balance_amount > 0";
-    }
-    $sql .= " ORDER BY " . ($purHasPurchaseDate ? "purchase_date" : "id") . " ASC, id ASC";
+
+    $sql .= " HAVING balance_amount > 0";
+    $sql .= " ORDER BY " .
+        ($purHasPurchaseDate ? "purchase_date" : "id") .
+        " ASC, id ASC";
 
     $stmt = $conn->prepare($sql);
+
     if ($stmt) {
         if ($purHasBusinessId) {
             $stmt->bind_param('ii', $selectedSupplierId, $businessId);
         } else {
             $stmt->bind_param('i', $selectedSupplierId);
         }
+
         $stmt->execute();
         $result = $stmt->get_result();
+
         while ($result && $row = $result->fetch_assoc()) {
+            $row['id'] = (int)$row['id'];
             $pendingPurchases[] = $row;
         }
+
         $stmt->close();
     }
 }
@@ -336,7 +415,11 @@ if ($selectedSupplierId > 0) {
         $opening = -$opening;
     }
 
-    $sql = "SELECT COALESCE(SUM(" . ($purHasBalanceAmount ? "balance_amount" : "0") . "),0) AS total_balance
+    $totalBalanceExpression = $purHasBalanceAmount
+        ? "GREATEST(COALESCE(balance_amount,0), COALESCE(grand_total,0) - COALESCE(paid_amount,0))"
+        : "GREATEST(COALESCE(grand_total,0) - COALESCE(paid_amount,0),0)";
+
+    $sql = "SELECT COALESCE(SUM({$totalBalanceExpression}),0) AS total_balance
             FROM purchases WHERE supplier_id = ?";
     if ($purHasBusinessId) {
         $sql .= " AND business_id = ?";
@@ -411,14 +494,40 @@ $todayPaid = supplierPaidTotal($conn, $payHasBusinessId, $businessId, 'today');
 $monthPaid = supplierPaidTotal($conn, $payHasBusinessId, $businessId, 'month');
 
 $recentPayments = [];
-$sql = "SELECT sp.*, s.supplier_name,
-        " . ($supHasSupplierCode ? "s.supplier_code" : "'' AS supplier_code") . ",
-        " . ($purHasPurchaseNo ? "p.purchase_no" : "'' AS purchase_no") . ",
-        " . ($paymentMethodExists ? "pm.method_name" : "'' AS method_name") . "
+
+$paymentMethodSelect = (
+    $paymentMethodExists &&
+    $paymentMethodNameColumn !== '' &&
+    $paymentMethodIdColumn !== ''
+)
+    ? "pm.`{$paymentMethodNameColumn}` AS method_name"
+    : "'' AS method_name";
+
+$paymentMethodJoin = (
+    $paymentMethodExists &&
+    $paymentMethodNameColumn !== '' &&
+    $paymentMethodIdColumn !== ''
+)
+    ? "LEFT JOIN payment_methods pm
+           ON pm.`{$paymentMethodIdColumn}` = sp.payment_method_id"
+    : "";
+
+$orderColumn = $supplierPaymentIdColumn !== ''
+    ? "sp.`{$supplierPaymentIdColumn}`"
+    : "sp.payment_date";
+
+$sql = "SELECT
+            sp.*,
+            s.supplier_name,
+            " . ($supHasSupplierCode ? "s.supplier_code" : "'' AS supplier_code") . ",
+            " . ($purHasPurchaseNo ? "p.purchase_no" : "'' AS purchase_no") . ",
+            {$paymentMethodSelect}
         FROM supplier_payments sp
-        LEFT JOIN suppliers s ON s.id = sp.supplier_id
-        LEFT JOIN purchases p ON p.id = sp.purchase_id
-        " . ($paymentMethodExists ? "LEFT JOIN payment_methods pm ON pm.id = sp.payment_method_id" : "") . "
+        LEFT JOIN suppliers s
+            ON s.id = sp.supplier_id
+        LEFT JOIN purchases p
+            ON p.id = sp.purchase_id
+        {$paymentMethodJoin}
         WHERE 1=1";
 
 $params = [];
@@ -429,27 +538,35 @@ if ($payHasBusinessId) {
     $params[] = $businessId;
     $types .= 'i';
 }
+
 if ($selectedSupplierId > 0) {
     $sql .= " AND sp.supplier_id = ?";
     $params[] = $selectedSupplierId;
     $types .= 'i';
 }
-$sql .= " ORDER BY sp.id DESC LIMIT 15";
+
+$sql .= " ORDER BY {$orderColumn} DESC LIMIT 15";
 
 $stmt = $conn->prepare($sql);
+
 if ($stmt) {
     if ($params) {
         $bind = [$types];
+
         foreach ($params as $key => $value) {
             $bind[] = &$params[$key];
         }
+
         call_user_func_array([$stmt, 'bind_param'], $bind);
     }
+
     $stmt->execute();
     $result = $stmt->get_result();
+
     while ($result && $row = $result->fetch_assoc()) {
         $recentPayments[] = $row;
     }
+
     $stmt->close();
 }
 
@@ -578,12 +695,42 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
                         <div class="span-2"><label class="field-label">Supplier</label><select name="supplier_id" id="supplier_id" class="form-select" required><option value="">Select Supplier</option><?php foreach ($suppliers as $supplier): ?><option value="<?php echo (int)$supplier['id']; ?>" <?php echo $selectedSupplierId === (int)$supplier['id'] ? 'selected' : ''; ?>><?php echo h($supplier['supplier_name'] . (!empty($supplier['supplier_code']) ? ' (' . $supplier['supplier_code'] . ')' : '') . (!empty($supplier['mobile']) ? ' - ' . $supplier['mobile'] : '')); ?></option><?php endforeach; ?></select></div>
                         <div class="span-2"><label class="field-label">Purchase Bill</label><select name="purchase_id" id="purchase_id" class="form-select"><option value="">General Payment / Opening Balance</option><?php foreach ($pendingPurchases as $purchase): ?><option value="<?php echo (int)$purchase['id']; ?>" data-balance="<?php echo h($purchase['balance_amount'] ?? 0); ?>"><?php echo h(($purchase['purchase_no'] ?? '') . ' | Balance ₹' . money($purchase['balance_amount'] ?? 0)); ?></option><?php endforeach; ?></select></div>
                         <div><label class="field-label">Amount</label><input type="number" step="0.01" min="0.01" name="amount" id="amount" class="form-control" required></div>
-                        <div><label class="field-label">Payment Method</label><select name="payment_method_id" class="form-select"><option value="">Select</option><?php foreach ($paymentMethods as $method): ?><option value="<?php echo (int)$method['id']; ?>"><?php echo h($method['method_name']); ?></option><?php endforeach; ?></select></div>
+                        <div>
+                            <label class="field-label">Payment Method</label>
+                            <select
+                                name="payment_method_id"
+                                id="payment_method_id"
+                                class="form-select"
+                                required
+                                <?php echo empty($paymentMethods) ? 'disabled' : ''; ?>
+                            >
+                                <option value="">
+                                    <?php echo empty($paymentMethods)
+                                        ? 'No active payment methods found'
+                                        : 'Select Payment Method'; ?>
+                                </option>
+                                <?php foreach ($paymentMethods as $method): ?>
+                                    <option value="<?php echo (int)$method['id']; ?>">
+                                        <?php echo h($method['method_name']); ?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
                         <div class="span-2"><label class="field-label">Reference No</label><input type="text" name="reference_no" class="form-control" maxlength="150" placeholder="Cheque / UPI / Bank reference"></div>
                         <div class="span-2"><label class="field-label">Notes</label><input type="text" name="notes" class="form-control" maxlength="1000" placeholder="Payment notes"></div>
                     </div>
                     <div class="d-flex flex-wrap gap-2 mt-3">
-                        <?php if ($canCreate): ?><button type="submit" class="btn btn-theme" id="savePaymentButton"><i class="fa-solid fa-floppy-disk me-1"></i>Save Payment</button><?php endif; ?>
+                        <?php if ($canCreate): ?>
+                            <button
+                                type="submit"
+                                class="btn btn-theme"
+                                id="savePaymentButton"
+                                <?php echo empty($paymentMethods) ? 'disabled' : ''; ?>
+                            >
+                                <i class="fa-solid fa-floppy-disk me-1"></i>
+                                Save Payment
+                            </button>
+                        <?php endif; ?>
                         <a href="supplier-payments.php" class="btn btn-light-custom">Reset</a>
                     </div>
                 </div>
@@ -722,6 +869,15 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
     if(form){
         form.addEventListener('submit',async function(event){
             event.preventDefault();
+
+            const paymentMethod=document.getElementById('payment_method_id');
+
+            if(!paymentMethod || paymentMethod.disabled || !paymentMethod.value){
+                toast('error','Please select an active payment method.');
+                paymentMethod?.focus();
+                return;
+            }
+
             const button=document.getElementById('savePaymentButton');
             if(!button)return;
 

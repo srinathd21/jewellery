@@ -85,9 +85,11 @@ if (empty($_SESSION['user_id'])) {
 }
 
 $businessId = (int)($_SESSION['business_id'] ?? 0);
-if ($businessId <= 0) {
+$branchId = (int)($_SESSION['branch_id'] ?? $_SESSION['default_branch_id'] ?? 0);
+
+if ($businessId <= 0 || $branchId <= 0) {
     http_response_code(403);
-    die('A valid business must be selected before creating a purchase return.');
+    die('A valid business and branch must be selected before creating a purchase return.');
 }
 
 function purchaseReturnPermission(mysqli $conn, string $action): bool
@@ -174,52 +176,132 @@ $returnNo = generateReturnNo($conn, $businessId);
 $returnDate = date('Y-m-d');
 
 $purchases = [];
-$sql = "SELECT p.id, p.purchase_no, p.purchase_date, p.invoice_no, s.supplier_name
+
+/*
+ * Current purchase schema uses supplier_invoice_no.
+ * Older installations may use invoice_no, so expose either one as invoice_no.
+ */
+$invoiceColumn = hasColumn($conn, 'purchases', 'supplier_invoice_no')
+    ? 'supplier_invoice_no'
+    : (hasColumn($conn, 'purchases', 'invoice_no') ? 'invoice_no' : '');
+
+$invoiceSelect = $invoiceColumn !== ''
+    ? "p.`{$invoiceColumn}` AS invoice_no"
+    : "'' AS invoice_no";
+
+$sql = "SELECT
+            p.id,
+            p.purchase_no,
+            p.purchase_date,
+            {$invoiceSelect},
+            p.supplier_id,
+            s.supplier_name
         FROM purchases p
-        LEFT JOIN suppliers s ON s.id = p.supplier_id
-        WHERE p.business_id = ?";
-$params = [$businessId];
-$types = 'i';
+        LEFT JOIN suppliers s
+            ON s.id = p.supplier_id
+           AND s.business_id = p.business_id
+        WHERE p.business_id = ?
+          AND p.branch_id = ?";
+
+$params = [$businessId, $branchId];
+$types = 'ii';
 
 if ($purchaseSearch !== '') {
-    $sql .= " AND (p.purchase_no LIKE ? OR p.invoice_no LIKE ? OR s.supplier_name LIKE ?)";
+    $searchParts = [
+        'p.purchase_no LIKE ?',
+        's.supplier_name LIKE ?',
+        's.supplier_code LIKE ?',
+        's.mobile LIKE ?',
+    ];
+
     $like = '%' . $purchaseSearch . '%';
-    array_push($params, $like, $like, $like);
-    $types .= 'sss';
+    array_push($params, $like, $like, $like, $like);
+    $types .= 'ssss';
+
+    if ($invoiceColumn !== '') {
+        $searchParts[] = "p.`{$invoiceColumn}` LIKE ?";
+        $params[] = $like;
+        $types .= 's';
+    }
+
+    $sql .= ' AND (' . implode(' OR ', $searchParts) . ')';
 }
 
-$sql .= " ORDER BY p.id DESC LIMIT 50";
+$sql .= " ORDER BY p.purchase_date DESC, p.id DESC LIMIT 50";
+
 $stmt = $conn->prepare($sql);
-if ($stmt) {
-    $bind = [$types];
-    foreach ($params as $key => $value) {
-        $bind[] = &$params[$key];
-    }
-    call_user_func_array([$stmt, 'bind_param'], $bind);
-    $stmt->execute();
-    $result = $stmt->get_result();
-    while ($result && $row = $result->fetch_assoc()) {
-        $purchases[] = $row;
-    }
-    $stmt->close();
+
+if (!$stmt) {
+    die('Unable to prepare purchase search: ' . h($conn->error));
 }
+
+$bind = [$types];
+foreach ($params as $key => $value) {
+    $bind[] = &$params[$key];
+}
+
+call_user_func_array([$stmt, 'bind_param'], $bind);
+
+if (!$stmt->execute()) {
+    $error = $stmt->error;
+    $stmt->close();
+    die('Unable to load purchases: ' . h($error));
+}
+
+$result = $stmt->get_result();
+
+while ($result && $row = $result->fetch_assoc()) {
+    $purchases[] = $row;
+}
+
+$stmt->close();
 
 $selectedPurchase = null;
 $purchaseItems = [];
 
 if ($purchaseId > 0) {
-    $stmt = $conn->prepare("SELECT p.*, s.supplier_name FROM purchases p LEFT JOIN suppliers s ON s.id = p.supplier_id WHERE p.id = ? AND p.business_id = ? LIMIT 1");
+    $selectedInvoiceSelect = $invoiceColumn !== ''
+        ? "p.`{$invoiceColumn}` AS invoice_no"
+        : "'' AS invoice_no";
+
+    $stmt = $conn->prepare(
+        "SELECT p.*, {$selectedInvoiceSelect}, s.supplier_name
+         FROM purchases p
+         LEFT JOIN suppliers s
+            ON s.id = p.supplier_id
+           AND s.business_id = p.business_id
+         WHERE p.id = ?
+           AND p.business_id = ?
+           AND p.branch_id = ?
+         LIMIT 1"
+    );
     if ($stmt) {
-        $stmt->bind_param('ii', $purchaseId, $businessId);
+        $stmt->bind_param('iii', $purchaseId, $businessId, $branchId);
         $stmt->execute();
         $selectedPurchase = $stmt->get_result()->fetch_assoc();
         $stmt->close();
     }
 
     if ($selectedPurchase) {
-        $stmt = $conn->prepare("SELECT pi.* FROM purchase_items pi WHERE pi.purchase_id = ? AND pi.business_id = ? ORDER BY pi.id ASC");
+        $quantityColumn = hasColumn($conn, 'purchase_items', 'quantity')
+            ? 'quantity'
+            : (hasColumn($conn, 'purchase_items', 'qty') ? 'qty' : '');
+
+        $quantitySelect = $quantityColumn !== ''
+            ? "pi.`{$quantityColumn}` AS qty"
+            : "0 AS qty";
+
+        $stmt = $conn->prepare(
+            "SELECT pi.*, {$quantitySelect}
+             FROM purchase_items pi
+             WHERE pi.purchase_id = ?
+               AND pi.business_id = ?
+               AND pi.branch_id = ?
+             ORDER BY pi.id ASC"
+        );
+
         if ($stmt) {
-            $stmt->bind_param('ii', $purchaseId, $businessId);
+            $stmt->bind_param('iii', $purchaseId, $businessId, $branchId);
             $stmt->execute();
             $result = $stmt->get_result();
             while ($result && $row = $result->fetch_assoc()) {
@@ -349,7 +431,11 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
                     </table>
                 </div>
             <?php else: ?>
-                <div class="empty-state">No purchases found.</div>
+                <div class="empty-state">
+                    <?php echo $purchaseSearch !== ''
+                        ? 'No purchases matched your search.'
+                        : 'No purchases are available for the selected business and branch.'; ?>
+                </div>
             <?php endif; ?>
         </div>
 

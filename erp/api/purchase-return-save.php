@@ -144,8 +144,8 @@ $businessId = (int)($_SESSION['business_id'] ?? 0);
 $userId = (int)($_SESSION['user_id'] ?? 0);
 $branchId = (int)($_SESSION['branch_id'] ?? 0);
 
-if ($businessId <= 0) {
-    respond(false, 'A valid business must be selected.', [], 403);
+if ($businessId <= 0 || $branchId <= 0) {
+    respond(false, 'A valid business and branch must be selected.', [], 403);
 }
 
 $returnNo = trim((string)($_POST['return_no'] ?? ''));
@@ -170,8 +170,23 @@ if (mb_strlen($notes) > 1000) {
     respond(false, 'Notes must not exceed 1000 characters.');
 }
 
-$stmt = $conn->prepare("SELECT p.*, s.supplier_name FROM purchases p LEFT JOIN suppliers s ON s.id = p.supplier_id WHERE p.id = ? AND p.business_id = ? LIMIT 1");
-$stmt->bind_param('ii', $purchaseId, $businessId);
+$stmt = $conn->prepare(
+    "SELECT p.*, s.supplier_name
+     FROM purchases p
+     LEFT JOIN suppliers s
+        ON s.id = p.supplier_id
+       AND s.business_id = p.business_id
+     WHERE p.id = ?
+       AND p.business_id = ?
+       AND p.branch_id = ?
+     LIMIT 1"
+);
+
+if (!$stmt) {
+    respond(false, 'Unable to validate the selected purchase: ' . $conn->error, [], 500);
+}
+
+$stmt->bind_param('iii', $purchaseId, $businessId, $branchId);
 $stmt->execute();
 $purchase = $stmt->get_result()->fetch_assoc();
 $stmt->close();

@@ -477,22 +477,38 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
 <main class="app-main">
 <?php include('includes/nav.php'); ?>
 <div class="content-wrap">
-    <div class="page-heading">
-        <div>
-            <h1 class="page-title">Stock Movements</h1>
-            <div class="page-subtitle"><?php echo h($businessName); ?> · Inventory movement ledger</div>
-        </div>
-        <button type="button" class="btn btn-reset no-print" onclick="window.print()"><i class="fa-solid fa-print me-1"></i>Print</button>
-    </div>
-
     <?php if (!$canView): ?>
         <div class="movements-card"><div class="empty-state"><i class="fa-solid fa-lock"></i><div>You do not have permission to view stock movements.</div></div></div>
     <?php else: ?>
         <div class="stat-grid">
-            <div class="stat-card"><div class="stat-icon"><i class="fa-solid fa-arrow-right-arrow-left"></i></div><div><div class="stat-label">Total Movements</div><div class="stat-value"><?php echo $totalMovements; ?></div></div></div>
-            <div class="stat-card"><div class="stat-icon"><i class="fa-solid fa-arrow-down"></i></div><div><div class="stat-label">Total Quantity In</div><div class="stat-value"><?php echo number_format($totalQtyIn, 3); ?></div></div></div>
-            <div class="stat-card"><div class="stat-icon"><i class="fa-solid fa-arrow-up"></i></div><div><div class="stat-label">Total Quantity Out</div><div class="stat-value"><?php echo number_format($totalQtyOut, 3); ?></div></div></div>
-            <div class="stat-card"><div class="stat-icon"><i class="fa-solid fa-weight-scale"></i></div><div><div class="stat-label">Net Weight Change</div><div class="stat-value"><?php echo number_format($netWeightChange, 3); ?></div></div></div>
+            <div class="stat-card">
+                <div class="stat-icon"><i class="fa-solid fa-arrow-right-arrow-left"></i></div>
+                <div>
+                    <div class="stat-label">Total Movements</div>
+                    <div class="stat-value"><?php echo number_format($totalMovements); ?></div>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon"><i class="fa-solid fa-arrow-down"></i></div>
+                <div>
+                    <div class="stat-label">Total Quantity In</div>
+                    <div class="stat-value"><?php echo number_format($totalQtyIn, 3); ?></div>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon"><i class="fa-solid fa-arrow-up"></i></div>
+                <div>
+                    <div class="stat-label">Total Quantity Out</div>
+                    <div class="stat-value"><?php echo number_format($totalQtyOut, 3); ?></div>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon"><i class="fa-solid fa-weight-scale"></i></div>
+                <div>
+                    <div class="stat-label">Net Weight Change</div>
+                    <div class="stat-value"><?php echo number_format($netWeightChange, 3); ?></div>
+                </div>
+            </div>
         </div>
 
         <form method="get" class="filter-card no-print">
