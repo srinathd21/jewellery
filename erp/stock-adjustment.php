@@ -52,9 +52,10 @@ if (!isset($_SESSION['user_id']) || (int)$_SESSION['user_id'] <= 0) {
 
 $userId = (int)$_SESSION['user_id'];
 $businessId = (int)($_SESSION['business_id'] ?? 0);
+$branchId = (int)($_SESSION['branch_id'] ?? $_SESSION['default_branch_id'] ?? 0);
 
-if ($businessId <= 0) {
-    die('Business session not found. Please login again.');
+if ($businessId <= 0 || $branchId <= 0) {
+    die('Business or branch session not found. Please login again.');
 }
 
 function stockAdjustmentPermission(mysqli $conn, string $action): bool
@@ -103,24 +104,24 @@ $prodHasUpdatedAt       = hasColumn($conn, 'products', 'updated_at');
 
 $psHasBusinessId        = hasColumn($conn, 'product_stock', 'business_id');
 $psHasProductId         = hasColumn($conn, 'product_stock', 'product_id');
-$psHasOpeningQty        = hasColumn($conn, 'product_stock', 'opening_qty');
-$psHasOpeningWeight     = hasColumn($conn, 'product_stock', 'opening_weight');
-$psHasInQty             = hasColumn($conn, 'product_stock', 'in_qty');
-$psHasInWeight          = hasColumn($conn, 'product_stock', 'in_weight');
-$psHasOutQty            = hasColumn($conn, 'product_stock', 'out_qty');
-$psHasOutWeight         = hasColumn($conn, 'product_stock', 'out_weight');
-$psHasClosingQty        = hasColumn($conn, 'product_stock', 'closing_qty');
-$psHasClosingWeight     = hasColumn($conn, 'product_stock', 'closing_weight');
+$psHasQuantity          = hasColumn($conn, 'product_stock', 'quantity');
+$psHasGrossWeight       = hasColumn($conn, 'product_stock', 'gross_weight');
+$psHasNetWeight         = hasColumn($conn, 'product_stock', 'net_weight');
+$psHasBranchId          = hasColumn($conn, 'product_stock', 'branch_id');
+
+
+
+
 $psHasUpdatedAt         = hasColumn($conn, 'product_stock', 'updated_at');
 
 $smHasBusinessId        = hasColumn($conn, 'stock_movements', 'business_id');
 $smHasMovementDate      = hasColumn($conn, 'stock_movements', 'movement_date');
 $smHasProductId         = hasColumn($conn, 'stock_movements', 'product_id');
 $smHasMovementType      = hasColumn($conn, 'stock_movements', 'movement_type');
-$smHasRefTable          = hasColumn($conn, 'stock_movements', 'ref_table');
-$smHasRefId             = hasColumn($conn, 'stock_movements', 'ref_id');
-$smHasQtyIn             = hasColumn($conn, 'stock_movements', 'qty_in');
-$smHasQtyOut            = hasColumn($conn, 'stock_movements', 'qty_out');
+$smHasRefTable          = hasColumn($conn, 'stock_movements', 'reference_table');
+$smHasRefId             = hasColumn($conn, 'stock_movements', 'reference_id');
+$smHasQtyIn             = hasColumn($conn, 'stock_movements', 'quantity_in');
+$smHasQtyOut            = hasColumn($conn, 'stock_movements', 'quantity_out');
 $smHasWeightIn          = hasColumn($conn, 'stock_movements', 'weight_in');
 $smHasWeightOut         = hasColumn($conn, 'stock_movements', 'weight_out');
 $smHasRemarks           = hasColumn($conn, 'stock_movements', 'remarks');
@@ -228,95 +229,20 @@ function addAuditLogSafe(mysqli $conn, int $businessId, int $userId, string $mod
     $stmt->close();
 }
 
-function ensureProductStockRow(mysqli $conn, int $businessId, int $productId, bool $psHasBusinessId): bool
+function ensureProductStockRow(mysqli $conn,int $businessId,int $branchId,int $productId): bool
 {
-    if ($psHasBusinessId) {
-        $stmt = $conn->prepare("SELECT id FROM product_stock WHERE product_id = ? AND business_id = ? LIMIT 1");
-    } else {
-        $stmt = $conn->prepare("SELECT id FROM product_stock WHERE product_id = ? LIMIT 1");
-    }
-
-    if (!$stmt) {
-        return false;
-    }
-
-    if ($psHasBusinessId) {
-        $stmt->bind_param('ii', $productId, $businessId);
-    } else {
-        $stmt->bind_param('i', $productId);
-    }
-
+    $stmt=$conn->prepare("SELECT id FROM product_stock WHERE business_id=? AND branch_id=? AND product_id=? LIMIT 1");
+    if(!$stmt)return false;
+    $stmt->bind_param('iii',$businessId,$branchId,$productId);
     $stmt->execute();
-    $res = $stmt->get_result();
-    $exists = $res && $res->fetch_assoc();
+    $exists=$stmt->get_result()->fetch_assoc();
     $stmt->close();
-
-    if ($exists) {
-        return true;
-    }
-
-    $columns = [];
-    $placeholders = [];
-    $types = '';
-    $values = [];
-
-    if ($psHasBusinessId && hasColumn($conn, 'product_stock', 'business_id')) {
-        $columns[] = 'business_id';
-        $placeholders[] = '?';
-        $types .= 'i';
-        $values[] = $businessId;
-    }
-
-    if (hasColumn($conn, 'product_stock', 'product_id')) {
-        $columns[] = 'product_id';
-        $placeholders[] = '?';
-        $types .= 'i';
-        $values[] = $productId;
-    }
-
-    $zeroColumns = [
-        'opening_qty',
-        'opening_weight',
-        'in_qty',
-        'in_weight',
-        'out_qty',
-        'out_weight',
-        'closing_qty',
-        'closing_weight'
-    ];
-
-    foreach ($zeroColumns as $col) {
-        if (hasColumn($conn, 'product_stock', $col)) {
-            $columns[] = $col;
-            $placeholders[] = '0';
-        }
-    }
-
-    if (empty($columns)) {
-        return false;
-    }
-
-    $sql = "INSERT INTO product_stock (" . implode(', ', $columns) . ") VALUES (" . implode(', ', $placeholders) . ")";
-    $stmt = $conn->prepare($sql);
-
-    if (!$stmt) {
-        return false;
-    }
-
-    if ($types !== '') {
-        $bindParams = [];
-        $bindParams[] = $types;
-
-        foreach ($values as $k => $v) {
-            $bindParams[] = &$values[$k];
-        }
-
-        call_user_func_array([$stmt, 'bind_param'], $bindParams);
-    }
-
-    $ok = $stmt->execute();
+    if($exists)return true;
+    $stmt=$conn->prepare("INSERT INTO product_stock (business_id,branch_id,product_id,quantity,gross_weight,net_weight,average_cost,stock_value) VALUES (?,?,?,0,0,0,0,0)");
+    if(!$stmt)return false;
+    $stmt->bind_param('iii',$businessId,$branchId,$productId);
+    $ok=$stmt->execute();
     $stmt->close();
-
     return $ok;
 }
 
@@ -410,38 +336,11 @@ $movementDate = date('Y-m-d\TH:i');
 $selectedProduct = null;
 
 if ($selectedProductId > 0) {
-    $stmt = $conn->prepare("
-        SELECT
-            p.id,
-            p.product_name,
-            " . ($prodHasProductCode ? "p.product_code," : "'' AS product_code,") . "
-            " . ($prodHasBarcode ? "p.barcode," : "'' AS barcode,") . "
-            " . ($prodHasPurity ? "p.purity," : "'' AS purity,") . "
-            " . ($prodHasUnit ? "p.unit," : "'pcs' AS unit,") . "
-            " . ($prodHasCurrentStockQty ? "IFNULL(p.current_stock_qty, 0) AS current_stock_qty," : "0 AS current_stock_qty,") . "
-            IFNULL(ps.opening_qty, 0) AS opening_qty,
-            IFNULL(ps.in_qty, 0) AS in_qty,
-            IFNULL(ps.out_qty, 0) AS out_qty,
-            IFNULL(ps.closing_qty, 0) AS closing_qty,
-            IFNULL(ps.closing_weight, 0) AS closing_weight
-        FROM products p
-        LEFT JOIN product_stock ps ON ps.product_id = p.id
-            " . ($psHasBusinessId && $prodHasBusinessId ? "AND ps.business_id = p.business_id" : "") . "
-        WHERE p.id = ?
-        " . ($prodHasBusinessId ? "AND p.business_id = ?" : "") . "
-        LIMIT 1
-    ");
-
-    if ($stmt) {
-        if ($prodHasBusinessId) {
-            $stmt->bind_param('ii', $selectedProductId, $businessId);
-        } else {
-            $stmt->bind_param('i', $selectedProductId);
-        }
-
+    $stmt=$conn->prepare("SELECT p.id,p.product_name,p.product_code,p.barcode,p.purity,COALESCE(u.unit_name,'pcs') AS unit,COALESCE(ps.quantity,0) AS quantity,COALESCE(ps.gross_weight,0) AS gross_weight,COALESCE(ps.net_weight,0) AS net_weight FROM products p LEFT JOIN units u ON u.id=p.unit_id LEFT JOIN product_stock ps ON ps.product_id=p.id AND ps.business_id=p.business_id AND ps.branch_id=? WHERE p.id=? AND p.business_id=? AND p.is_active=1 LIMIT 1");
+    if($stmt){
+        $stmt->bind_param('iii',$branchId,$selectedProductId,$businessId);
         $stmt->execute();
-        $res = $stmt->get_result();
-        $selectedProduct = $res ? $res->fetch_assoc() : null;
+        $selectedProduct=$stmt->get_result()->fetch_assoc()?:null;
         $stmt->close();
     }
 }
@@ -456,20 +355,21 @@ $recentParams = [];
 $recentTypes = '';
 
 if ($smHasBusinessId) {
-    $whereRecent .= " AND sm.business_id = ? ";
+    $whereRecent .= " AND sm.business_id = ? AND sm.branch_id = ? ";
     $recentParams[] = $businessId;
-    $recentTypes .= 'i';
+    $recentParams[] = $branchId;
+    $recentTypes .= 'ii';
 }
 
 $adjustmentFilters = [];
 
 if ($smHasMovementType) {
-    $adjustmentFilters[] = "sm.movement_type = 'Adjustment'";
-    $adjustmentFilters[] = "sm.movement_type = 'Manual'";
+    $adjustmentFilters[] = "sm.movement_type = 'Adjustment In'";
+    $adjustmentFilters[] = "sm.movement_type = 'Adjustment Out'";
 }
 
 if ($smHasRefTable) {
-    $adjustmentFilters[] = "sm.ref_table = 'stock_adjustment'";
+    $adjustmentFilters[] = "sm.reference_table = 'stock_adjustment'";
 }
 
 if ($smHasRemarks) {
@@ -486,8 +386,8 @@ $sql = "
         sm.id,
         " . ($smHasMovementDate ? "sm.movement_date," : "sm.created_at AS movement_date,") . "
         " . ($smHasMovementType ? "sm.movement_type," : "'' AS movement_type,") . "
-        " . ($smHasQtyIn ? "sm.qty_in," : "0 AS qty_in,") . "
-        " . ($smHasQtyOut ? "sm.qty_out," : "0 AS qty_out,") . "
+        " . ($smHasQtyIn ? "sm.quantity_in AS qty_in," : "0 AS qty_in,") . "
+        " . ($smHasQtyOut ? "sm.quantity_out AS qty_out," : "0 AS qty_out,") . "
         " . ($smHasWeightIn ? "sm.weight_in," : "0 AS weight_in,") . "
         " . ($smHasWeightOut ? "sm.weight_out," : "0 AS weight_out,") . "
         " . ($smHasRemarks ? "sm.remarks," : "'' AS remarks,") . "
@@ -535,8 +435,153 @@ body{min-height:100vh}
 @media(max-width:767px){.stock-detail{grid-template-columns:1fr}.content-wrap{padding-left:10px;padding-right:10px}}
 </style></head><body><?php include('includes/sidebar.php'); ?><main class="app-main"><?php include('includes/nav.php'); ?><div class="content-wrap">
 <?php if(!$canView): ?><div class="panel text-center muted">You do not have permission to view stock adjustment.</div><?php else: ?>
-<div class="row g-2"><div class="col-lg-7"><div class="panel"><div class="panel-title">Adjustment Entry</div><form id="adjustmentForm"><input type="hidden" name="csrf_token" value="<?php echo h($csrfToken); ?>"><input type="hidden" name="action" value="save"><div class="row g-3"><div class="col-12"><label class="form-label">Product *</label><select name="product_id" id="product_id" class="form-select" required><option value="0">Select Product</option><?php foreach($products as $product): ?><option value="<?php echo (int)$product['id']; ?>" <?php echo $selectedProductId===(int)$product['id']?'selected':''; ?>><?php echo h($product['product_name'].(!empty($product['product_code'])?' - '.$product['product_code']:'')); ?></option><?php endforeach; ?></select></div><div class="col-md-4"><label class="form-label">Mode *</label><select name="adjustment_mode" class="form-select"><option value="add">Add Stock</option><option value="subtract">Subtract Stock</option><option value="set">Set Exact Stock</option></select></div><div class="col-md-4"><label class="form-label">Quantity</label><input type="number" step="0.001" min="0" name="adjustment_qty" class="form-control"></div><div class="col-md-4"><label class="form-label">Weight</label><input type="number" step="0.001" min="0" name="adjustment_weight" class="form-control"></div><div class="col-md-6"><label class="form-label">Movement Date & Time</label><input type="datetime-local" name="movement_date" class="form-control" value="<?php echo h($movementDate); ?>"></div><div class="col-md-6"><label class="form-label">Remarks</label><input type="text" name="remarks" maxlength="500" class="form-control" placeholder="Reason for adjustment"></div><div class="col-12"><button class="btn btn-theme" id="saveButton" <?php echo !$canCreate?'disabled':''; ?>><i class="fa-solid fa-floppy-disk me-2"></i>Save Adjustment</button></div></div></form></div></div>
-<div class="col-lg-5"><div class="panel"><div class="panel-title">Selected Product Stock</div><?php if($selectedProduct): ?><div class="mb-3"><b><?php echo h($selectedProduct['product_name']); ?></b><div class="muted"><?php echo h($selectedProduct['product_code']??''); ?> · <?php echo h($selectedProduct['purity']??''); ?></div></div><div class="stock-detail"><div class="detail"><span class="muted">Opening Qty</span><b><?php echo number_format((float)($selectedProduct['opening_qty']??0),3); ?></b></div><div class="detail"><span class="muted">Total In</span><b><?php echo number_format((float)($selectedProduct['in_qty']??0),3); ?></b></div><div class="detail"><span class="muted">Total Out</span><b><?php echo number_format((float)($selectedProduct['out_qty']??0),3); ?></b></div><div class="detail"><span class="muted">Closing Qty</span><b><?php echo number_format((float)($selectedProduct['closing_qty']??$selectedProduct['current_stock_qty']??0),3); ?></b></div><div class="detail"><span class="muted">Closing Weight</span><b><?php echo number_format((float)($selectedProduct['closing_weight']??0),3); ?></b></div><div class="detail"><span class="muted">Unit</span><b><?php echo h($selectedProduct['unit']??'pcs'); ?></b></div></div><?php else: ?><div class="muted">Select a product to see current stock details.</div><?php endif; ?></div></div></div>
+<div class="row g-2"><div class="col-lg-7"><div class="panel"><div class="panel-title">Adjustment Entry</div><form id="adjustmentForm" data-current-qty="<?php echo h((string)($selectedProduct['quantity'] ?? 0)); ?>" data-current-weight="<?php echo h((string)($selectedProduct['net_weight'] ?? 0)); ?>"><input type="hidden" name="csrf_token" value="<?php echo h($csrfToken); ?>"><input type="hidden" name="action" value="save"><div class="row g-3"><div class="col-12"><label class="form-label">Product *</label><select name="product_id" id="product_id" class="form-select" required><option value="0">Select Product</option><?php foreach($products as $product): ?><option value="<?php echo (int)$product['id']; ?>" <?php echo $selectedProductId===(int)$product['id']?'selected':''; ?>><?php echo h($product['product_name'].(!empty($product['product_code'])?' - '.$product['product_code']:'')); ?></option><?php endforeach; ?></select></div><div class="col-md-4"><label class="form-label">Mode *</label><select name="adjustment_mode" id="adjustment_mode" class="form-select"><option value="add">Add Stock</option><option value="subtract">Subtract Stock</option><option value="set">Set Exact Stock</option></select></div><div class="col-md-4"><label class="form-label">Quantity</label><input type="number" step="0.001" min="0" name="adjustment_qty" id="adjustment_qty" class="form-control"></div><div class="col-md-4"><label class="form-label">Weight</label><input type="number" step="0.001" min="0" name="adjustment_weight" id="adjustment_weight" class="form-control"></div><div class="col-md-6"><label class="form-label">Movement Date & Time</label><input type="datetime-local" name="movement_date" class="form-control" value="<?php echo h($movementDate); ?>"></div><div class="col-md-6"><label class="form-label">Remarks</label><input type="text" name="remarks" maxlength="500" class="form-control" placeholder="Reason for adjustment"></div><div class="col-12"><button class="btn btn-theme" id="saveButton" <?php echo !$canCreate?'disabled':''; ?>><i class="fa-solid fa-floppy-disk me-2"></i>Save Adjustment</button></div></div></form></div></div>
+<div class="col-lg-5"><div class="panel"><div class="panel-title">Selected Product Stock</div><?php if($selectedProduct): ?><div class="mb-3"><b><?php echo h($selectedProduct['product_name']); ?></b><div class="muted"><?php echo h($selectedProduct['product_code']??''); ?> · <?php echo h($selectedProduct['purity']??''); ?></div></div><div class="stock-detail"><div class="detail"><span class="muted">Current Qty</span><b><?php echo number_format((float)($selectedProduct['quantity']??0),3); ?></b></div><div class="detail"><span class="muted">Gross Weight</span><b><?php echo number_format((float)($selectedProduct['gross_weight']??0),3); ?></b></div><div class="detail"><span class="muted">Net Weight</span><b><?php echo number_format((float)($selectedProduct['net_weight']??0),3); ?></b></div><div class="detail"><span class="muted">Available Qty</span><b><?php echo number_format((float)($selectedProduct['quantity']??0),3); ?></b></div><div class="detail"><span class="muted">Available Weight</span><b><?php echo number_format((float)($selectedProduct['net_weight']??0),3); ?></b></div><div class="detail"><span class="muted">Unit</span><b><?php echo h($selectedProduct['unit']??'pcs'); ?></b></div></div><?php else: ?><div class="muted">Select a product to see current stock details.</div><?php endif; ?></div></div></div>
 <div class="panel"><div class="panel-title">Recent Adjustments</div><div class="table-responsive"><table class="table align-middle"><thead><tr><th>Date</th><th>Product</th><th>Qty In</th><th>Qty Out</th><th>Weight In</th><th>Weight Out</th><th>Remarks</th></tr></thead><tbody><?php if($recentAdjustments): foreach($recentAdjustments as $row): ?><tr><td><?php echo !empty($row['movement_date'])?date('d-m-Y h:i A',strtotime($row['movement_date'])):'-'; ?></td><td><b><?php echo h($row['product_name']??''); ?></b><div class="muted"><?php echo h($row['product_code']??''); ?></div></td><td class="text-success"><?php echo number_format((float)($row['qty_in']??0),3); ?></td><td class="text-danger"><?php echo number_format((float)($row['qty_out']??0),3); ?></td><td class="text-success"><?php echo number_format((float)($row['weight_in']??0),3); ?></td><td class="text-danger"><?php echo number_format((float)($row['weight_out']??0),3); ?></td><td><?php echo h($row['remarks']??''); ?></td></tr><?php endforeach; else: ?><tr><td colspan="7" class="text-center muted py-4">No stock adjustments found.</td></tr><?php endif; ?></tbody></table></div></div><?php endif; ?><?php include('includes/footer.php'); ?></div></main><?php include('includes/script.php'); ?><script src="assets/js/script.js"></script><script>
-(function(){'use strict';const form=document.getElementById('adjustmentForm');const product=document.getElementById('product_id');function toast(type,msg){const t=document.createElement('div');t.className='theme-toast theme-toast-'+type;t.textContent=msg;document.body.appendChild(t);requestAnimationFrame(()=>t.classList.add('show'));setTimeout(()=>{t.classList.remove('show');setTimeout(()=>t.remove(),250)},3000)}if(product)product.addEventListener('change',()=>{location.href='stock-adjustment.php'+(product.value!=='0'?'?product_id='+encodeURIComponent(product.value):'')});if(form)form.addEventListener('submit',async e=>{e.preventDefault();const b=document.getElementById('saveButton'),old=b.innerHTML;b.disabled=true;b.innerHTML='<i class="fa-solid fa-spinner fa-spin me-2"></i>Saving...';try{const r=await fetch('api/stock-adjustment-save.php',{method:'POST',body:new FormData(form),credentials:'same-origin',headers:{'X-Requested-With':'XMLHttpRequest'}});const j=await r.json().catch(()=>({success:false,message:'Invalid server response.'}));if(!r.ok||!j.success)throw new Error(j.message||'Unable to save adjustment.');toast('success',j.message);setTimeout(()=>location.href='stock-adjustment.php?product_id='+encodeURIComponent(j.product_id||product.value),500)}catch(err){toast('error',err.message)}finally{b.disabled=false;b.innerHTML=old}})})();
+(function(){
+'use strict';
+const form=document.getElementById('adjustmentForm');
+const product=document.getElementById('product_id');
+const mode=document.getElementById('adjustment_mode');
+const qtyInput=document.getElementById('adjustment_qty');
+const weightInput=document.getElementById('adjustment_weight');
+const saveButton=document.getElementById('saveButton');
+
+function toast(type,msg){
+    const t=document.createElement('div');
+    t.className='theme-toast theme-toast-'+type;
+    t.textContent=msg;
+    document.body.appendChild(t);
+    requestAnimationFrame(()=>t.classList.add('show'));
+    setTimeout(()=>{
+        t.classList.remove('show');
+        setTimeout(()=>t.remove(),250);
+    },3600);
+}
+
+function numberValue(input){
+    const value=Number(input?.value||0);
+    return Number.isFinite(value)?value:0;
+}
+
+function currentStock(){
+    return {
+        qty:Number(form?.dataset.currentQty||0),
+        weight:Number(form?.dataset.currentWeight||0)
+    };
+}
+
+function updateInputLimits(){
+    if(!form||!mode)return;
+    const stock=currentStock();
+    const subtract=mode.value==='subtract';
+
+    if(subtract){
+        qtyInput.max=String(Math.max(0,stock.qty));
+        weightInput.max=String(Math.max(0,stock.weight));
+        qtyInput.placeholder='Maximum '+stock.qty.toFixed(3);
+        weightInput.placeholder='Maximum '+stock.weight.toFixed(3);
+    }else{
+        qtyInput.removeAttribute('max');
+        weightInput.removeAttribute('max');
+        qtyInput.placeholder='0.000';
+        weightInput.placeholder='0.000';
+    }
+}
+
+function validateAdjustment(){
+    if(!product||product.value==='0'){
+        return 'Please select a product.';
+    }
+
+    const qty=numberValue(qtyInput);
+    const weight=numberValue(weightInput);
+
+    if(qty<0||weight<0){
+        return 'Quantity and weight cannot be negative.';
+    }
+
+    if(qty===0&&weight===0){
+        return 'Enter quantity or weight for the adjustment.';
+    }
+
+    if(mode.value==='subtract'){
+        const stock=currentStock();
+
+        if(stock.qty<=0&&stock.weight<=0){
+            return 'No stock is available to subtract. Use Add Stock or Set Exact Stock first.';
+        }
+
+        if(qty>stock.qty){
+            return 'Only '+stock.qty.toFixed(3)+' quantity is available. Reduce the quantity or use Set Exact Stock.';
+        }
+
+        if(weight>stock.weight){
+            return 'Only '+stock.weight.toFixed(3)+' weight is available. Reduce the weight or use Set Exact Stock.';
+        }
+    }
+
+    return '';
+}
+
+if(product){
+    product.addEventListener('change',()=>{
+        location.href='stock-adjustment.php'+(
+            product.value!=='0'
+                ?'?product_id='+encodeURIComponent(product.value)
+                :''
+        );
+    });
+}
+
+mode?.addEventListener('change',updateInputLimits);
+updateInputLimits();
+
+if(form){
+    form.addEventListener('submit',async e=>{
+        e.preventDefault();
+
+        const validationError=validateAdjustment();
+        if(validationError){
+            toast('error',validationError);
+            return;
+        }
+
+        const old=saveButton.innerHTML;
+        saveButton.disabled=true;
+        saveButton.innerHTML='<i class="fa-solid fa-spinner fa-spin me-2"></i>Saving...';
+
+        try{
+            const r=await fetch('api/stock-adjustment-save.php',{
+                method:'POST',
+                body:new FormData(form),
+                credentials:'same-origin',
+                headers:{'X-Requested-With':'XMLHttpRequest'}
+            });
+
+            const raw=await r.text();
+            let j;
+            try{
+                j=JSON.parse(raw);
+            }catch(error){
+                throw new Error(raw?'Invalid server response: '+raw.substring(0,160):'Empty server response.');
+            }
+
+            if(!r.ok||!j.success){
+                throw new Error(j.message||'Unable to save adjustment.');
+            }
+
+            toast('success',j.message);
+            setTimeout(()=>{
+                location.href='stock-adjustment.php?product_id='+encodeURIComponent(j.product_id||product.value);
+            },450);
+        }catch(err){
+            toast('error',err.message);
+        }finally{
+            saveButton.disabled=false;
+            saveButton.innerHTML=old;
+        }
+    });
+}
+})();
 </script></body></html>

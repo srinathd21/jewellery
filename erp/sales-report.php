@@ -275,17 +275,6 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
 <main class="app-main">
 <?php include 'includes/nav.php'; ?>
 <div class="content-wrap">
-    <div class="page-heading">
-        <div>
-            <h1 class="page-title">Sales Report</h1>
-            <div class="page-subtitle"><?php echo h($businessName); ?> · Sales, tax, collection and balance analysis</div>
-        </div>
-        <div class="d-flex flex-wrap gap-2">
-            <button type="button" class="btn btn-light-custom" id="exportCsv"><i class="fa-solid fa-file-csv me-1"></i>Export CSV</button>
-            <button type="button" class="btn btn-light-custom" onclick="window.print()"><i class="fa-solid fa-print me-1"></i>Print</button>
-        </div>
-    </div>
-
     <div class="stat-grid">
         <div class="stat-card"><div class="stat-icon"><i class="fa-solid fa-file-invoice"></i></div><div><div class="stat-label">Total Bills</div><div class="stat-value" id="totalBills">0</div></div></div>
         <div class="stat-card"><div class="stat-icon"><i class="fa-solid fa-indian-rupee-sign"></i></div><div><div class="stat-label">Grand Total</div><div class="stat-value" id="grandTotal">₹0.00</div></div></div>
@@ -525,12 +514,6 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
         await loadBootstrap();
         await loadReport();
     });
-    document.getElementById('exportCsv').addEventListener('click',()=>{
-        const params=new URLSearchParams(new FormData(filterForm));
-        params.set('action','export');
-        window.location.href='api/sales-report.php?'+params.toString();
-    });
-
     (async()=>{await loadBootstrap();await loadReport();})();
 })();
 </script>

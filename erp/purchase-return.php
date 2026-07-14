@@ -369,7 +369,6 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
 }
 body{background:var(--page-bg);color:var(--text-color);font-family:<?php echo json_encode((string)$theme['font_family']); ?>,sans-serif;}
 .sidebar{background:linear-gradient(180deg,<?php echo h($theme['sidebar_gradient_1']); ?>,<?php echo h($theme['sidebar_gradient_2']); ?>,<?php echo h($theme['sidebar_gradient_3']); ?>)!important;}
-.page-heading{margin-bottom:10px}.page-title{font-family:<?php echo json_encode((string)$theme['heading_font_family']); ?>,serif;font-size:18px;font-weight:800;margin:0}.page-subtitle{font-size:10px;color:var(--muted-color);margin-top:2px}
 .panel{background:var(--card-bg);border:1px solid var(--border-color);border-radius:var(--radius);margin-bottom:10px;overflow:hidden}
 .panel-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:11px 13px;border-bottom:1px solid var(--border-color)}
 .panel-title{font-size:12px;font-weight:800}.panel-subtitle{font-size:9px;color:var(--muted-color);margin-top:2px}.panel-body{padding:12px}
@@ -396,11 +395,6 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
 <main class="app-main">
 <?php include('includes/nav.php'); ?>
 <div class="content-wrap">
-    <div class="page-heading">
-        <h1 class="page-title">Purchase Return</h1>
-        <div class="page-subtitle"><?php echo h($businessName); ?> · Purchase return and stock reversal</div>
-    </div>
-
     <?php if (!$canView): ?>
         <div class="panel"><div class="empty-state"><i class="fa-solid fa-lock mb-2"></i><div>You do not have permission to view purchase returns.</div></div></div>
     <?php else: ?>
@@ -568,6 +562,49 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
     if(form){
         form.addEventListener('submit',async function(event){
             event.preventDefault();
+
+            let hasReturnItem=false;
+            let validationMessage='';
+
+            document.querySelectorAll('#returnTable tbody tr').forEach(function(row,index){
+                if(validationMessage)return;
+
+                const qtyInput=row.querySelector('.return-qty');
+                const weightInput=row.querySelector('.return-weight');
+                const purchasedQty=parseFloat(row.querySelector('input[name*="[qty]"]')?.value||0);
+                const purchasedWeight=parseFloat(row.querySelector('input[name*="[net_weight]"]')?.value||0);
+                const returnQty=parseFloat(qtyInput?.value||0);
+                const returnWeight=parseFloat(weightInput?.value||0);
+
+                qtyInput?.classList.remove('is-invalid');
+                weightInput?.classList.remove('is-invalid');
+
+                if(returnQty>0||returnWeight>0)hasReturnItem=true;
+
+                if(returnQty<0||returnWeight<0){
+                    validationMessage='Return quantity and weight cannot be negative in row '+(index+1)+'.';
+                }else if(returnQty>purchasedQty){
+                    qtyInput?.classList.add('is-invalid');
+                    qtyInput?.focus();
+                    validationMessage='Return quantity cannot exceed '+purchasedQty.toFixed(3)+' in row '+(index+1)+'.';
+                }else if(purchasedWeight>0&&returnWeight>purchasedWeight){
+                    weightInput?.classList.add('is-invalid');
+                    weightInput?.focus();
+                    validationMessage='Return weight cannot exceed '+purchasedWeight.toFixed(3)+' in row '+(index+1)+'.';
+                }
+            });
+
+            if(validationMessage){
+                toast('error',validationMessage);
+                return;
+            }
+
+            if(!hasReturnItem){
+                toast('error','Enter return quantity or return weight for at least one item.');
+                document.querySelector('.return-qty')?.focus();
+                return;
+            }
+
             const button=document.getElementById('saveReturnButton');
             if(!button)return;
             const old=button.innerHTML;
@@ -581,8 +618,16 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
                     credentials:'same-origin',
                     headers:{'X-Requested-With':'XMLHttpRequest'}
                 });
-                const result=await response.json().catch(()=>({success:false,message:'Invalid response received from the server.'}));
-                if(!response.ok||!result.success)throw new Error(result.message||'Unable to save purchase return.');
+                const raw=await response.text();
+                let result;
+                try{
+                    result=JSON.parse(raw);
+                }catch(parseError){
+                    throw new Error(raw ? 'Server returned invalid output: '+raw.substring(0,220) : 'Server returned an empty response.');
+                }
+                if(!response.ok||!result.success){
+                    throw new Error(result.message||'Unable to save purchase return.');
+                }
                 toast('success',result.message);
                 setTimeout(()=>location.href='purchase-return.php?purchase_id='+encodeURIComponent(result.purchase_id)+'&msg=created',600);
             }catch(error){

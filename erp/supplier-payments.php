@@ -628,9 +628,6 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
 }
 body{background:var(--page-bg);color:var(--text-color);font-family:<?php echo json_encode((string)$theme['font_family']); ?>,sans-serif}
 .sidebar{background:linear-gradient(180deg,<?php echo h($theme['sidebar_gradient_1']); ?>,<?php echo h($theme['sidebar_gradient_2']); ?>,<?php echo h($theme['sidebar_gradient_3']); ?>)!important}
-.page-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}
-.page-title{font-family:<?php echo json_encode((string)$theme['heading_font_family']); ?>,serif;font-size:18px;font-weight:800;margin:0}
-.page-subtitle{font-size:10px;color:var(--muted-color);margin-top:2px}
 .stat-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:10px}
 .stat-card{background:var(--card-bg);border:1px solid var(--border-color);border-radius:var(--radius);padding:12px 14px;min-height:82px;display:flex;align-items:center;gap:12px}
 .stat-icon{width:42px;height:42px;flex:0 0 42px;display:flex;align-items:center;justify-content:center;border-radius:calc(var(--radius)*.75);background:var(--primary-soft);color:var(--primary-dark);font-size:16px}
@@ -664,17 +661,6 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
 <main class="app-main">
 <?php include('includes/nav.php'); ?>
 <div class="content-wrap">
-    <div class="page-heading">
-        <div>
-            <h1 class="page-title">Supplier Payments</h1>
-            <div class="page-subtitle"><?php echo h($businessName); ?> · Record payments and update purchase balances</div>
-        </div>
-        <div class="d-flex gap-2">
-            <a href="purchases.php" class="btn btn-light-custom">Purchases</a>
-            <a href="suppliers.php" class="btn btn-light-custom">Suppliers</a>
-        </div>
-    </div>
-
     <?php if (!$canView): ?>
         <div class="panel"><div class="empty-state"><i class="fa-solid fa-lock mb-2"></i><div>You do not have permission to view supplier payments.</div></div></div>
     <?php else: ?>

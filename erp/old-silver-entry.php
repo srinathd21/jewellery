@@ -442,7 +442,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_old_silver'])) {
         $totalValue += $valueAmount;
     }
 
-    if (!$items) {
+    if (!$items && !$errors) {
         $errors[] = 'Please add at least one valid old silver item.';
     }
 
@@ -688,6 +688,9 @@ body{background:var(--page-bg);color:var(--text);font-family:<?php echo json_enc
 .form-label{margin-bottom:5px;font-size:10px;font-weight:700}.form-control,.form-select{min-height:39px;border:1px solid var(--line);border-radius:10px;background:var(--card-bg);color:var(--text);font-size:10px}.form-control:focus,.form-select:focus{border-color:var(--brand);box-shadow:0 0 0 .18rem rgba(216,148,22,.12)}
 .btn{min-height:37px;border-radius:10px;font-size:10px;font-weight:700}.btn-primary{border-color:transparent!important;background:linear-gradient(135deg,var(--brand),var(--brand-dark))!important}.table{margin-bottom:0;color:var(--text);font-size:10px}.table thead th{padding:10px 11px;background:color-mix(in srgb,var(--muted) 6%,var(--card-bg));color:var(--muted);font-size:9px;text-transform:uppercase;white-space:nowrap}.table tbody td{padding:10px 11px;background:var(--card-bg)!important;color:var(--text);vertical-align:middle}
 .alert{border:0;border-radius:10px;font-size:10px}.text-muted{color:var(--muted)!important}
+.field-invalid{border-color:#dc3545!important;box-shadow:0 0 0 .18rem rgba(220,53,69,.12)!important}
+.validation-message{margin-top:6px;color:#dc3545;font-size:9px;font-weight:700}
+.weight-hint{display:block;margin-top:4px;color:var(--muted);font-size:8px}.input-unit-wrap{position:relative}.input-unit-wrap .form-control{padding-right:28px}.input-unit{position:absolute;right:10px;top:50%;transform:translateY(-50%);font-size:9px;color:var(--muted);pointer-events:none}
 body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark"] body{--page-bg:#0f151b;--card-bg:#182129;--text:#f3f6f8;--muted:#9aa7b3;--line:#2c3944}
 @media(max-width:767px){.content-wrap{padding-left:10px;padding-right:10px}}
 </style>
@@ -773,16 +776,20 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
                         <button type="button" class="btn btn-sm btn-primary" onclick="addItemRow()">Add Item</button>
                     </div>
                     <div class="card-body">
+                        <div class="alert alert-info mb-3">
+                            Enter every weight in grams. Example: Gross 100.000, Stone 2.000, Deduction 3.000.
+                            Net Weight will be calculated as 95.000 g.
+                        </div>
                         <div class="table-responsive">
                             <table class="table table-bordered align-middle" id="itemsTable">
                                 <thead>
                                 <tr>
                                     <th>Description</th>
                                     <th>Purity %</th>
-                                    <th>Gross Wt</th>
-                                    <th>Stone Wt</th>
-                                    <th>Deduction Wt</th>
-                                    <th>Net Wt</th>
+                                    <th>Gross Wt (g)</th>
+                                    <th>Stone Wt (g)</th>
+                                    <th>Deduction Wt (g)</th>
+                                    <th>Net Wt (g)</th>
                                     <th>Rate/g</th>
                                     <th>Value</th>
                                     <th></th>
@@ -792,11 +799,11 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
                                 <tr>
                                     <td><input type="text" name="description[]" class="form-control" value="Old Silver" required></td>
                                     <td><input type="number" step="0.0001" min="0.0001" max="100" name="purity[]" class="form-control purity" value="<?php echo h(number_format($defaultPurity, 4, '.', '')); ?>" required></td>
-                                    <td><input type="number" step="0.001" min="0" name="gross_weight[]" class="form-control gross-weight" value="0.000" required></td>
-                                    <td><input type="number" step="0.001" min="0" name="stone_weight[]" class="form-control stone-weight" value="0.000"></td>
-                                    <td><input type="number" step="0.001" min="0" name="deduction_weight[]" class="form-control deduction-weight" value="0.000"></td>
+                                    <td><input type="number" step="0.001" min="0" name="gross_weight[]" class="form-control gross-weight" value="" placeholder="e.g. 100.000" inputmode="decimal" required></td>
+                                    <td><input type="number" step="0.001" min="0" name="stone_weight[]" class="form-control stone-weight" value="0.000" placeholder="e.g. 2.000" inputmode="decimal" placeholder="e.g. 2.000" inputmode="decimal"></td>
+                                    <td><input type="number" step="0.001" min="0" name="deduction_weight[]" class="form-control deduction-weight" value="0.000" placeholder="e.g. 3.000" inputmode="decimal" placeholder="e.g. 3.000" inputmode="decimal"></td>
                                     <td><input type="text" class="form-control net-weight" value="0.000" readonly></td>
-                                    <td><input type="number" step="0.01" min="0" name="rate_per_gram[]" class="form-control rate" value="<?php echo h(number_format($defaultRate, 2, '.', '')); ?>" required></td>
+                                    <td><input type="number" step="0.01" min="0" name="rate_per_gram[]" class="form-control rate" value="<?php echo h(number_format($defaultRate, 2, '.', '')); ?>" placeholder="e.g. 105.00" inputmode="decimal" required></td>
                                     <td><input type="text" class="form-control value-amount" value="0.00" readonly></td>
                                     <td><button type="button" class="btn btn-sm btn-danger" onclick="removeItemRow(this)">×</button></td>
                                 </tr>
@@ -897,11 +904,28 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
             const stone=number(row.querySelector('.stone-weight')?.value);
             const deduction=number(row.querySelector('.deduction-weight')?.value);
             const rate=number(row.querySelector('.rate')?.value);
-            const net=Math.max(gross-stone-deduction,0);
-            const value=net*rate;
+            const stoneField=row.querySelector('.stone-weight');
+            const deductionField=row.querySelector('.deduction-weight');
+            const netField=row.querySelector('.net-weight');
+            const valueField=row.querySelector('.value-amount');
 
-            row.querySelector('.net-weight').value=net.toFixed(3);
-            row.querySelector('.value-amount').value=value.toFixed(2);
+            if(stoneField){
+                stoneField.max=Math.max(gross,0).toFixed(3);
+            }
+
+            if(deductionField){
+                deductionField.max=Math.max(gross-stone,0).toFixed(3);
+            }
+
+            const net=gross-stone-deduction;
+            const validNet=gross>0&&stone>=0&&deduction>=0&&net>0;
+            const safeNet=validNet?net:0;
+            const value=safeNet*rate;
+
+            netField.value=safeNet.toFixed(3);
+            valueField.value=value.toFixed(2);
+
+            netField.classList.toggle('field-invalid',gross>0&&!validNet);
 
             totalGross+=gross;
             totalNet+=net;
@@ -918,9 +942,9 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
         row.innerHTML=`
             <td><input type="text" name="description[]" class="form-control" value="Old Silver" required></td>
             <td><input type="number" step="0.0001" min="0.0001" max="100" name="purity[]" class="form-control purity" value="${Number(defaultPurity).toFixed(4)}" required></td>
-            <td><input type="number" step="0.001" min="0" name="gross_weight[]" class="form-control gross-weight" value="0.000" required></td>
-            <td><input type="number" step="0.001" min="0" name="stone_weight[]" class="form-control stone-weight" value="0.000"></td>
-            <td><input type="number" step="0.001" min="0" name="deduction_weight[]" class="form-control deduction-weight" value="0.000"></td>
+            <td><input type="number" step="0.001" min="0" name="gross_weight[]" class="form-control gross-weight" value="" placeholder="e.g. 100.000" inputmode="decimal" required></td>
+            <td><input type="number" step="0.001" min="0" name="stone_weight[]" class="form-control stone-weight" value="0.000" placeholder="e.g. 2.000" inputmode="decimal" placeholder="e.g. 2.000" inputmode="decimal"></td>
+            <td><input type="number" step="0.001" min="0" name="deduction_weight[]" class="form-control deduction-weight" value="0.000" placeholder="e.g. 3.000" inputmode="decimal" placeholder="e.g. 3.000" inputmode="decimal"></td>
             <td><input type="text" class="form-control net-weight" value="0.000" readonly></td>
             <td><input type="number" step="0.01" min="0" name="rate_per_gram[]" class="form-control rate" value="${Number(defaultRate).toFixed(2)}" required></td>
             <td><input type="text" class="form-control value-amount" value="0.00" readonly></td>
@@ -948,6 +972,72 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
         if(option&&option.value){
             document.getElementById('customer_name').value=option.dataset.name||'';
         }
+    });
+
+    const oldSilverForm=document.getElementById('oldSilverForm');
+
+    oldSilverForm.addEventListener('submit',function(event){
+        document.querySelectorAll('.field-invalid').forEach(function(field){
+            field.classList.remove('field-invalid');
+        });
+
+        document.querySelectorAll('.validation-message').forEach(function(message){
+            message.remove();
+        });
+
+        const rows=[...document.querySelectorAll('#itemsBody tr')];
+
+        for(let index=0;index<rows.length;index++){
+            const row=rows[index];
+            const grossField=row.querySelector('.gross-weight');
+            const gross=number(grossField?.value);
+            const stone=number(row.querySelector('.stone-weight')?.value);
+            const deduction=number(row.querySelector('.deduction-weight')?.value);
+            const rateField=row.querySelector('.rate');
+            const rate=number(rateField?.value);
+
+            if(gross<=0){
+                event.preventDefault();
+                grossField.classList.add('field-invalid');
+                const message=document.createElement('div');
+                message.className='validation-message';
+                message.textContent='Gross weight must be greater than zero.';
+                grossField.parentElement.appendChild(message);
+                grossField.focus();
+                grossField.scrollIntoView({behavior:'smooth',block:'center'});
+                return;
+            }
+
+            if(stone+deduction>=gross){
+                event.preventDefault();
+                grossField.classList.add('field-invalid');
+                const message=document.createElement('div');
+                message.className='validation-message';
+                message.textContent='Stone Weight + Deduction Weight must be less than Gross Weight. Enter all weights in grams, for example 2.000 and 3.000—not 2000 and 3000.';
+                grossField.parentElement.appendChild(message);
+                grossField.focus();
+                grossField.scrollIntoView({behavior:'smooth',block:'center'});
+                return;
+            }
+
+            if(rate<=0){
+                event.preventDefault();
+                rateField.classList.add('field-invalid');
+                const message=document.createElement('div');
+                message.className='validation-message';
+                message.textContent='Rate per gram must be greater than zero.';
+                rateField.parentElement.appendChild(message);
+                rateField.focus();
+                rateField.scrollIntoView({behavior:'smooth',block:'center'});
+                return;
+            }
+        }
+    });
+
+    document.getElementById('itemsBody').addEventListener('input',function(event){
+        event.target.classList.remove('field-invalid');
+        const message=event.target.parentElement?.querySelector('.validation-message');
+        if(message)message.remove();
     });
 
     calculateTotals();

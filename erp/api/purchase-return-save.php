@@ -59,6 +59,24 @@ function hasColumn(mysqli $conn, string $table, string $column): bool
     return $res && $res->num_rows > 0;
 }
 
+function insertSupported(mysqli $conn, string $table, array $data): int
+{
+    $fields=[]; $marks=[]; $types=''; $values=[];
+    foreach($data as $column=>$definition){
+        if(!hasColumn($conn,$table,$column)) continue;
+        [$type,$value]=$definition;
+        $fields[]="`{$column}`"; $marks[]='?'; $types.=$type; $values[]=$value;
+    }
+    if(!$fields) throw new RuntimeException("No supported columns found in {$table}.");
+    $sql="INSERT INTO `{$table}` (".implode(',',$fields).") VALUES (".implode(',',$marks).")";
+    $stmt=$conn->prepare($sql);
+    if(!$stmt) throw new RuntimeException("Unable to prepare {$table} insert: ".$conn->error);
+    $bind=[$types]; foreach($values as $k=>$v){$bind[]=&$values[$k];}
+    call_user_func_array([$stmt,'bind_param'],$bind);
+    if(!$stmt->execute()){ $e=$stmt->error; $stmt->close(); throw new RuntimeException("Unable to save {$table}: {$e}"); }
+    $id=(int)$stmt->insert_id; $stmt->close(); return $id;
+}
+
 function hasPermission(mysqli $conn, string $action): bool
 {
     if (($_SESSION['user_type'] ?? '') === 'Platform Admin') {
@@ -142,10 +160,10 @@ if (!hasPermission($conn, 'create')) {
 
 $businessId = (int)($_SESSION['business_id'] ?? 0);
 $userId = (int)($_SESSION['user_id'] ?? 0);
-$branchId = (int)($_SESSION['branch_id'] ?? 0);
+$branchId = (int)($_SESSION['branch_id'] ?? $_SESSION['default_branch_id'] ?? 0);
 
-if ($businessId <= 0 || $branchId <= 0) {
-    respond(false, 'A valid business and branch must be selected.', [], 403);
+if ($businessId <= 0) {
+    respond(false, 'A valid business must be selected.', [], 403);
 }
 
 $returnNo = trim((string)($_POST['return_no'] ?? ''));
@@ -170,23 +188,8 @@ if (mb_strlen($notes) > 1000) {
     respond(false, 'Notes must not exceed 1000 characters.');
 }
 
-$stmt = $conn->prepare(
-    "SELECT p.*, s.supplier_name
-     FROM purchases p
-     LEFT JOIN suppliers s
-        ON s.id = p.supplier_id
-       AND s.business_id = p.business_id
-     WHERE p.id = ?
-       AND p.business_id = ?
-       AND p.branch_id = ?
-     LIMIT 1"
-);
-
-if (!$stmt) {
-    respond(false, 'Unable to validate the selected purchase: ' . $conn->error, [], 500);
-}
-
-$stmt->bind_param('iii', $purchaseId, $businessId, $branchId);
+$stmt = $conn->prepare("SELECT p.*, s.supplier_name FROM purchases p LEFT JOIN suppliers s ON s.id = p.supplier_id WHERE p.id = ? AND p.business_id = ? LIMIT 1");
+$stmt->bind_param('ii', $purchaseId, $businessId);
 $stmt->execute();
 $purchase = $stmt->get_result()->fetch_assoc();
 $stmt->close();
@@ -271,48 +274,38 @@ $conn->begin_transaction();
 
 try {
     $supplierId = (int)($purchase['supplier_id'] ?? 0);
-    $stmt = $conn->prepare("INSERT INTO purchase_returns
-        (business_id, return_no, return_date, purchase_id, supplier_id, subtotal, gst_amount, total_amount, notes, created_by, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())");
-    if (!$stmt) {
-        throw new RuntimeException('Failed to prepare purchase return.');
-    }
-
-    $stmt->bind_param('issiidddsi', $businessId, $returnNo, $returnDate, $purchaseId, $supplierId, $subtotal, $gstTotal, $grandTotal, $notes, $userId);
-    if (!$stmt->execute()) {
-        throw new RuntimeException('Failed to save purchase return.');
-    }
-    $purchaseReturnId = (int)$stmt->insert_id;
-    $stmt->close();
+    $purchaseReturnId = insertSupported($conn, 'purchase_returns', [
+        'business_id'=>['i',$businessId], 'company_id'=>['i',$businessId], 'branch_id'=>['i',$branchId],
+        'return_no'=>['s',$returnNo], 'return_number'=>['s',$returnNo], 'purchase_return_number'=>['s',$returnNo],
+        'return_date'=>['s',$returnDate], 'purchase_id'=>['i',$purchaseId], 'purchase_invoice_id'=>['i',$purchaseId],
+        'purchase_order_id'=>['i',$purchaseId], 'supplier_id'=>['i',$supplierId], 'vendor_id'=>['i',$supplierId],
+        'supplier_name'=>['s',(string)($purchase['supplier_name']??'')], 'subtotal'=>['d',$subtotal],
+        'subtotal_amount'=>['d',$subtotal], 'taxable_amount'=>['d',$subtotal], 'gst_amount'=>['d',$gstTotal],
+        'tax_amount'=>['d',$gstTotal], 'total_amount'=>['d',$grandTotal], 'net_amount'=>['d',$grandTotal],
+        'total_refund_amount'=>['d',$grandTotal], 'notes'=>['s',$notes], 'remarks'=>['s',$notes],
+        'reason'=>['s',$notes], 'return_reason'=>['s',$notes], 'status'=>['s','Confirmed'],
+        'return_status'=>['s','APPROVED'], 'approval_status'=>['s','APPROVED'], 'refund_status'=>['s','PENDING'],
+        'return_type'=>['s','GOODS_RETURN'], 'created_by'=>['i',$userId]
+    ]);
 
     foreach ($cleanItems as $row) {
-        $stmt = $conn->prepare("INSERT INTO purchase_return_items
-            (business_id, purchase_return_id, purchase_item_id, product_id, item_name, qty, net_weight, rate_per_gram, taxable_amount, gst_percent, gst_amount, total_amount)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-        if (!$stmt) {
-            throw new RuntimeException('Failed to prepare purchase return item.');
-        }
-
-        $stmt->bind_param(
-            'iiiisddddddd',
-            $businessId,
-            $purchaseReturnId,
-            $row['purchase_item_id'],
-            $row['product_id'],
-            $row['item_name'],
-            $row['qty'],
-            $row['net_weight'],
-            $row['rate_per_gram'],
-            $row['taxable_amount'],
-            $row['gst_percent'],
-            $row['gst_amount'],
-            $row['total_amount']
-        );
-
-        if (!$stmt->execute()) {
-            throw new RuntimeException('Failed to save purchase return item.');
-        }
-        $stmt->close();
+        insertSupported($conn, 'purchase_return_items', [
+            'business_id'=>['i',$businessId], 'company_id'=>['i',$businessId], 'branch_id'=>['i',$branchId],
+            'purchase_return_id'=>['i',$purchaseReturnId], 'return_id'=>['i',$purchaseReturnId],
+            'purchase_item_id'=>['i',$row['purchase_item_id']], 'purchase_invoice_item_id'=>['i',$row['purchase_item_id']],
+            'purchase_order_item_id'=>['i',$row['purchase_item_id']], 'product_id'=>['i',$row['product_id']],
+            'item_name'=>['s',$row['item_name']], 'product_name'=>['s',$row['item_name']],
+            'qty'=>['d',$row['qty']], 'quantity'=>['d',$row['qty']], 'return_qty'=>['d',$row['qty']],
+            'return_quantity'=>['d',$row['qty']], 'net_weight'=>['d',$row['net_weight']],
+            'return_weight'=>['d',$row['net_weight']], 'rate_per_gram'=>['d',$row['rate_per_gram']],
+            'rate'=>['d',$row['rate_per_gram']], 'purchase_price'=>['d',$row['rate_per_gram']],
+            'refund_price'=>['d',$row['rate_per_gram']], 'refund_price_per_unit'=>['d',$row['rate_per_gram']],
+            'taxable_amount'=>['d',$row['taxable_amount']], 'gst_percent'=>['d',$row['gst_percent']],
+            'tax_percent'=>['d',$row['gst_percent']], 'gst_amount'=>['d',$row['gst_amount']],
+            'tax_amount'=>['d',$row['gst_amount']], 'total_amount'=>['d',$row['total_amount']],
+            'line_total'=>['d',$row['total_amount']], 'total_refund'=>['d',$row['total_amount']],
+            'total_refund_amount'=>['d',$row['total_amount']], 'reason'=>['s',$notes], 'remarks'=>['s',$notes]
+        ]);
 
         $productId = (int)$row['product_id'];
         if ($productId <= 0) {
@@ -398,8 +391,11 @@ try {
                 'branch_id' => ['i', $branchId],
                 'product_id' => ['i', $productId],
                 'movement_type' => ['s', 'Purchase Return'],
+                'reference_table' => ['s', 'purchase_returns'],
                 'ref_table' => ['s', 'purchase_returns'],
+                'reference_id' => ['i', $purchaseReturnId],
                 'ref_id' => ['i', $purchaseReturnId],
+                'quantity_out' => ['d', $row['qty']],
                 'qty_out' => ['d', $row['qty']],
                 'weight_out' => ['d', $row['net_weight']],
                 'remarks' => ['s', 'Purchase return entry'],
@@ -459,5 +455,5 @@ try {
     ]);
 } catch (Throwable $e) {
     $conn->rollback();
-    respond(false, $e->getMessage(), [], 500);
+    respond(false, $e->getMessage(), [], 422);
 }

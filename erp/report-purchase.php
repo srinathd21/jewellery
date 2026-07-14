@@ -1,25 +1,78 @@
 <?php
-if (session_status() === PHP_SESSION_NONE) session_start();
-$pageTitle = 'report purchase';
+/*
+ * Use this page as the public AJAX/export endpoint.
+ * The browser never needs to request /api/report-purchase.php directly,
+ * so nested localhost folders and rewrite rules cannot cause a 404.
+ */
+if (isset($_GET['action'])) {
+    $apiFile = __DIR__ . '/api/report-purchase.php';
+
+    if (!is_file($apiFile)) {
+        http_response_code(500);
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'success' => false,
+            'message' => 'Required API file was not found at api/report-purchase.php.'
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
+    require $apiFile;
+    exit;
+}
+
+if (session_status()===PHP_SESSION_NONE) session_start();
+date_default_timezone_set((string)($_SESSION['timezone']??'Asia/Kolkata'));
+foreach([__DIR__.'/config/config.php',__DIR__.'/config.php',__DIR__.'/includes/config.php',__DIR__.'/super-admin/includes/config.php'] as $f){if(is_file($f)){require_once $f;break;}}
+if(!isset($conn)||!($conn instanceof mysqli)) die('Database configuration is not available.');
+$conn->set_charset('utf8mb4'); mysqli_report(MYSQLI_REPORT_OFF);
+function h($v):string{return htmlspecialchars((string)($v??''),ENT_QUOTES,'UTF-8');}
+function tableExists(mysqli $c,string $t):bool{$s=$c->real_escape_string($t);$r=$c->query("SHOW TABLES LIKE '{$s}'");return $r&&$r->num_rows>0;}
+if(empty($_SESSION['user_id'])){header('Location: login.php');exit;}
+$businessId=(int)($_SESSION['business_id']??0); if($businessId<=0) die('A valid business must be selected.');
+$pageTitle=$page_title='Purchase Report'; $currentPage='report-purchase';
+$theme=['primary_color'=>'#d89416','primary_dark_color'=>'#b86a0b','primary_soft_color'=>'#fff6e5','sidebar_gradient_1'=>'#171c21','sidebar_gradient_2'=>'#20272d','sidebar_gradient_3'=>'#101419','page_background'=>'#f4f3f0','card_background'=>'#fff','text_color'=>'#171717','muted_text_color'=>'#7d8794','border_color'=>'#e8e8e8','font_family'=>'Inter','heading_font_family'=>'Playfair Display','border_radius_px'=>12];
+if(tableExists($conn,'business_theme_settings')){$st=$conn->prepare('SELECT * FROM business_theme_settings WHERE business_id=? LIMIT 1');if($st){$st->bind_param('i',$businessId);$st->execute();$tr=$st->get_result()->fetch_assoc()?:[];$st->close();foreach($theme as $k=>$v)if(isset($tr[$k])&&$tr[$k]!=='')$theme[$k]=$tr[$k];}}
+$businessName=(string)($_SESSION['business_name']??'Jewellery ERP');
 ?>
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>report purchase</title>
-<?php include('includes/links.php'); ?>
-</head>
-<body>
-<?php include('includes/sidebar.php'); ?>
-<main class="app-main">
-<?php include('includes/nav.php'); ?>
-<div class="content-wrap">
-<div class="card-panel p-4"><h1 class="h5 mb-2">report purchase</h1><p class="text-muted mb-0">Page content will be added here.</p></div>
-<?php include('includes/footer.php'); ?>
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?=h($businessName)?> - Purchase Report</title><?php include 'includes/links.php'; ?>
+<style>
+:root{--primary:<?=h($theme['primary_color'])?>;--primary-dark:<?=h($theme['primary_dark_color'])?>;--primary-soft:<?=h($theme['primary_soft_color'])?>;--page-bg:<?=h($theme['page_background'])?>;--card-bg:<?=h($theme['card_background'])?>;--text:<?=h($theme['text_color'])?>;--muted:<?=h($theme['muted_text_color'])?>;--border:<?=h($theme['border_color'])?>;--radius:<?=(int)$theme['border_radius_px']?>px}
+body{background:var(--page-bg);color:var(--text);font-family:<?=json_encode((string)$theme['font_family'])?>,sans-serif}.sidebar{background:linear-gradient(180deg,<?=h($theme['sidebar_gradient_1'])?>,<?=h($theme['sidebar_gradient_2'])?>,<?=h($theme['sidebar_gradient_3'])?>)!important}
+.stats,.mini-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:10px}.stat,.mini,.panel{background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius)}.stat{padding:12px 14px;display:flex;gap:12px;align-items:center;min-height:82px}.stat i{width:42px;height:42px;display:grid;place-items:center;border-radius:10px;background:var(--primary-soft);color:var(--primary-dark)}.label{font-size:10px;color:var(--muted)}.value{font-size:21px;font-weight:800;margin-top:3px}.panel{overflow:hidden;margin-bottom:10px}.panel-head{padding:11px 13px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;gap:10px;align-items:center}.panel-title{font-size:12px;font-weight:800}.panel-sub{font-size:9px;color:var(--muted);margin-top:2px}.panel-body{padding:12px}.grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:10px}.s2{grid-column:span 2}.s3{grid-column:span 3}.s12{grid-column:span 12}.field-label{display:block;font-size:9px;font-weight:700;text-transform:uppercase;color:var(--muted);margin-bottom:4px}.form-control,.form-select{min-height:36px;font-size:10px;border-radius:9px;border-color:var(--border)}.btn-theme{background:linear-gradient(135deg,var(--primary),var(--primary-dark));color:#fff;border:0;border-radius:9px;font-size:10px;font-weight:700;min-height:36px}.btn-lite{background:var(--card-bg);border:1px solid var(--border);border-radius:9px;font-size:10px;font-weight:700;min-height:36px}.mini{padding:11px 13px;display:flex;justify-content:space-between;font-size:10px}.mini span{color:var(--muted)}.table{font-size:10px;min-width:1500px}.table th{font-size:9px;text-transform:uppercase;color:var(--muted);background:#f8f8f8;white-space:nowrap}.table td{white-space:nowrap;vertical-align:middle}.badge-status{display:inline-flex;padding:4px 8px;border-radius:999px;font-size:8px;font-weight:800}.paid{background:#eaf8f0;color:#168449}.partial{background:#fff6df;color:#a66800}.unpaid{background:#fdecec;color:#bd2d2d}.empty{padding:42px;text-align:center;color:var(--muted)}.toastx{position:fixed;right:18px;top:78px;z-index:20000;padding:11px 14px;border-radius:10px;color:#fff;font-size:11px;font-weight:600;background:#c0392b;box-shadow:0 14px 35px #0003}.toastx.ok{background:#168449}.report-actions-row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}.report-export-actions{margin-left:auto}
+.action-column{min-width:104px;width:104px;text-align:center;position:sticky;right:0;z-index:3;background:var(--card-bg)!important;box-shadow:-8px 0 14px rgba(0,0,0,.04)}
+.table th.action-column{z-index:4;background:#f8f8f8!important}
+.action-buttons{display:flex;align-items:center;justify-content:center;gap:6px;flex-wrap:nowrap}
+.action-btn{width:34px;height:34px;min-width:34px;min-height:34px;padding:0!important;display:inline-flex;align-items:center;justify-content:center;border-radius:9px!important;line-height:1;text-decoration:none}
+.action-btn i{font-size:12px}
+.action-text{display:none}
+@media print{.sidebar,.app-main>nav,.app-main>header,.panel:first-of-type,.btn,footer{display:none!important}.app-main{margin:0!important}.content-wrap{padding:0!important}.panel{border:0!important}.table-responsive{overflow:visible!important}.table{min-width:0!important;font-size:8px!important}}
+@media(max-width:1199px){.stats,.mini-grid{grid-template-columns:repeat(2,1fr)}.grid{grid-template-columns:repeat(2,1fr)}.s2,.s3,.s12{grid-column:span 1}}
+@media(max-width:767px){.stats,.mini-grid,.grid{grid-template-columns:1fr}.panel-head{align-items:flex-start;flex-direction:column}.report-actions-row{align-items:stretch;flex-direction:column}.report-export-actions{width:100%;margin-left:0;display:grid!important;grid-template-columns:repeat(3,1fr)}.report-export-actions .btn,#reset{width:100%}.action-column{min-width:168px;width:168px}.action-buttons{display:grid;grid-template-columns:1fr 1fr;gap:6px}.action-btn{width:100%;min-width:0;height:34px;padding:0 9px!important;gap:5px}.action-text{display:inline;font-size:9px;font-weight:700}}
+</style></head><body><?php include 'includes/sidebar.php'; ?><main class="app-main"><?php include 'includes/nav.php'; ?><div class="content-wrap">
+<div class="stats">
+<div class="stat"><i class="fa-solid fa-cart-shopping"></i><div><div class="label">Total Purchases</div><div class="value" id="sCount">0</div></div></div>
+<div class="stat"><i class="fa-solid fa-indian-rupee-sign"></i><div><div class="label">Purchase Value</div><div class="value" id="sGrand">₹0.00</div></div></div>
+<div class="stat"><i class="fa-solid fa-circle-check"></i><div><div class="label">Amount Paid</div><div class="value" id="sPaid">₹0.00</div></div></div>
+<div class="stat"><i class="fa-solid fa-clock"></i><div><div class="label">Balance Payable</div><div class="value" id="sBalance">₹0.00</div></div></div>
 </div>
-</main>
-<?php include('includes/script.php'); ?>
-<script src="assets/js/script.js"></script>
-</body>
-</html>
+<div class="panel"><div class="panel-head"><div><div class="panel-title">Purchase Report Filters</div><div class="panel-sub">Filter by period, supplier and payment status.</div></div></div><div class="panel-body"><form id="filters" class="grid">
+<div class="s2"><label class="field-label">Date Range</label><select name="date_range" id="range" class="form-select"><option value="today">Today</option><option value="yesterday">Yesterday</option><option value="week">This Week</option><option value="month">This Month</option><option value="custom">Custom</option></select></div>
+<div class="s2 custom d-none"><label class="field-label">From</label><input type="date" name="from_date" class="form-control"></div><div class="s2 custom d-none"><label class="field-label">To</label><input type="date" name="to_date" class="form-control"></div>
+<div class="s3"><label class="field-label">Supplier</label><select name="supplier_id" id="supplier" class="form-select"><option value="0">All Suppliers</option></select></div>
+<div class="s2"><label class="field-label">Payment Status</label><select name="payment_status" class="form-select"><option value="all">All Status</option><option>Paid</option><option>Partial</option><option>Unpaid</option></select></div>
+<div class="s2 d-flex align-items-end"><button class="btn btn-theme w-100"><i class="fa-solid fa-filter me-1"></i>Apply</button></div>
+<div class="s12 report-actions-row">
+    <button type="button" id="reset" class="btn btn-lite"><i class="fa-solid fa-rotate-left me-1"></i>Reset</button>
+    <div class="d-flex gap-2 export-wrap report-export-actions">
+        <button type="button" class="btn btn-lite" id="printReport"><i class="fa-solid fa-print me-1"></i>Print</button>
+        <button type="button" class="btn btn-lite" id="xls"><i class="fa-solid fa-file-excel me-1"></i>Excel</button>
+        <button type="button" class="btn btn-theme" id="pdf"><i class="fa-solid fa-file-pdf me-1"></i>PDF</button>
+    </div>
+</div>
+</form></div></div>
+<div class="mini-grid"><div class="mini"><span>Subtotal</span><strong id="mSubtotal">₹0.00</strong></div><div class="mini"><span>Discount</span><strong id="mDiscount">₹0.00</strong></div><div class="mini"><span>Taxable</span><strong id="mTaxable">₹0.00</strong></div><div class="mini"><span>Total Tax</span><strong id="mTax">₹0.00</strong></div></div>
+<div class="panel"><div class="panel-head"><div><div class="panel-title">Purchase Details</div><div class="panel-sub" id="period">Loading...</div></div><button id="refresh" class="btn btn-lite"><i class="fa-solid fa-rotate"></i></button></div><div id="loading" class="empty">Loading purchase report...</div><div id="wrap" class="table-responsive d-none"><table class="table table-hover mb-0"><thead><tr><th>#</th><th>Purchase</th><th>Date</th><th>Supplier</th><th>Invoice</th><th>Items</th><th>Subtotal</th><th>Discount</th><th>Taxable</th><th>CGST</th><th>SGST</th><th>IGST</th><th>Grand Total</th><th>Paid</th><th>Balance</th><th>Status</th><th class="action-column">Action</th></tr></thead><tbody id="tbody"></tbody></table></div><div id="empty" class="empty d-none">No purchase records found.</div></div>
+<?php include 'includes/footer.php'; ?></div></main><?php include 'includes/script.php'; ?><script src="assets/js/script.js"></script><script>
+(()=>{'use strict';const apiUrl='report-purchase.php';const f=document.getElementById('filters'),r=document.getElementById('range'),sup=document.getElementById('supplier'),body=document.getElementById('tbody'),wrap=document.getElementById('wrap'),loading=document.getElementById('loading'),empty=document.getElementById('empty');const money=v=>'₹'+Number(v||0).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});const esc=v=>{const d=document.createElement('div');d.textContent=v??'';return d.innerHTML};const toast=(m,ok=false)=>{const e=document.createElement('div');e.className='toastx'+(ok?' ok':'');e.textContent=m;document.body.appendChild(e);setTimeout(()=>e.remove(),3200)};async function get(url){const x=await fetch(url,{credentials:'same-origin',headers:{Accept:'application/json','X-Requested-With':'XMLHttpRequest'}}),t=await x.text();let j;try{j=JSON.parse(t)}catch{throw Error(t||'Invalid server response')}if(!x.ok||!j.success)throw Error(j.message||'Request failed');return j}function toggle(){document.querySelectorAll('.custom').forEach(x=>x.classList.toggle('d-none',r.value!=='custom'))}async function boot(){try{const j=await get(apiUrl+'?action=bootstrap');sup.innerHTML='<option value="0">All Suppliers</option>'+j.suppliers.map(x=>`<option value="${x.id}">${esc(x.supplier_name)}${x.supplier_code?' ('+esc(x.supplier_code)+')':''}</option>`).join('')}catch(e){toast(e.message)}}async function load(){loading.classList.remove('d-none');wrap.classList.add('d-none');empty.classList.add('d-none');try{const p=new URLSearchParams(new FormData(f));p.set('action','list');const j=await get(apiUrl+'?'+p);const s=j.summary;document.getElementById('sCount').textContent=s.total_purchases;document.getElementById('sGrand').textContent=money(s.total_grand);document.getElementById('sPaid').textContent=money(s.total_paid);document.getElementById('sBalance').textContent=money(s.total_balance);document.getElementById('mSubtotal').textContent=money(s.total_subtotal);document.getElementById('mDiscount').textContent=money(s.total_discount);document.getElementById('mTaxable').textContent=money(s.total_taxable);document.getElementById('mTax').textContent=money(Number(s.total_cgst)+Number(s.total_sgst)+Number(s.total_igst));document.getElementById('period').textContent='Period: '+j.period.from_display+' to '+j.period.to_display;loading.classList.add('d-none');if(!j.rows.length){empty.classList.remove('d-none');return}wrap.classList.remove('d-none');body.innerHTML=j.rows.map((x,i)=>{const c=x.payment_status==='Paid'?'paid':x.payment_status==='Partial'?'partial':'unpaid';return `<tr><td>${i+1}</td><td><strong>${esc(x.purchase_no)}</strong></td><td>${esc(x.purchase_date_display)}</td><td>${esc(x.supplier_name)}</td><td>${esc(x.invoice_no||'—')}</td><td>${x.item_count}</td><td>${money(x.subtotal)}</td><td>${money(x.discount_amount)}</td><td>${money(x.taxable_amount)}</td><td>${money(x.cgst_amount)}</td><td>${money(x.sgst_amount)}</td><td>${money(x.igst_amount)}</td><td><strong>${money(x.grand_total)}</strong></td><td>${money(x.paid_amount)}</td><td>${money(x.balance_amount)}</td><td><span class="badge-status ${c}">${esc(x.payment_status)}</span></td><td class="action-column" data-label="Action"><div class="action-buttons"><a class="btn btn-lite action-btn" href="purchase-view.php?id=${x.id}" title="View Purchase" aria-label="View Purchase"><i class="fa-solid fa-eye"></i><span class="action-text">View</span></a><a class="btn btn-lite action-btn" href="supplier-payments.php?purchase_id=${x.id}" title="Make Payment" aria-label="Make Payment"><i class="fa-solid fa-indian-rupee-sign"></i><span class="action-text">Pay</span></a></div></td></tr>`}).join('')}catch(e){loading.classList.add('d-none');empty.classList.remove('d-none');empty.textContent=e.message;toast(e.message)}}function exp(fmt){const p=new URLSearchParams(new FormData(f));p.set('action','export');p.set('format',fmt);location.href=apiUrl+'?'+p}r.addEventListener('change',toggle);f.addEventListener('submit',e=>{e.preventDefault();load()});document.getElementById('reset').onclick=()=>{f.reset();r.value='today';toggle();load()};document.getElementById('refresh').onclick=load;document.getElementById('printReport').onclick=()=>window.print();document.getElementById('xls').onclick=()=>exp('excel');document.getElementById('pdf').onclick=()=>exp('pdf');toggle();boot();load()})();
+</script></body></html>
