@@ -601,14 +601,6 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
 <main class="app-main">
     <?php include('includes/nav.php'); ?>
     <div class="content-wrap">
-        <div class="page-heading">
-            <div>
-                <h1 class="page-title">Stock Overview</h1>
-                <div class="page-subtitle"><?php echo h($businessName); ?> · Inventory stock position and movement summary</div>
-            </div>
-            <button type="button" class="btn btn-soft no-print" onclick="window.print()"><i class="fa-solid fa-print me-2"></i>Print</button>
-        </div>
-
         <div class="stat-grid">
             <div class="stat-card"><div class="stat-icon"><i class="fa-solid fa-boxes-stacked"></i></div><div><div class="stat-label">Total Products</div><div class="stat-value"><?php echo (int)$totalProducts; ?></div></div></div>
             <div class="stat-card"><div class="stat-icon"><i class="fa-solid fa-circle-check"></i></div><div><div class="stat-label">In Stock</div><div class="stat-value"><?php echo (int)$inStockCount; ?></div></div></div>

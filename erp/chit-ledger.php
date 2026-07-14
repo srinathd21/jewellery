@@ -238,7 +238,7 @@ body{background:var(--page-bg);color:var(--text-color);font-family:<?php echo js
 .btn-light-custom{border:1px solid var(--border-color);background:var(--card-bg);color:var(--text-color);border-radius:9px;font-size:10px;font-weight:700;min-height:36px;padding:8px 12px}
 .compact-table{margin:0;font-size:10px}.compact-table th{font-size:9px;text-transform:uppercase;color:var(--muted-color);background:color-mix(in srgb,var(--muted-color) 6%,transparent);padding:10px 11px;white-space:nowrap;border-color:var(--border-color)}.compact-table td{padding:10px 11px;vertical-align:middle;background:var(--card-bg)!important;color:var(--text-color);border-color:var(--border-color)}
 .total-row td{font-weight:800;background:color-mix(in srgb,var(--primary) 8%,var(--card-bg))!important}
-.empty-state{padding:42px 20px;text-align:center;color:var(--muted-color)}
+.empty-state{padding:42px 20px!important;text-align:center!important;color:var(--muted-color)!important}.ledger-message-row td{border-bottom:0!important}
 .theme-toast{position:fixed;top:78px;right:18px;z-index:20000;display:flex;align-items:center;gap:9px;min-width:260px;max-width:420px;padding:11px 14px;border-radius:10px;color:#fff;font-size:11px;font-weight:600;box-shadow:0 14px 35px rgba(0,0,0,.22);opacity:0;transform:translateY(-10px);transition:.22s}.theme-toast.show{opacity:1;transform:translateY(0)}.theme-toast-error{background:#c0392b}
 body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark"] body{--page-bg:#0f151b;--card-bg:#182129;--text-color:#f3f6f8;--muted-color:#9aa7b3;--border-color:#2c3944}
 @media print{.no-print,.sidebar,.app-nav{display:none!important}.app-main{margin:0!important}.content-wrap{padding:0!important}.panel{border:0!important}}
@@ -348,7 +348,7 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
                 <div>Loading ledger...</div>
             </div>
 
-            <div id="tableWrap" class="table-responsive d-none">
+            <div id="tableWrap" class="table-responsive">
                 <table class="table compact-table responsive-table">
                     <thead>
                     <tr>
@@ -365,14 +365,18 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
                         <th>Method</th>
                     </tr>
                     </thead>
-                    <tbody id="ledgerBody"></tbody>
+                    <tbody id="ledgerBody">
+                    <tr class="ledger-message-row">
+                        <td colspan="11" class="empty-state">
+                            Select a member and click View Ledger.
+                        </td>
+                    </tr>
+                    </tbody>
                     <tfoot id="ledgerFoot"></tfoot>
                 </table>
             </div>
 
-            <div id="emptyState" class="empty-state">
-                Select a member and click View Ledger.
-            </div>
+            <div id="emptyState" class="d-none"></div>
         </div>
     <?php endif; ?>
 
@@ -432,6 +436,16 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
 
     function currentParams(){
         return new URLSearchParams(new FormData(form));
+    }
+
+    function showTableMessage(message){
+        loading.classList.add('d-none');
+        wrap.classList.remove('d-none');
+        empty.classList.add('d-none');
+        foot.innerHTML='';
+        body.innerHTML=`<tr class="ledger-message-row">
+            <td colspan="11" class="empty-state">${escapeHtml(message)}</td>
+        </tr>`;
     }
 
     function toggleRange(){
@@ -494,10 +508,7 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
         loading.classList.add('d-none');
 
         if(!rows.length){
-            wrap.classList.add('d-none');
-            empty.classList.remove('d-none');
-            empty.textContent='No collections found for the selected filters.';
-            foot.innerHTML='';
+            showTableMessage('No collections found for the selected filters.');
             subtitle.textContent=result.member
                 ? result.member.customer_name+' · '+result.member.ticket_no
                 : 'Select a member to view collections.';
@@ -545,10 +556,8 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
 
     async function loadLedger(){
         if(!memberSelect.value){
-            wrap.classList.add('d-none');
-            loading.classList.add('d-none');
-            empty.classList.remove('d-none');
-            empty.textContent='Select a member and click View Ledger.';
+            showTableMessage('Select a member and click View Ledger.');
+            subtitle.textContent='Select a member to view collections.';
             return;
         }
 
@@ -566,10 +575,7 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
 
             render(result);
         }catch(error){
-            loading.classList.add('d-none');
-            wrap.classList.add('d-none');
-            empty.classList.remove('d-none');
-            empty.textContent=error.message;
+            showTableMessage(error.message);
             toast(error.message);
         }
     }
@@ -601,12 +607,8 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
     document.getElementById('clearFilters')?.addEventListener('click',()=>{
         form.reset();
         toggleRange();
-        wrap.classList.add('d-none');
-        loading.classList.add('d-none');
-        empty.classList.remove('d-none');
-        empty.textContent='Select a member and click View Ledger.';
+        showTableMessage('Select a member and click View Ledger.');
         subtitle.textContent='Select a member to view collections.';
-        foot.innerHTML='';
     });
 
     toggleRange();

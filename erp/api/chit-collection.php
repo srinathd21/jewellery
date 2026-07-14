@@ -47,6 +47,14 @@ function tableExists(mysqli $conn, string $table): bool
     return $result && $result->num_rows > 0;
 }
 
+function hasColumn(mysqli $conn, string $table, string $column): bool
+{
+    $table = $conn->real_escape_string($table);
+    $column = $conn->real_escape_string($column);
+    $result = $conn->query("SHOW COLUMNS FROM `{$table}` LIKE '{$column}'");
+    return $result && $result->num_rows > 0;
+}
+
 function hasPermission(mysqli $conn, string $action): bool
 {
     if (($_SESSION['user_type'] ?? '') === 'Platform Admin') {
@@ -201,33 +209,146 @@ if ($action === 'bootstrap') {
     $stmt->close();
 
     $paymentMethods = [];
-    $stmt = $conn->prepare(
-        "SELECT id, method_code, method_name, method_type
-         FROM payment_methods
-         WHERE business_id = ?
-           AND is_active = 1
-         ORDER BY
-            CASE WHEN method_type = 'Cash' THEN 0 ELSE 1 END,
-            method_name"
+
+    /*
+     * Payment Methods compatibility:
+     *
+     * Jewellery schema:
+     *   id, method_name, is_active
+     *
+     * New Payment Methods schema:
+     *   payment_method_id, payment_method_name, status
+     */
+    $paymentIdColumn = hasColumn($conn, 'payment_methods', 'payment_method_id')
+        ? 'payment_method_id'
+        : (hasColumn($conn, 'payment_methods', 'id') ? 'id' : '');
+
+    $paymentNameColumn = hasColumn($conn, 'payment_methods', 'payment_method_name')
+        ? 'payment_method_name'
+        : (hasColumn($conn, 'payment_methods', 'method_name') ? 'method_name' : '');
+
+    $paymentStatusColumn = hasColumn($conn, 'payment_methods', 'status')
+        ? 'status'
+        : (hasColumn($conn, 'payment_methods', 'is_active') ? 'is_active' : '');
+
+    $hasPaymentBusinessId = hasColumn(
+        $conn,
+        'payment_methods',
+        'business_id'
     );
 
-    if (!$stmt) {
-        respond(false, 'Unable to prepare payment-method query: ' . $conn->error, [], 500);
+    if ($paymentIdColumn === '' || $paymentNameColumn === '') {
+        respond(
+            false,
+            'The payment_methods table does not contain a supported ID or name column.',
+            [],
+            500
+        );
     }
 
-    $stmt->bind_param('i', $businessId);
-    $stmt->execute();
-    $result = $stmt->get_result();
+    $basePaymentSql = "SELECT
+            `{$paymentIdColumn}` AS id,
+            `{$paymentIdColumn}` AS payment_method_id,
+            `{$paymentNameColumn}` AS method_name,
+            `{$paymentNameColumn}` AS payment_method_name
+        FROM payment_methods
+        WHERE 1 = 1";
 
-    while ($result && $row = $result->fetch_assoc()) {
-        $row['id'] = (int)$row['id'];
-        $paymentMethods[] = $row;
+    if ($paymentStatusColumn !== '') {
+        $basePaymentSql .= " AND COALESCE(`{$paymentStatusColumn}`, 1) = 1";
     }
-    $stmt->close();
+
+    /*
+     * First preference: methods belonging to the logged-in business.
+     * Compatibility fallback: when that business has no methods, use all
+     * active methods already available in the shared payment_methods table.
+     */
+    if ($hasPaymentBusinessId) {
+        $businessPaymentSql =
+            $basePaymentSql .
+            " AND business_id = ? ORDER BY `{$paymentNameColumn}` ASC";
+
+        $stmt = $conn->prepare($businessPaymentSql);
+
+        if (!$stmt) {
+            respond(
+                false,
+                'Unable to prepare payment-method query: ' . $conn->error,
+                [],
+                500
+            );
+        }
+
+        $stmt->bind_param('i', $businessId);
+
+        if (!$stmt->execute()) {
+            $error = $stmt->error;
+            $stmt->close();
+
+            respond(
+                false,
+                'Unable to load payment methods: ' . $error,
+                [],
+                500
+            );
+        }
+
+        $result = $stmt->get_result();
+
+        while ($result && $row = $result->fetch_assoc()) {
+            $row['id'] = (int)$row['id'];
+            $row['payment_method_id'] = (int)$row['payment_method_id'];
+            $paymentMethods[] = $row;
+        }
+
+        $stmt->close();
+    }
+
+    if (!$paymentMethods) {
+        $allPaymentSql =
+            $basePaymentSql .
+            " ORDER BY `{$paymentNameColumn}` ASC";
+
+        $stmt = $conn->prepare($allPaymentSql);
+
+        if (!$stmt) {
+            respond(
+                false,
+                'Unable to prepare fallback payment-method query: ' .
+                $conn->error,
+                [],
+                500
+            );
+        }
+
+        if (!$stmt->execute()) {
+            $error = $stmt->error;
+            $stmt->close();
+
+            respond(
+                false,
+                'Unable to load fallback payment methods: ' . $error,
+                [],
+                500
+            );
+        }
+
+        $result = $stmt->get_result();
+
+        while ($result && $row = $result->fetch_assoc()) {
+            $row['id'] = (int)$row['id'];
+            $row['payment_method_id'] =
+                (int)$row['payment_method_id'];
+            $paymentMethods[] = $row;
+        }
+
+        $stmt->close();
+    }
 
     respond(true, 'Collection data loaded successfully.', [
         'members' => $members,
         'payment_methods' => $paymentMethods,
+        'methods' => $paymentMethods,
     ]);
 }
 
@@ -439,21 +560,56 @@ if (($paidAmount + $discountAmount) > ($pendingAmount + 0.009)) {
     respond(false, 'Paid amount plus discount cannot exceed the pending amount.', [], 422);
 }
 
-$stmt = $conn->prepare(
-    "SELECT id
+$paymentIdColumn = hasColumn($conn, 'payment_methods', 'payment_method_id')
+    ? 'payment_method_id'
+    : (hasColumn($conn, 'payment_methods', 'id') ? 'id' : '');
+
+$paymentStatusColumn = hasColumn($conn, 'payment_methods', 'status')
+    ? 'status'
+    : (hasColumn($conn, 'payment_methods', 'is_active') ? 'is_active' : '');
+
+if ($paymentIdColumn === '') {
+    respond(false, 'Payment method table primary key is not supported.', [], 500);
+}
+
+/*
+ * Use the same compatibility rule as the dropdown:
+ * validate the selected active method by its primary key.
+ *
+ * The dropdown first tries the current business and then falls back to
+ * active methods already available in the shared payment_methods table.
+ * Therefore save validation must not reject a method only because its
+ * business_id differs from the current session business.
+ */
+$paymentValidationSql = "SELECT `{$paymentIdColumn}` AS id
      FROM payment_methods
-     WHERE id = ?
-       AND business_id = ?
-       AND is_active = 1
-     LIMIT 1"
-);
+     WHERE `{$paymentIdColumn}` = ?";
+
+if ($paymentStatusColumn !== '') {
+    $paymentValidationSql .= " AND COALESCE(`{$paymentStatusColumn}`,1) = 1";
+}
+
+$paymentValidationSql .= ' LIMIT 1';
+$stmt = $conn->prepare($paymentValidationSql);
 
 if (!$stmt) {
     respond(false, 'Unable to validate payment method: ' . $conn->error, [], 500);
 }
 
-$stmt->bind_param('ii', $paymentMethodId, $businessId);
-$stmt->execute();
+$stmt->bind_param('i', $paymentMethodId);
+
+if (!$stmt->execute()) {
+    $error = $stmt->error;
+    $stmt->close();
+
+    respond(
+        false,
+        'Unable to validate the selected payment method: ' . $error,
+        [],
+        500
+    );
+}
+
 $validPaymentMethod = $stmt->get_result()->fetch_assoc();
 $stmt->close();
 

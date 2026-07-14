@@ -6,10 +6,22 @@ if (session_status() === PHP_SESSION_NONE) {
 date_default_timezone_set((string)($_SESSION['timezone'] ?? 'Asia/Kolkata'));
 header('Content-Type: application/json; charset=utf-8');
 
-function respond(bool $success, string $message, array $extra = [], int $status = 200): void
-{
+function respond(
+    bool $success,
+    string $message,
+    array $extra = [],
+    int $status = 200
+): void {
     http_response_code($status);
-    echo json_encode(array_merge(['success' => $success, 'message' => $message], $extra));
+
+    echo json_encode(
+        array_merge(
+            ['success' => $success, 'message' => $message],
+            $extra
+        ),
+        JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+    );
+
     exit;
 }
 
@@ -32,165 +44,44 @@ foreach ($configCandidates as $configFile) {
     }
 }
 
-if (!$configLoaded) {
-    respond(false, 'Database config file not found. Checked: ' . implode(', ', $configCandidates), [], 500);
-}
-
-if (!isset($conn) || !($conn instanceof mysqli)) {
-    respond(false, 'Database connection is not available.', [], 500);
+if (!$configLoaded || !isset($conn) || !($conn instanceof mysqli)) {
+    respond(false, 'Database configuration is not available.', [], 500);
 }
 
 mysqli_report(MYSQLI_REPORT_OFF);
 $conn->set_charset('utf8mb4');
 
-function tableExists(mysqli $conn, string $table): bool
-{
-    $table = $conn->real_escape_string($table);
-    $result = $conn->query("SHOW TABLES LIKE '{$table}'");
-    return $result && $result->num_rows > 0;
-}
-
-function hasColumn(mysqli $conn, string $table, string $column): bool
-{
-    $table = $conn->real_escape_string($table);
-    $column = $conn->real_escape_string($column);
-    $result = $conn->query("SHOW COLUMNS FROM `{$table}` LIKE '{$column}'");
-    return $result && $result->num_rows > 0;
-}
-
 function hasPermission(mysqli $conn, string $action): bool
 {
-    $map = [
+    if (($_SESSION['user_type'] ?? '') === 'Platform Admin') {
+        return true;
+    }
+
+    $fieldMap = [
         'open' => 'can_open',
         'view' => 'can_view',
         'update' => 'can_update',
         'approve' => 'can_approve',
     ];
 
-    $field = $map[$action] ?? '';
-
+    $field = $fieldMap[$action] ?? '';
     if ($field === '') {
         return false;
     }
 
-    $adminRoles = ['platform admin','super admin','admin','manager','billing','super_admin'];
+    $permissions = $_SESSION['permissions'] ?? [];
 
-    foreach ([
-        strtolower(trim((string)($_SESSION['user_type'] ?? ''))),
-        strtolower(trim((string)($_SESSION['role_name'] ?? ''))),
-        strtolower(trim((string)($_SESSION['role_code'] ?? ''))),
-    ] as $roleValue) {
-        if (in_array($roleValue, $adminRoles, true)) {
-            return true;
+    foreach (['perm.chit-close', 'perm.chit.groups', 'perm.chit'] as $permissionCode) {
+        if (isset($permissions[$permissionCode][$field])) {
+            return (int)$permissions[$permissionCode][$field] === 1;
         }
     }
 
-    $codes = ['perm.chit-close', 'perm.chit'];
-    $sessionPermissions = $_SESSION['permissions'] ?? [];
+    $roleName = strtolower(trim((string)($_SESSION['role_name'] ?? '')));
+    $roleCode = strtolower(trim((string)($_SESSION['role_code'] ?? '')));
 
-    foreach ($codes as $code) {
-        if (isset($sessionPermissions[$code][$field])) {
-            return (int)$sessionPermissions[$code][$field] === 1;
-        }
-    }
-
-    $businessId = (int)($_SESSION['business_id'] ?? 0);
-    $roleId = (int)($_SESSION['role_id'] ?? 0);
-
-    if (
-        $businessId <= 0 ||
-        $roleId <= 0 ||
-        !tableExists($conn, 'permissions') ||
-        !tableExists($conn, 'role_permissions')
-    ) {
-        return false;
-    }
-
-    $placeholders = implode(',', array_fill(0, count($codes), '?'));
-
-    $sql = "SELECT MAX(COALESCE(rp.`{$field}`,0)) AS allowed
-            FROM role_permissions rp
-            INNER JOIN permissions p
-                ON p.id = rp.permission_id
-            WHERE rp.business_id = ?
-              AND rp.role_id = ?
-              AND p.is_active = 1
-              AND p.permission_code IN ({$placeholders})";
-
-    $stmt = $conn->prepare($sql);
-
-    if (!$stmt) {
-        return false;
-    }
-
-    $types = 'ii' . str_repeat('s', count($codes));
-    $params = array_merge([$businessId, $roleId], $codes);
-
-    $stmt->bind_param($types, ...$params);
-    $stmt->execute();
-    $row = $stmt->get_result()->fetch_assoc();
-    $stmt->close();
-
-    return (int)($row['allowed'] ?? 0) === 1;
-}
-
-function auditClosure(
-    mysqli $conn,
-    int $businessId,
-    int $branchId,
-    int $userId,
-    int $groupId,
-    string $groupNo,
-    string $remarks
-): void {
-    if (!tableExists($conn, 'audit_logs') || !hasColumn($conn, 'audit_logs', 'module_code')) {
-        return;
-    }
-
-    $description = 'Closed chit group ' . $groupNo;
-    $newValues = json_encode([
-        'status' => 'Closed',
-        'remarks' => $remarks,
-        'members_status' => 'Completed',
-        'installments_status' => 'Closed',
-    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-
-    $ipAddress = (string)($_SERVER['REMOTE_ADDR'] ?? '');
-    $userAgent = (string)($_SERVER['HTTP_USER_AGENT'] ?? '');
-
-    $stmt = $conn->prepare(
-        "INSERT INTO audit_logs (
-            business_id,
-            branch_id,
-            user_id,
-            module_code,
-            action_type,
-            reference_table,
-            reference_id,
-            description,
-            new_values_json,
-            ip_address,
-            user_agent
-        ) VALUES (
-            ?, ?, ?, 'chit.close', 'Update', 'chit_groups', ?, ?, ?, ?, ?
-        )"
-    );
-
-    if ($stmt) {
-        $stmt->bind_param(
-            'iiiissss',
-            $businessId,
-            $branchId,
-            $userId,
-            $groupId,
-            $description,
-            $newValues,
-            $ipAddress,
-            $userAgent
-        );
-        $stmt->execute();
-        $stmt->close();
-    }
+    return in_array($roleName, ['super admin', 'admin', 'manager', 'billing'], true)
+        || in_array($roleCode, ['super_admin', 'admin', 'manager', 'billing'], true);
 }
 
 if (empty($_SESSION['user_id'])) {
@@ -199,63 +90,58 @@ if (empty($_SESSION['user_id'])) {
 
 $businessId = (int)($_SESSION['business_id'] ?? 0);
 $branchId = (int)($_SESSION['branch_id'] ?? $_SESSION['default_branch_id'] ?? 0);
-$userId = (int)($_SESSION['user_id'] ?? 0);
+$userId = (int)$_SESSION['user_id'];
 
 if ($businessId <= 0 || $branchId <= 0) {
     respond(false, 'A valid business and branch must be selected.', [], 403);
 }
 
-foreach (['chit_groups', 'chit_members', 'chit_installments'] as $requiredTable) {
-    if (!tableExists($conn, $requiredTable)) {
-        respond(false, "Required table `{$requiredTable}` was not found.", [], 500);
-    }
+if (!hasPermission($conn, 'open')) {
+    respond(false, 'You do not have permission to open Close Chit.', [], 403);
 }
 
-$action = $_SERVER['REQUEST_METHOD'] === 'POST'
-    ? trim((string)($_POST['action'] ?? ''))
-    : trim((string)($_GET['action'] ?? 'bootstrap'));
+$action = strtolower(trim((string)($_REQUEST['action'] ?? 'groups')));
 
-if ($action === 'bootstrap') {
+if ($action === 'groups') {
     if (!hasPermission($conn, 'view') && !hasPermission($conn, 'open')) {
         respond(false, 'You do not have permission to view active chit groups.', [], 403);
     }
 
     $stmt = $conn->prepare(
         "SELECT
-            g.id,
-            g.group_no,
-            g.group_name,
-            g.total_members,
-            COUNT(DISTINCT CASE WHEN m.status = 'Active' THEN m.id END) AS active_members,
-            COUNT(DISTINCT CASE WHEN ci.status = 'Open' THEN ci.id END) AS open_installments
-         FROM chit_groups g
-         LEFT JOIN chit_members m
-            ON m.chit_group_id = g.id
-           AND m.business_id = g.business_id
-         LEFT JOIN chit_installments ci
-            ON ci.chit_group_id = g.id
-           AND ci.business_id = g.business_id
-         WHERE g.business_id = ?
-           AND g.branch_id = ?
-           AND g.status = 'Active'
-         GROUP BY g.id, g.group_no, g.group_name, g.total_members
-         ORDER BY g.group_name"
+            id,
+            group_no,
+            group_name,
+            chit_type,
+            total_members,
+            total_months,
+            status
+         FROM chit_groups
+         WHERE business_id = ?
+           AND branch_id = ?
+           AND status = 'Active'
+         ORDER BY group_name, group_no"
     );
 
     if (!$stmt) {
-        respond(false, 'Unable to prepare active chit group query: ' . $conn->error, [], 500);
+        respond(false, 'Unable to prepare active-group query: ' . $conn->error, [], 500);
     }
 
     $stmt->bind_param('ii', $businessId, $branchId);
-    $stmt->execute();
+
+    if (!$stmt->execute()) {
+        $error = $stmt->error;
+        $stmt->close();
+        respond(false, 'Unable to load active chit groups: ' . $error, [], 500);
+    }
+
     $result = $stmt->get_result();
     $groups = [];
 
     while ($result && $row = $result->fetch_assoc()) {
         $row['id'] = (int)$row['id'];
         $row['total_members'] = (int)$row['total_members'];
-        $row['active_members'] = (int)$row['active_members'];
-        $row['open_installments'] = (int)$row['open_installments'];
+        $row['total_months'] = (int)$row['total_months'];
         $groups[] = $row;
     }
 
@@ -266,7 +152,7 @@ if ($action === 'bootstrap') {
     ]);
 }
 
-if ($action !== 'close') {
+if ($action !== 'close' || $_SERVER['REQUEST_METHOD'] !== 'POST') {
     respond(false, 'Invalid action.', [], 400);
 }
 
@@ -274,33 +160,40 @@ if (!hasPermission($conn, 'update') && !hasPermission($conn, 'approve')) {
     respond(false, 'You do not have permission to close chit groups.', [], 403);
 }
 
-if (!hash_equals(
-    (string)($_SESSION['chit_close_csrf'] ?? ''),
-    (string)($_POST['csrf_token'] ?? '')
-)) {
-    respond(false, 'Invalid or expired request token. Refresh the page and try again.', [], 419);
+$csrfToken = (string)($_POST['csrf_token'] ?? '');
+$sessionToken = (string)($_SESSION['chit_close_csrf'] ?? '');
+
+if (
+    $csrfToken === '' ||
+    $sessionToken === '' ||
+    !hash_equals($sessionToken, $csrfToken)
+) {
+    respond(false, 'Invalid security token. Refresh the page and try again.', [], 419);
 }
 
-$groupId = (int)($_POST['chit_group_id'] ?? 0);
+$groupId = (int)($_POST['group_id'] ?? 0);
 $remarks = trim((string)($_POST['remarks'] ?? ''));
 
 if ($groupId <= 0) {
-    respond(false, 'Please select an active chit group.');
+    respond(false, 'Please select a valid active chit group.', [], 422);
 }
 
-if (mb_strlen($remarks) > 2000) {
-    respond(false, 'Closure remarks must not exceed 2,000 characters.');
+if (mb_strlen($remarks) > 1000) {
+    respond(false, 'Close remarks cannot exceed 1000 characters.', [], 422);
 }
 
 $stmt = $conn->prepare(
-    "SELECT id, group_no, group_name, notes
+    "SELECT id, group_no, group_name, status
      FROM chit_groups
      WHERE id = ?
        AND business_id = ?
        AND branch_id = ?
-       AND status = 'Active'
      LIMIT 1"
 );
+
+if (!$stmt) {
+    respond(false, 'Unable to validate the selected chit group: ' . $conn->error, [], 500);
+}
 
 $stmt->bind_param('iii', $groupId, $businessId, $branchId);
 $stmt->execute();
@@ -308,27 +201,36 @@ $group = $stmt->get_result()->fetch_assoc();
 $stmt->close();
 
 if (!$group) {
-    respond(false, 'Selected chit group was not found or is already closed.', [], 404);
+    respond(false, 'The selected chit group was not found in this branch.', [], 404);
 }
 
-$existingNotes = trim((string)($group['notes'] ?? ''));
-$closureLine = 'Closed on ' . date('d-m-Y H:i') . ' by user #' . $userId;
-
-if ($remarks !== '') {
-    $closureLine .= ' - ' . $remarks;
+if (($group['status'] ?? '') !== 'Active') {
+    respond(false, 'The selected chit group is not active.', [], 422);
 }
 
-$updatedNotes = $existingNotes !== ''
-    ? $existingNotes . PHP_EOL . $closureLine
-    : $closureLine;
+$closeNote = trim(
+    'Closed on ' .
+    date('d-m-Y H:i:s') .
+    ' by user #' .
+    $userId .
+    ($remarks !== '' ? '. Remarks: ' . $remarks : '')
+);
 
 $conn->begin_transaction();
 
 try {
     $stmt = $conn->prepare(
         "UPDATE chit_groups
-         SET status = 'Closed',
-             notes = ?
+         SET
+            status = 'Closed',
+            notes = CONCAT(
+                COALESCE(notes, ''),
+                CASE
+                    WHEN COALESCE(notes, '') = '' THEN ''
+                    ELSE '\n'
+                END,
+                ?
+            )
          WHERE id = ?
            AND business_id = ?
            AND branch_id = ?
@@ -336,79 +238,69 @@ try {
     );
 
     if (!$stmt) {
-        throw new RuntimeException('Unable to prepare chit group closure: ' . $conn->error);
+        throw new RuntimeException(
+            'Unable to prepare chit-group update: ' . $conn->error
+        );
     }
 
-    $stmt->bind_param('siii', $updatedNotes, $groupId, $businessId, $branchId);
+    $stmt->bind_param(
+        'siii',
+        $closeNote,
+        $groupId,
+        $businessId,
+        $branchId
+    );
 
     if (!$stmt->execute()) {
-        throw new RuntimeException('Failed to close chit group: ' . $stmt->error);
+        throw new RuntimeException(
+            'Unable to close the chit group: ' . $stmt->error
+        );
     }
 
     if ($stmt->affected_rows !== 1) {
-        throw new RuntimeException('The chit group was not closed because its status changed.');
+        throw new RuntimeException(
+            'The chit group could not be closed because its status changed.'
+        );
     }
 
     $stmt->close();
 
+    /*
+     * Current schema uses chit_members.chit_group_id.
+     * The old page used group_id, which does not match the current module.
+     */
     $stmt = $conn->prepare(
         "UPDATE chit_members
-         SET status = 'Completed'
-         WHERE chit_group_id = ?
-           AND business_id = ?
-           AND status = 'Active'"
-    );
-
-    if (!$stmt) {
-        throw new RuntimeException('Unable to prepare member completion update: ' . $conn->error);
-    }
-
-    $stmt->bind_param('ii', $groupId, $businessId);
-
-    if (!$stmt->execute()) {
-        throw new RuntimeException('Failed to complete chit members: ' . $stmt->error);
-    }
-
-    $completedMembers = $stmt->affected_rows;
-    $stmt->close();
-
-    $stmt = $conn->prepare(
-        "UPDATE chit_installments
          SET status = 'Closed'
          WHERE chit_group_id = ?
            AND business_id = ?
-           AND status = 'Open'"
+           AND status <> 'Closed'"
     );
 
     if (!$stmt) {
-        throw new RuntimeException('Unable to prepare installment closure update: ' . $conn->error);
+        throw new RuntimeException(
+            'Unable to prepare member update: ' . $conn->error
+        );
     }
 
     $stmt->bind_param('ii', $groupId, $businessId);
 
     if (!$stmt->execute()) {
-        throw new RuntimeException('Failed to close open installments: ' . $stmt->error);
+        throw new RuntimeException(
+            'Unable to close chit members: ' . $stmt->error
+        );
     }
 
-    $closedInstallments = $stmt->affected_rows;
+    $closedMembers = $stmt->affected_rows;
     $stmt->close();
-
-    auditClosure(
-        $conn,
-        $businessId,
-        $branchId,
-        $userId,
-        $groupId,
-        (string)$group['group_no'],
-        $remarks
-    );
 
     $conn->commit();
 
     respond(true, 'Chit closed successfully.', [
         'group_id' => $groupId,
-        'completed_members' => $completedMembers,
-        'closed_installments' => $closedInstallments,
+        'group_no' => $group['group_no'],
+        'group_name' => $group['group_name'],
+        'closed_members' => $closedMembers,
     ]);
 } catch (Throwable $exception) {
     $conn->rollback();
