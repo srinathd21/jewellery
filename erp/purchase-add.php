@@ -1114,6 +1114,70 @@ $currencySymbol = (string)($_SESSION['currency_symbol'] ?? '₹');
             font-size: 11px;
         }
 
+        .toast-stack {
+            position: fixed;
+            top: 84px;
+            right: 18px;
+            z-index: 25000;
+            display: grid;
+            gap: 10px;
+            width: min(390px, calc(100vw - 28px));
+            pointer-events: none;
+        }
+
+        .app-toast {
+            display: grid;
+            grid-template-columns: 22px minmax(0, 1fr) 24px;
+            align-items: center;
+            gap: 10px;
+            padding: 12px 13px;
+            border-radius: 11px;
+            color: #fff;
+            box-shadow: 0 16px 36px rgba(0,0,0,.24);
+            opacity: 0;
+            transform: translateX(18px);
+            transition: opacity .22s ease, transform .22s ease;
+            pointer-events: auto;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        .app-toast.show {
+            opacity: 1;
+            transform: translateX(0);
+        }
+
+        .app-toast.success { background: #168449; }
+        .app-toast.error { background: #c0392b; }
+        .app-toast.warning { background: #a96b00; }
+        .app-toast.info { background: #2367a8; }
+
+        .app-toast-message {
+            line-height: 1.4;
+            overflow-wrap: anywhere;
+        }
+
+        .app-toast-close {
+            width: 24px;
+            height: 24px;
+            border: 0;
+            border-radius: 7px;
+            background: rgba(255,255,255,.15);
+            color: #fff;
+            display: grid;
+            place-items: center;
+            cursor: pointer;
+        }
+
+        @media (max-width: 767.98px) {
+            .toast-stack {
+                top: 72px;
+                left: 12px;
+                right: 12px;
+                width: auto;
+            }
+        }
+
         body.dark-mode,
         body[data-theme="dark"],
         html.dark-mode body,
@@ -1159,17 +1223,14 @@ $currencySymbol = (string)($_SESSION['currency_symbol'] ?? '₹');
     <?php include('includes/nav.php'); ?>
 
     <div class="content-wrap">
-        <?php if ($success !== ''): ?>
-            <div class="alert alert-success modern-alert">
-                <i class="fa-solid fa-circle-check me-2"></i><?php echo h($success); ?>
-            </div>
-        <?php endif; ?>
+        <div class="toast-stack" id="toastStack" aria-live="polite" aria-atomic="true"></div>
 
-        <?php if ($error !== ''): ?>
-            <div class="alert alert-danger modern-alert">
-                <i class="fa-solid fa-circle-exclamation me-2"></i><?php echo h($error); ?>
-            </div>
-        <?php endif; ?>
+        <div
+            id="serverToastData"
+            data-success="<?php echo h($success); ?>"
+            data-error="<?php echo h($error); ?>"
+            hidden
+        ></div>
 
         <form method="post" id="purchaseForm" autocomplete="off">
             <div class="purchase-layout">
@@ -1520,6 +1581,53 @@ $currencySymbol = (string)($_SESSION['currency_symbol'] ?? '₹');
 
 <script>
 (function () {
+    const toastStack = document.getElementById('toastStack');
+
+    function showToast(type, message, duration = 3600) {
+        const cleanMessage = String(message || '').trim();
+        if (!cleanMessage || !toastStack) return;
+
+        const icons = {
+            success: 'fa-circle-check',
+            error: 'fa-circle-exclamation',
+            warning: 'fa-triangle-exclamation',
+            info: 'fa-circle-info'
+        };
+
+        const toast = document.createElement('div');
+        toast.className = 'app-toast ' + (type || 'info');
+        toast.innerHTML = `
+            <i class="fa-solid ${icons[type] || icons.info}"></i>
+            <div class="app-toast-message"></div>
+            <button type="button" class="app-toast-close" aria-label="Close notification">
+                <i class="fa-solid fa-xmark"></i>
+            </button>
+        `;
+
+        toast.querySelector('.app-toast-message').textContent = cleanMessage;
+        toastStack.appendChild(toast);
+
+        const removeToast = () => {
+            toast.classList.remove('show');
+            setTimeout(() => toast.remove(), 220);
+        };
+
+        toast.querySelector('.app-toast-close').addEventListener('click', removeToast);
+        requestAnimationFrame(() => toast.classList.add('show'));
+        setTimeout(removeToast, duration);
+    }
+
+    const serverToastData = document.getElementById('serverToastData');
+    if (serverToastData) {
+        const successMessage = serverToastData.dataset.success || '';
+        const errorMessage = serverToastData.dataset.error || '';
+
+        if (successMessage) showToast('success', successMessage);
+        if (errorMessage) showToast('error', errorMessage, 4800);
+    }
+
+    window.showPurchaseToast = showToast;
+
     const products = <?php
         $productJs = [];
         foreach ($products as $p) {
