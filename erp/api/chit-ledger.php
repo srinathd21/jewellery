@@ -303,7 +303,8 @@ $sql = "SELECT
             i.installment_no,
             pm.method_name,
             m.ticket_no,
-            c.customer_name
+            c.customer_name,
+            COALESCE(cc.collection_receiver_name, '') AS collection_receiver_name
         FROM chit_collections cc
         INNER JOIN chit_members m
             ON m.id = cc.chit_member_id
@@ -441,6 +442,7 @@ if ($action === 'excel') {
         'Penalty',
         'Net Amount',
         'Payment Method',
+        'Collection Receiver',
     ]);
 
     foreach ($rows as $index => $row) {
@@ -456,6 +458,7 @@ if ($action === 'excel') {
             $canViewValue ? $row['penalty_amount'] : '',
             $canViewValue ? $row['net_amount'] : '',
             $row['method_name'],
+            $row['collection_receiver_name'] ?? '',
         ]);
     }
 
@@ -494,7 +497,7 @@ if ($action === 'pdf') {
     echo '<table><thead><tr>';
     echo '<th>#</th><th>Receipt</th><th>Date</th><th>Group</th>';
     echo '<th>Inst.</th><th>Due</th><th>Paid</th><th>Discount</th>';
-    echo '<th>Penalty</th><th>Net</th><th>Method</th>';
+    echo '<th>Penalty</th><th>Net</th><th>Method</th><th>Receiver</th>';
     echo '</tr></thead><tbody>';
 
     foreach ($rows as $index => $row) {
@@ -517,6 +520,7 @@ if ($action === 'pdf') {
         }
 
         echo '<td>' . htmlspecialchars((string)$row['method_name']) . '</td>';
+        echo '<td>' . htmlspecialchars((string)($row['collection_receiver_name'] ?? '')) . '</td>';
         echo '</tr>';
     }
 

@@ -115,6 +115,14 @@ $csrfToken = $_SESSION['chit_collection_csrf'];
 $selectedMemberId = (int)($_GET['member_id'] ?? 0);
 $selectedInstallmentId = (int)($_GET['installment_id'] ?? 0);
 
+$defaultReceiverName = trim((string)(
+    $_SESSION['full_name']
+    ?? $_SESSION['user_name']
+    ?? $_SESSION['username']
+    ?? $_SESSION['name']
+    ?? ''
+));
+
 $theme = [
     'primary_color' => '#d89416',
     'primary_dark_color' => '#b86a0b',
@@ -234,6 +242,20 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
                     <input type="date" name="collection_date" class="form-control" value="<?php echo date('Y-m-d'); ?>" required>
                 </div>
 
+                <div class="span-3">
+                    <label class="field-label">Collection Receiver Name</label>
+                    <input
+                        type="text"
+                        name="collection_receiver_name"
+                        id="collection_receiver_name"
+                        class="form-control"
+                        value="<?php echo h($defaultReceiverName); ?>"
+                        maxlength="150"
+                        placeholder="Enter receiver name"
+                        required
+                    >
+                </div>
+
                 <div class="span-2">
                     <label class="field-label">Payment Method</label>
                     <select name="payment_method_id" id="payment_method_id" class="form-select" required>
@@ -302,6 +324,7 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
     const paidInput=document.getElementById('paid_amount');
     const discountInput=document.getElementById('discount_amount');
     const penaltyInput=document.getElementById('penalty_amount');
+    const receiverInput=document.getElementById('collection_receiver_name');
 
     let members=[];
     let installments=[];
@@ -478,6 +501,12 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
 
         const button=document.getElementById('saveCollectionButton');
         if(!button)return;
+
+        if(!receiverInput.value.trim()){
+            toast('error','Please enter the collection receiver name.');
+            receiverInput.focus();
+            return;
+        }
 
         const old=button.innerHTML;
         button.disabled=true;
