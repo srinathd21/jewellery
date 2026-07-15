@@ -55,6 +55,23 @@ function hasColumn(mysqli $conn, string $table, string $column): bool
     return $result && $result->num_rows > 0;
 }
 
+function ensureReceiverColumn(mysqli $conn): void
+{
+    if (hasColumn($conn, 'chit_collections', 'collection_receiver_name')) {
+        return;
+    }
+
+    $sql = "ALTER TABLE chit_collections
+            ADD COLUMN collection_receiver_name VARCHAR(150) NULL
+            AFTER remarks";
+
+    if (!$conn->query($sql)) {
+        throw new RuntimeException(
+            'Unable to add collection receiver name column: ' . $conn->error
+        );
+    }
+}
+
 function hasPermission(mysqli $conn, string $action): bool
 {
     if (($_SESSION['user_type'] ?? '') === 'Platform Admin') {
@@ -483,6 +500,17 @@ $discountAmount = max(0, (float)($_POST['discount_amount'] ?? 0));
 $penaltyAmount = max(0, (float)($_POST['penalty_amount'] ?? 0));
 $referenceNo = trim((string)($_POST['reference_no'] ?? ''));
 $remarks = trim((string)($_POST['remarks'] ?? ''));
+$collectionReceiverName = trim(
+    (string)($_POST['collection_receiver_name'] ?? '')
+);
+
+if ($collectionReceiverName === '') {
+    respond(false, 'Please enter the collection receiver name.', [], 422);
+}
+
+if (mb_strlen($collectionReceiverName) > 150) {
+    respond(false, 'Collection receiver name must not exceed 150 characters.', [], 422);
+}
 
 if ($memberId <= 0 || $installmentId <= 0) {
     respond(false, 'Please select a member and installment.', [], 422);
@@ -622,6 +650,12 @@ $dueAmount = $pendingAmount;
 $netAmount = $paidAmount + $penaltyAmount - $discountAmount;
 $groupId = (int)$collection['chit_group_id'];
 
+try {
+    ensureReceiverColumn($conn);
+} catch (Throwable $e) {
+    respond(false, $e->getMessage(), [], 500);
+}
+
 $conn->begin_transaction();
 
 try {
@@ -642,8 +676,9 @@ try {
             payment_method_id,
             reference_no,
             remarks,
+            collection_receiver_name,
             created_by
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     );
 
     if (!$stmt) {
@@ -651,7 +686,7 @@ try {
     }
 
     $stmt->bind_param(
-        'iiiiissdddddissi',
+        'iiiiissdddddisssi',
         $businessId,
         $branchId,
         $groupId,
@@ -667,6 +702,7 @@ try {
         $paymentMethodId,
         $referenceNo,
         $remarks,
+        $collectionReceiverName,
         $userId
     );
 } catch (Throwable $e) {
@@ -705,6 +741,7 @@ try {
         'collection_id' => $collectionId,
         'receipt_no' => $receiptNo,
         'member_id' => $memberId,
+        'collection_receiver_name' => $collectionReceiverName,
     ]);
 } catch (Throwable $e) {
     $conn->rollback();

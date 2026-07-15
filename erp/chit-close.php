@@ -385,6 +385,16 @@ html[data-theme="dark"] body{
                     </div>
 
                     <div class="span-12 span-full">
+                        <div class="panel" id="groupDetailsPanel" style="display:none;">
+                            <div class="panel-head">
+                                <div class="panel-title">Selected Chit Group Details</div>
+                                <div class="panel-subtitle">Live database details</div>
+                            </div>
+                            <div class="panel-body" id="groupDetailsContent"></div>
+                        </div>
+                    </div>
+
+                    <div class="span-12 span-full">
                         <label class="field-label">Close Remarks</label>
                         <textarea
                             name="remarks"
@@ -433,6 +443,8 @@ html[data-theme="dark"] body{
     const form=document.getElementById('closeChitForm');
     const groupSelect=document.getElementById('group_id');
     const closeButton=document.getElementById('closeChitButton');
+    const groupDetailsPanel=document.getElementById('groupDetailsPanel');
+    const groupDetailsContent=document.getElementById('groupDetailsContent');
 
     if(!form||!groupSelect){
         return;
@@ -520,7 +532,45 @@ html[data-theme="dark"] body{
         }
     }
 
-    form.addEventListener('submit',async function(event){
+    
+async function loadGroupDetails(){
+    if(!groupSelect.value){
+        if(groupDetailsPanel) groupDetailsPanel.style.display='none';
+        return;
+    }
+
+    try{
+        const result=await requestJson(
+            'api/chit-close.php?action=details&group_id='+groupSelect.value
+        );
+
+        const group=result.group || {};
+        const members=result.members || [];
+
+        groupDetailsContent.innerHTML =
+        `<div class="row">
+            <div class="col-md-3"><b>Group No</b><br>${escapeHtml(group.group_no||'')}</div>
+            <div class="col-md-3"><b>Name</b><br>${escapeHtml(group.group_name||'')}</div>
+            <div class="col-md-3"><b>Type</b><br>${escapeHtml(group.chit_type||'')}</div>
+            <div class="col-md-3"><b>Status</b><br>${escapeHtml(group.status||'')}</div>
+        </div>
+        <hr>
+        <b>Members (${members.length})</b>
+        <table class="table mt-2">
+        <thead><tr><th>Name</th><th>Mobile</th><th>Status</th></tr></thead>
+        <tbody>${members.map(m=>`<tr><td>${escapeHtml(m.member_name||'')}</td><td>${escapeHtml(m.mobile||'')}</td><td>${escapeHtml(m.status||'')}</td></tr>`).join('')}</tbody>
+        </table>`;
+
+        groupDetailsPanel.style.display='block';
+
+    }catch(error){
+        toast('error',error.message);
+    }
+}
+
+groupSelect.addEventListener('change',loadGroupDetails);
+
+form.addEventListener('submit',async function(event){
         event.preventDefault();
 
         if(!groupSelect.value){

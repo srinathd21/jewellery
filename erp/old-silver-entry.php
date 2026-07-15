@@ -702,10 +702,7 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
 <?php include 'includes/nav.php'; ?>
 
 <div class="content-wrap">
-    <div class="page-header">
-        <h1 class="page-title">Old Silver Entry</h1>
-        <div class="page-subtitle"><?php echo h($businessName); ?> · Inventory</div>
-    </div>
+   
 
     <?php if ($success !== ''): ?>
         <div class="alert alert-success alert-dismissible fade show">

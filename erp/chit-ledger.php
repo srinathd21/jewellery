@@ -363,11 +363,12 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
                         <th>Penalty</th>
                         <th>Net</th>
                         <th>Method</th>
+                        <th>Collection Receiver</th>
                     </tr>
                     </thead>
                     <tbody id="ledgerBody">
                     <tr class="ledger-message-row">
-                        <td colspan="11" class="empty-state">
+                        <td colspan="12" class="empty-state">
                             Select a member and click View Ledger.
                         </td>
                     </tr>
@@ -444,7 +445,7 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
         empty.classList.add('d-none');
         foot.innerHTML='';
         body.innerHTML=`<tr class="ledger-message-row">
-            <td colspan="11" class="empty-state">${escapeHtml(message)}</td>
+            <td colspan="12" class="empty-state">${escapeHtml(message)}</td>
         </tr>`;
     }
 
@@ -535,6 +536,7 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
             <td data-label="Penalty">${canViewValue?'₹'+money(row.penalty_amount):'••••'}</td>
             <td data-label="Net"><strong>${canViewValue?'₹'+money(row.net_amount):'••••'}</strong></td>
             <td data-label="Method">${escapeHtml(row.method_name||'—')}</td>
+            <td data-label="Collection Receiver">${escapeHtml(row.collection_receiver_name||'—')}</td>
         </tr>`).join('');
 
         foot.innerHTML=`<tr class="total-row">
