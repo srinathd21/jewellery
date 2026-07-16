@@ -53,6 +53,8 @@ if (!function_exists('chitGroupPermission')) {
             'view' => 'can_view',
             'value' => 'can_view_value',
             'create' => 'can_create',
+            'update' => 'can_update',
+            'delete' => 'can_delete',
         ];
 
         $field = $fieldMap[$action] ?? '';
@@ -155,6 +157,8 @@ if (!chitGroupPermission($conn, 'open')) {
 
 $canView = chitGroupPermission($conn, 'view') || chitGroupPermission($conn, 'open');
 $canCreate = chitGroupPermission($conn, 'create');
+$canUpdate = chitGroupPermission($conn, 'update');
+$canDelete = chitGroupPermission($conn, 'delete');
 $canViewValue = chitGroupPermission($conn, 'value') || $canView;
 
 foreach (['chit_groups', 'chit_members'] as $requiredTable) {
@@ -204,6 +208,8 @@ if (tableExists($conn, 'business_theme_settings')) {
 }
 
 $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
+if (empty($_SESSION['chit_groups_csrf'])) { $_SESSION['chit_groups_csrf'] = bin2hex(random_bytes(32)); }
+$csrfToken = (string)$_SESSION['chit_groups_csrf'];
 ?>
 <!doctype html>
 <html lang="en">
@@ -236,7 +242,7 @@ body{background:var(--page-bg);color:var(--text-color);font-family:<?php echo js
 .search-wrap input{width:240px}
 .form-control{font-size:10px;min-height:36px;border-radius:9px;border-color:var(--border-color);background:var(--card-bg);color:var(--text-color)}
 .btn-theme{background:linear-gradient(135deg,var(--primary),var(--primary-dark));border:0;color:#fff;border-radius:9px;font-size:10px;font-weight:700;min-height:36px;padding:8px 13px}
-.btn-light-custom{border:1px solid var(--border-color);background:var(--card-bg);color:var(--text-color);border-radius:9px;font-size:10px;font-weight:700;min-height:36px;padding:8px 12px}
+.btn-light-custom{border:1px solid var(--border-color);background:var(--card-bg);color:var(--text-color);border-radius:9px;font-size:10px;font-weight:700;min-height:36px;padding:8px 12px}.action-icon{width:30px;height:30px;padding:0!important;display:inline-flex;align-items:center;justify-content:center}.action-danger{color:#c0392b}.action-danger:hover{background:#fdecec!important;color:#a61f1f!important}
 .compact-table{margin:0;font-size:10px}
 .compact-table th{font-size:9px;text-transform:uppercase;color:var(--muted-color);background:color-mix(in srgb,var(--muted-color) 6%,transparent);padding:10px 11px;white-space:nowrap;border-color:var(--border-color)}
 .compact-table td{padding:10px 11px;vertical-align:middle;background:var(--card-bg)!important;color:var(--text-color);border-color:var(--border-color)}
@@ -365,6 +371,9 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
     'use strict';
 
     const canViewValue=<?php echo $canViewValue ? 'true' : 'false'; ?>;
+    const canUpdate=<?php echo $canUpdate ? 'true' : 'false'; ?>;
+    const canDelete=<?php echo $canDelete ? 'true' : 'false'; ?>;
+    const csrfToken=<?php echo json_encode($csrfToken); ?>;
     const tableBody=document.getElementById('groupsTableBody');
     const tableWrap=document.getElementById('groupsTableWrap');
     const loading=document.getElementById('groupsLoading');
@@ -467,17 +476,12 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
                     </span>
                 </td>
                 <td data-label="Action">
-                    <div class="d-flex gap-1 justify-content-end">
-                        <a
-                            href="chit-view.php?id=${Number(row.id)}"
-                            class="btn btn-light-custom"
-                            style="min-height:auto;padding:6px 9px"
-                        >View</a>
-                        <a
-                            href="chit-member-add.php?group_id=${Number(row.id)}"
-                            class="btn btn-theme"
-                            style="min-height:auto;padding:6px 9px"
-                        >Add Member</a>
+                    <div class="d-flex gap-1 justify-content-end flex-wrap">
+                        <a href="chit-view.php?id=${Number(row.id)}" class="btn btn-light-custom action-icon" title="View"><i class="fa-solid fa-eye"></i></a>
+                        ${canUpdate?`<a href="chit-edit.php?id=${Number(row.id)}" class="btn btn-light-custom action-icon" title="Edit"><i class="fa-solid fa-pen"></i></a>`:''}
+                        ${canDelete?`<button type="button" class="btn btn-light-custom action-icon action-danger delete-group" data-id="${Number(row.id)}" data-name="${escapeHtml(row.group_name)}" title="Delete"><i class="fa-solid fa-trash"></i></button>`:''}
+                        <a href="chit-members.php?group_id=${Number(row.id)}" class="btn btn-light-custom" style="min-height:auto;padding:6px 9px" title="View Members"><i class="fa-solid fa-users me-1"></i>Members</a>
+                        <a href="chit-member-add.php?group_id=${Number(row.id)}" class="btn btn-theme" style="min-height:auto;padding:6px 9px" title="Create Member"><i class="fa-solid fa-user-plus me-1"></i>Create Member</a>
                     </div>
                 </td>
             </tr>`;
@@ -532,10 +536,26 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
     search?.addEventListener('input',render);
     refresh?.addEventListener('click',loadGroups);
 
+    tableBody.addEventListener('click',async function(event){
+        const button=event.target.closest('.delete-group');
+        if(!button)return;
+        const id=Number(button.dataset.id||0);
+        if(id<=0)return;
+        if(!confirm('Delete '+(button.dataset.name||'this chit group')+'? This is allowed only when no members, collections, prizes or payouts are linked.'))return;
+        button.disabled=true;
+        try{
+            const body=new FormData();
+            body.append('action','delete'); body.append('group_id',String(id)); body.append('csrf_token',csrfToken);
+            const response=await fetch('api/chit-group-actions.php',{method:'POST',body,credentials:'same-origin',headers:{'X-Requested-With':'XMLHttpRequest'}});
+            const result=await response.json().catch(()=>({success:false,message:'Invalid response from delete API.'}));
+            if(!response.ok||!result.success)throw new Error(result.message||'Unable to delete chit group.');
+            rows=rows.filter(row=>Number(row.id)!==id); render(); toast('success',result.message);
+        }catch(error){toast('error',error.message)}finally{button.disabled=false}
+    });
+
     const params=new URLSearchParams(location.search);
-    if(params.get('msg')==='created'){
-        toast('success','Chit group created successfully.');
-    }
+    if(params.get('msg')==='created')toast('success','Chit group created successfully.');
+    if(params.get('msg')==='updated')toast('success','Chit group updated successfully.');
 
     loadGroups();
 })();

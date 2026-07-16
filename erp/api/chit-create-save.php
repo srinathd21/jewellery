@@ -51,6 +51,17 @@ if (!isset($conn) || !($conn instanceof mysqli)) {
 mysqli_report(MYSQLI_REPORT_OFF);
 $conn->set_charset('utf8mb4');
 
+$numberHelperCandidates = [
+    $rootDir . '/includes/document-number-helper.php',
+    $rootDir . '/document-number-helper.php',
+];
+foreach ($numberHelperCandidates as $numberHelperFile) {
+    if (is_file($numberHelperFile)) {
+        require_once $numberHelperFile;
+        break;
+    }
+}
+
 if (!function_exists('tableExists')) {
     function tableExists(mysqli $conn, string $table): bool
     {
@@ -237,7 +248,25 @@ foreach (['chit_groups', 'chit_installments'] as $requiredTable) {
     }
 }
 
-$groupNo = trim((string)($_POST['group_no'] ?? ''));
+$action = trim((string)($_POST['action'] ?? 'create'));
+
+if ($action === 'preview_number') {
+    $previewDate = trim((string)($_POST['start_date'] ?? date('Y-m-d')));
+    $previewDateObject = DateTime::createFromFormat('Y-m-d', $previewDate);
+    if (!$previewDateObject || $previewDateObject->format('Y-m-d') !== $previewDate) {
+        respond(false, 'A valid start date is required.', [], 422);
+    }
+    try {
+        $previewNo = function_exists('generateDocumentNumber') && tableExists($conn, 'document_number_settings')
+            ? generateDocumentNumber($conn, $businessId, $branchId, 'chit', $previewDate)
+            : nextNo($conn, 'chit_groups', 'group_no', 'CH' . date('Ym', strtotime($previewDate)), $businessId);
+        respond(true, 'Chit number preview generated.', ['group_no' => $previewNo]);
+    } catch (Throwable $numberError) {
+        respond(false, $numberError->getMessage(), [], 500);
+    }
+}
+
+$groupNo = '';
 $groupName = trim((string)($_POST['group_name'] ?? ''));
 $chitType = trim((string)($_POST['chit_type'] ?? 'Money'));
 $startDate = trim((string)($_POST['start_date'] ?? ''));
@@ -251,16 +280,6 @@ $auctionDay = $auctionDayText === '' ? null : (int)$auctionDayText;
 $graceDays = (int)($_POST['grace_days'] ?? 0);
 $lateFeeAmount = (float)($_POST['late_fee_amount'] ?? 0);
 $notes = trim((string)($_POST['notes'] ?? ''));
-
-if ($groupNo === '') {
-    $groupNo = nextNo(
-        $conn,
-        'chit_groups',
-        'group_no',
-        'CH' . date('Ym'),
-        $businessId
-    );
-}
 
 if ($groupName === '') {
     respond(false, 'Group name is required.');
@@ -300,23 +319,6 @@ if ($graceDays < 0 || $graceDays > 365) {
     respond(false, 'Grace days must be between 0 and 365.');
 }
 
-$stmt = $conn->prepare(
-    "SELECT id
-     FROM chit_groups
-     WHERE business_id = ?
-       AND group_no = ?
-     LIMIT 1"
-);
-
-$stmt->bind_param('is', $businessId, $groupNo);
-$stmt->execute();
-$duplicate = $stmt->get_result()->fetch_assoc();
-$stmt->close();
-
-if ($duplicate) {
-    respond(false, 'This group number is already in use.', [], 409);
-}
-
 $endDate = (clone $dateObject)
     ->modify('+' . ($totalMonths - 1) . ' months')
     ->format('Y-m-d');
@@ -324,6 +326,24 @@ $endDate = (clone $dateObject)
 $conn->begin_transaction();
 
 try {
+    $groupNo = function_exists('generateDocumentNumber') && tableExists($conn, 'document_number_settings')
+        ? generateDocumentNumber($conn, $businessId, $branchId, 'chit', $startDate)
+        : nextNo($conn, 'chit_groups', 'group_no', 'CH' . date('Ym', strtotime($startDate)), $businessId);
+
+    $duplicateStmt = $conn->prepare(
+        "SELECT id FROM chit_groups WHERE business_id = ? AND group_no = ? LIMIT 1 FOR UPDATE"
+    );
+    if (!$duplicateStmt) {
+        throw new RuntimeException('Unable to verify chit number: ' . $conn->error);
+    }
+    $duplicateStmt->bind_param('is', $businessId, $groupNo);
+    $duplicateStmt->execute();
+    $duplicate = $duplicateStmt->get_result()->fetch_assoc();
+    $duplicateStmt->close();
+    if ($duplicate) {
+        throw new RuntimeException('Generated chit number already exists. Check Master Control sequence settings.');
+    }
+
     $stmt = $conn->prepare(
         "INSERT INTO chit_groups (
             business_id,
