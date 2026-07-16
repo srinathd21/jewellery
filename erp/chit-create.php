@@ -35,6 +35,17 @@ if (!isset($conn) || !($conn instanceof mysqli)) {
 mysqli_report(MYSQLI_REPORT_OFF);
 $conn->set_charset('utf8mb4');
 
+$numberHelperCandidates = [
+    __DIR__ . '/includes/document-number-helper.php',
+    __DIR__ . '/document-number-helper.php',
+];
+foreach ($numberHelperCandidates as $numberHelperFile) {
+    if (is_file($numberHelperFile)) {
+        require_once $numberHelperFile;
+        break;
+    }
+}
+
 if (!function_exists('h')) {
     function h($value): string
     {
@@ -217,7 +228,14 @@ if (empty($_SESSION['chit_create_csrf'])) {
 }
 
 $csrfToken = $_SESSION['chit_create_csrf'];
-$groupNo = nextNo($conn, 'chit_groups', 'group_no', 'CH' . date('Ym'), $businessId);
+$today = date('Y-m-d');
+try {
+    $groupNo = function_exists('generateDocumentNumber') && tableExists($conn, 'document_number_settings')
+        ? generateDocumentNumber($conn, $businessId, $branchId, 'chit', $today)
+        : nextNo($conn, 'chit_groups', 'group_no', 'CH' . date('Ym'), $businessId);
+} catch (Throwable $numberError) {
+    $groupNo = nextNo($conn, 'chit_groups', 'group_no', 'CH' . date('Ym'), $businessId);
+}
 
 $pageTitle = 'Create Chit';
 $page_title = 'Create Chit';
@@ -289,6 +307,7 @@ body{background:var(--page-bg);color:var(--text-color);font-family:<?php echo js
 .form-grid{display:grid;grid-template-columns:repeat(12,1fr);gap:10px}
 .span-2{grid-column:span 2}.span-3{grid-column:span 3}.span-5{grid-column:span 5}.span-12{grid-column:span 12}
 .field-label{display:block;font-size:9px;font-weight:700;text-transform:uppercase;color:var(--muted-color);margin-bottom:4px}
+.field-help{font-size:8px;color:var(--muted-color);margin-top:4px}
 .form-control,.form-select{min-height:36px;font-size:10px;border-radius:9px;border-color:var(--border-color);background:var(--card-bg);color:var(--text-color)}
 textarea.form-control{min-height:85px}
 .btn-theme{background:linear-gradient(135deg,var(--primary),var(--primary-dark));border:0;color:#fff;border-radius:9px;font-size:10px;font-weight:700;min-height:36px;padding:8px 13px}
@@ -325,7 +344,8 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
             <div class="form-grid">
                 <div class="span-3">
                     <label class="field-label">Group Number</label>
-                    <input type="text" name="group_no" class="form-control" value="<?php echo h($groupNo); ?>" maxlength="50">
+                    <input type="text" name="group_no" id="group_no" class="form-control" value="<?php echo h($groupNo); ?>" maxlength="100" readonly>
+                    <div class="field-help">Generated from Master Control based on the start date.</div>
                 </div>
 
                 <div class="span-5">
@@ -344,7 +364,7 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
 
                 <div class="span-2">
                     <label class="field-label">Start Date</label>
-                    <input type="date" name="start_date" class="form-control" value="<?php echo date('Y-m-d'); ?>" required>
+                    <input type="date" name="start_date" id="start_date" class="form-control" value="<?php echo h($today); ?>" required>
                 </div>
 
                 <div class="span-2">
@@ -442,6 +462,34 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
     members.addEventListener('input',calculateChitValue);
     installment.addEventListener('input',calculateChitValue);
     chitValue.addEventListener('input',()=>chitValue.dataset.manual='1');
+
+    const groupNoInput=document.getElementById('group_no');
+    const startDateInput=document.getElementById('start_date');
+    let previewTimer=null;
+
+    async function refreshGroupNumber(){
+        if(!groupNoInput||!startDateInput||!startDateInput.value)return;
+        clearTimeout(previewTimer);
+        previewTimer=setTimeout(async()=>{
+            const data=new FormData();
+            data.append('action','preview_number');
+            data.append('csrf_token',<?php echo json_encode($csrfToken); ?>);
+            data.append('start_date',startDateInput.value);
+            try{
+                const response=await fetch('api/chit-create-save.php',{
+                    method:'POST',body:data,credentials:'same-origin',headers:{'X-Requested-With':'XMLHttpRequest'}
+                });
+                const result=await response.json();
+                if(response.ok&&result.success&&result.group_no){
+                    groupNoInput.value=result.group_no;
+                }
+            }catch(error){
+                console.warn('Unable to refresh chit number preview.',error);
+            }
+        },180);
+    }
+    startDateInput?.addEventListener('change',refreshGroupNumber);
+    startDateInput?.addEventListener('input',refreshGroupNumber);
 
     const form=document.getElementById('chitCreateForm');
 
