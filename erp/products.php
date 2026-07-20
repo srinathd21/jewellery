@@ -612,6 +612,129 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
         .theme-toast-success { background: #168449; }
         .theme-toast-error { background: #c0392b; }
 
+
+        .product-view-modal .modal-dialog {
+            max-width: 940px;
+        }
+
+        .product-view-modal .modal-content {
+            background: var(--card-bg);
+            color: var(--text-color);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius);
+        }
+
+        .product-view-modal .modal-header,
+        .product-view-modal .modal-footer {
+            border-color: var(--border-color);
+        }
+
+        .view-product-layout {
+            display: grid;
+            grid-template-columns: 190px minmax(0, 1fr);
+            gap: 18px;
+        }
+
+        .view-product-image {
+            width: 190px;
+            height: 190px;
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius);
+            overflow: hidden;
+            display: grid;
+            place-items: center;
+            background: var(--primary-soft);
+            color: var(--primary-dark);
+        }
+
+        .view-product-image img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .view-section {
+            border: 1px solid var(--border-color);
+            border-radius: 11px;
+            overflow: hidden;
+            margin-bottom: 12px;
+        }
+
+        .view-section-title {
+            padding: 9px 12px;
+            background: color-mix(in srgb, var(--primary) 8%, var(--card-bg));
+            color: var(--primary-dark);
+            font-size: 10px;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: .04em;
+        }
+
+        .view-detail-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+
+        .view-detail-item {
+            padding: 10px 12px;
+            border-right: 1px solid var(--border-color);
+            border-bottom: 1px solid var(--border-color);
+            min-width: 0;
+        }
+
+        .view-detail-item:nth-child(3n) {
+            border-right: 0;
+        }
+
+        .view-detail-label {
+            display: block;
+            color: var(--muted-color);
+            font-size: 9px;
+            font-weight: 700;
+            text-transform: uppercase;
+            margin-bottom: 3px;
+        }
+
+        .view-detail-value {
+            display: block;
+            color: var(--text-color);
+            font-size: 11px;
+            font-weight: 700;
+            overflow-wrap: anywhere;
+        }
+
+        .view-description {
+            padding: 12px;
+            white-space: pre-wrap;
+            font-size: 11px;
+            color: var(--text-color);
+        }
+
+        @media (max-width: 767.98px) {
+            .view-product-layout {
+                grid-template-columns: 1fr;
+            }
+
+            .view-product-image {
+                width: 130px;
+                height: 130px;
+                margin: 0 auto;
+            }
+
+            .view-detail-grid {
+                grid-template-columns: 1fr 1fr;
+            }
+
+            .view-detail-item,
+            .view-detail-item:nth-child(3n) {
+                border-right: 1px solid var(--border-color);
+            }
+
+            .view-detail-item:nth-child(2n) {
+                border-right: 0;
+            }
+        }
+
         body.dark-mode,
         body[data-theme="dark"],
         html.dark-mode body,
@@ -888,6 +1011,7 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
                                 <th>Weights</th>
                                 <?php if ($canValue): ?><th>Rates</th><?php endif; ?>
                                 <th>Stock</th>
+                                <?php if ($canValue): ?><th>Stock Value</th><?php endif; ?>
                                 <th>Status</th>
                                 <th class="text-end">Actions</th>
                             </tr>
@@ -913,6 +1037,35 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
         <?php include('includes/footer.php'); ?>
     </div>
 </main>
+
+
+<div class="modal fade product-view-modal" id="productViewModal" tabindex="-1" aria-labelledby="productViewModalTitle" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div>
+                    <h5 class="modal-title" id="productViewModalTitle">Product Details</h5>
+                    <div class="small text-muted" id="productViewSubtitle">Complete jewellery product information</div>
+                </div>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <div id="productViewLoading" class="text-center py-5">
+                    <i class="fa-solid fa-spinner fa-spin me-2"></i>Loading product details...
+                </div>
+                <div id="productViewContent" class="d-none"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-light btn-sm" data-bs-dismiss="modal">Close</button>
+                <?php if ($canUpdate): ?>
+                    <a href="#" class="btn-theme" id="productViewEditButton">
+                        <i class="fa-solid fa-pen"></i> Edit Product
+                    </a>
+                <?php endif; ?>
+            </div>
+        </div>
+    </div>
+</div>
 
 <?php include('includes/script.php'); ?>
 <script src="assets/js/script.js"></script>
@@ -942,6 +1095,13 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
     const paginationSummary = document.getElementById('paginationSummary');
     const listSection = document.getElementById('productsListSection');
     const addProductButton = document.getElementById('addProductButton');
+    const productViewModalElement = document.getElementById('productViewModal');
+    const productViewModal = productViewModalElement ? new bootstrap.Modal(productViewModalElement) : null;
+    const productViewLoading = document.getElementById('productViewLoading');
+    const productViewContent = document.getElementById('productViewContent');
+    const productViewTitle = document.getElementById('productViewModalTitle');
+    const productViewSubtitle = document.getElementById('productViewSubtitle');
+    const productViewEditButton = document.getElementById('productViewEditButton');
 
     let currentController = null;
     let searchTimer = null;
@@ -974,6 +1134,102 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
             toast.classList.remove('show');
             setTimeout(() => toast.remove(), 250);
         }, 3200);
+    }
+
+    function detailItem(label, value) {
+        const display = value === null || value === undefined || value === '' ? '—' : value;
+        return '<div class="view-detail-item"><span class="view-detail-label">' + escapeHtml(label) + '</span><span class="view-detail-value">' + escapeHtml(display) + '</span></div>';
+    }
+
+    function money(value) {
+        return currencySymbol + number(value, 2);
+    }
+
+    function renderProductView(product) {
+        const image = product.image_path
+            ? '<img src="' + escapeHtml(product.image_path) + '" alt="' + escapeHtml(product.product_name || '') + '">'
+            : '<i class="fa-solid fa-gem fa-3x"></i>';
+
+        const status = Number(product.is_active) === 1 ? 'Active' : 'Inactive';
+        const tracked = Number(product.track_stock) === 1 ? 'Yes' : 'No';
+        const stock = number(product.stock_qty, Number(product.decimal_places ?? 3)) + (product.unit_name ? ' ' + product.unit_name : '');
+        const stockGrossWeight = number(product.stock_gross_weight, 3);
+        const stockNetWeight = number(product.stock_net_weight, 3);
+        const created = product.created_at || '—';
+        const updated = product.updated_at || '—';
+
+        productViewTitle.textContent = product.product_name || 'Product Details';
+        productViewSubtitle.textContent = (product.product_code || '') + (product.barcode ? ' · ' + product.barcode : '');
+        if (productViewEditButton) productViewEditButton.href = 'product-edit.php?id=' + Number(product.id);
+
+        productViewContent.innerHTML =
+            '<div class="view-product-layout">' +
+                '<div>' +
+                    '<div class="view-product-image">' + image + '</div>' +
+                    '<div class="mt-3 text-center"><span class="status-badge ' + (Number(product.is_active) === 1 ? 'status-active' : 'status-inactive') + '">' + status + '</span></div>' +
+                '</div>' +
+                '<div>' +
+                    '<div class="view-section"><div class="view-section-title">Basic Information</div><div class="view-detail-grid">' +
+                        detailItem('Product ID', product.id) +
+                        detailItem('Product Code', product.product_code) +
+                        detailItem('Barcode', product.barcode) +
+                        detailItem('Product Name', product.product_name) +
+                        detailItem('Category', product.category_name) +
+                        detailItem('HSN Code', product.hsn_code) +
+                    '</div></div>' +
+                    '<div class="view-section"><div class="view-section-title">Metal, Unit & Weight</div><div class="view-detail-grid">' +
+                        detailItem('Metal', product.metal_name) +
+                        detailItem('Unit', product.unit_name) +
+                        detailItem('Unit Code', product.unit_code) +
+                        detailItem('Purity %', number(product.purity, 4)) +
+                        detailItem('Gross Weight', number(product.gross_weight, 3)) +
+                        detailItem('Stone Weight', number(product.stone_weight, 3)) +
+                        detailItem('Net Weight', number(product.net_weight, 3)) +
+                        detailItem('Available Stock', stock) +
+                        detailItem('Stock Gross Weight', stockGrossWeight) +
+                        detailItem('Stock Net Weight', stockNetWeight) +
+                        detailItem('Minimum Stock', number(product.minimum_stock_qty, Number(product.decimal_places ?? 3))) +
+                    '</div></div>' +
+                    '<div class="view-section"><div class="view-section-title">Charges, Rates & Tax</div><div class="view-detail-grid">' +
+                        detailItem('Making Charge Type', product.making_charge_type) +
+                        detailItem('Making Charge', money(product.making_charge)) +
+                        detailItem('Wastage %', number(product.wastage_percent, 3)) +
+                        detailItem('Purchase Rate', permissions.canValue ? money(product.purchase_rate) : 'Restricted') +
+                        detailItem('Sale Rate', permissions.canValue ? money(product.sale_rate) : 'Restricted') +
+                        detailItem('Tax %', number(product.tax_percent, 3)) +
+                    '</div></div>' +
+                    '<div class="view-section"><div class="view-section-title">Stock & Record Information</div><div class="view-detail-grid">' +
+                        detailItem('Track Stock', tracked) +
+                        detailItem('Status', status) +
+                        detailItem('Created At', created) +
+                        detailItem('Updated At', updated) +
+                    '</div></div>' +
+                    '<div class="view-section"><div class="view-section-title">Description</div><div class="view-description">' + escapeHtml(product.description || 'No description added.') + '</div></div>' +
+                '</div>' +
+            '</div>';
+    }
+
+    async function openProductView(productId) {
+        productViewLoading.classList.remove('d-none');
+        productViewContent.classList.add('d-none');
+        productViewContent.innerHTML = '';
+        productViewTitle.textContent = 'Product Details';
+        productViewSubtitle.textContent = 'Complete jewellery product information';
+        productViewModal?.show();
+
+        const data = new FormData();
+        data.append('action', 'view');
+        data.append('csrf_token', csrfToken);
+        data.append('product_id', String(productId));
+
+        try {
+            const result = await apiAction(data);
+            renderProductView(result.product);
+            productViewLoading.classList.add('d-none');
+            productViewContent.classList.remove('d-none');
+        } catch (error) {
+            productViewLoading.innerHTML = '<div class="text-danger"><i class="fa-solid fa-circle-exclamation me-2"></i>' + escapeHtml(error.message) + '</div>';
+        }
     }
 
     function setLoading(state) {
@@ -1019,7 +1275,7 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
             ? '<td data-label="Rates"><div>Sale: ' + escapeHtml(currencySymbol) + number(product.sale_rate, 2) + '</div><div class="product-sub">Purchase: ' + escapeHtml(currencySymbol) + number(product.purchase_rate, 2) + '</div></td>'
             : '';
 
-        let actions = '';
+        let actions = '<button type="button" class="action-btn view-product" data-id="' + Number(product.id) + '" title="View"><i class="fa-solid fa-eye"></i></button>';
         if (permissions.canUpdate) {
             actions += '<a class="action-btn" href="product-edit.php?id=' + Number(product.id) + '" title="Edit"><i class="fa-solid fa-pen"></i></a>';
             actions += '<button type="button" class="action-btn toggle-product" data-id="' + Number(product.id) + '" data-active="' + Number(product.is_active) + '" title="' + (Number(product.is_active) === 1 ? 'Deactivate' : 'Activate') + '"><i class="fa-solid ' + (Number(product.is_active) === 1 ? 'fa-ban' : 'fa-circle-check') + '"></i></button>';
@@ -1034,7 +1290,14 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
             '<td data-label="Metal"><span class="badge-soft">' + escapeHtml(product.metal_name || '—') + '</span>' + purity + '</td>' +
             '<td data-label="Weights"><div>G: ' + number(product.gross_weight, 3) + '</div><div class="product-sub">N: ' + number(product.net_weight, 3) + '</div></td>' +
             rates +
-            '<td data-label="Stock">' + number(product.stock_qty, 3) + ' ' + escapeHtml(product.unit_name || '') + '</td>' +
+            (permissions.canValue
+                ? '<td data-label="Stock Value"><b>' + money(product.stock_value) + '</b><div class="product-sub">Avg: ' + money(product.average_cost) + '</div></td>'
+                : '') +
+            '<td data-label="Stock">' +
+                '<div><b>' + number(product.stock_qty, Number(product.decimal_places ?? 3)) + ' ' + escapeHtml(product.unit_name || '') + '</b></div>' +
+                '<div class="product-sub">Gross: ' + number(product.stock_gross_weight, 3) + '</div>' +
+                '<div class="product-sub">Net: ' + number(product.stock_net_weight, 3) + '</div>' +
+            '</td>' +
             '<td data-label="Status"><span class="status-badge ' + (Number(product.is_active) === 1 ? 'status-active' : 'status-inactive') + '">' + (Number(product.is_active) === 1 ? 'Active' : 'Inactive') + '</span></td>' +
             '<td class="actions text-end" data-label="Actions"><div class="d-inline-flex gap-1">' + actions + '</div></td>' +
             '</tr>';
@@ -1200,6 +1463,12 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
     });
 
     document.addEventListener('click', async event => {
+        const view = event.target.closest('.view-product');
+        if (view) {
+            await openProductView(view.dataset.id);
+            return;
+        }
+
         const toggle = event.target.closest('.toggle-product');
         if (toggle) {
             const next = Number(toggle.dataset.active) === 1 ? 0 : 1;

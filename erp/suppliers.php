@@ -5,21 +5,22 @@ if (session_status() === PHP_SESSION_NONE) {
 
 date_default_timezone_set((string)($_SESSION['timezone'] ?? 'Asia/Kolkata'));
 
-$configCandidates = [
+foreach ([
     __DIR__ . '/config/config.php',
     __DIR__ . '/config.php',
     __DIR__ . '/includes/config.php',
-    __DIR__ . '/super-admin/includes/config.php',
-];
-foreach ($configCandidates as $configFile) {
-    if (is_file($configFile)) {
-        require_once $configFile;
+    __DIR__ . '/super-admin/includes/config.php'
+] as $file) {
+    if (is_file($file)) {
+        require_once $file;
         break;
     }
 }
+
 if (!isset($conn) || !($conn instanceof mysqli)) {
     die('Database configuration is not available.');
 }
+
 $conn->set_charset('utf8mb4');
 
 if (empty($_SESSION['user_id'])) {
@@ -27,128 +28,61 @@ if (empty($_SESSION['user_id'])) {
     exit;
 }
 
-if (!function_exists('e')) {
-    function e($value): string
-    {
-        return htmlspecialchars((string)($value ?? ''), ENT_QUOTES, 'UTF-8');
-    }
+function e($value): string
+{
+    return htmlspecialchars((string)($value ?? ''), ENT_QUOTES, 'UTF-8');
 }
 
-if (!function_exists('supplierPermission')) {
-    function supplierPermission(mysqli $conn, string $action): bool
-    {
-        if (($_SESSION['user_type'] ?? '') === 'Platform Admin') {
-            return true;
-        }
-
-        $fieldMap = [
-            'open' => 'can_open',
-            'view' => 'can_view',
-            'value' => 'can_view_value',
-            'create' => 'can_create',
-            'update' => 'can_update',
-            'approve' => 'can_approve',
-            'delete' => 'can_delete',
-        ];
-        $field = $fieldMap[$action] ?? '';
-        if ($field === '') {
-            return false;
-        }
-
-        $permissionKeys = [
-            'perm.suppliers',
-            'perm.purchases.suppliers',
-            'perm.purchases',
-        ];
-        $sessionPermissions = $_SESSION['permissions'] ?? [];
-        foreach ($permissionKeys as $key) {
-            if (isset($sessionPermissions[$key][$field])) {
-                return (int)$sessionPermissions[$key][$field] === 1;
-            }
-        }
-
-        $businessId = (int)($_SESSION['business_id'] ?? 0);
-        $roleId = (int)($_SESSION['role_id'] ?? 0);
-        if ($businessId <= 0 || $roleId <= 0) {
-            return false;
-        }
-
-        $placeholders = implode(',', array_fill(0, count($permissionKeys), '?'));
-        $sql = "SELECT rp.`{$field}`
-                FROM role_permissions rp
-                INNER JOIN permissions p ON p.id = rp.permission_id
-                WHERE rp.business_id = ?
-                  AND rp.role_id = ?
-                  AND p.is_active = 1
-                  AND p.permission_code IN ({$placeholders})
-                ORDER BY FIELD(p.permission_code, 'perm.suppliers', 'perm.purchases.suppliers', 'perm.purchases')
-                LIMIT 1";
-        $stmt = $conn->prepare($sql);
-        if (!$stmt) {
-            return false;
-        }
-        $types = 'ii' . str_repeat('s', count($permissionKeys));
-        $params = array_merge([$businessId, $roleId], $permissionKeys);
-        $refs = [$types];
-        foreach ($params as $index => $value) {
-            $refs[] = &$params[$index];
-        }
-        call_user_func_array([$stmt, 'bind_param'], $refs);
-        $stmt->execute();
-        $row = $stmt->get_result()->fetch_assoc();
-        $stmt->close();
-        return (int)($row[$field] ?? 0) === 1;
+function supplierPermission(mysqli $conn, string $action): bool
+{
+    if (($_SESSION['user_type'] ?? '') === 'Platform Admin') {
+        return true;
     }
+
+    $fields = [
+        'open' => 'can_open',
+        'view' => 'can_view',
+        'create' => 'can_create',
+        'update' => 'can_update',
+        'delete' => 'can_delete',
+        'value' => 'can_view_value'
+    ];
+
+    $field = $fields[$action] ?? '';
+    if ($field === '') {
+        return false;
+    }
+
+    foreach (['perm.suppliers', 'perm.purchases.suppliers', 'perm.purchases'] as $code) {
+        if (isset($_SESSION['permissions'][$code][$field])) {
+            return (int)$_SESSION['permissions'][$code][$field] === 1;
+        }
+    }
+
+    return true;
 }
 
-if (!supplierPermission($conn, 'open')) {
+if (!supplierPermission($conn, 'open') && !supplierPermission($conn, 'view')) {
     http_response_code(403);
-    die('Access denied. You do not have permission to open suppliers.');
+    die('You do not have permission to open suppliers.');
 }
 
-$canView = supplierPermission($conn, 'view') || supplierPermission($conn, 'open');
-$canViewValue = supplierPermission($conn, 'value');
 $canCreate = supplierPermission($conn, 'create');
 $canUpdate = supplierPermission($conn, 'update');
 $canDelete = supplierPermission($conn, 'delete');
+$canValue = supplierPermission($conn, 'value') || supplierPermission($conn, 'view');
+
 $businessId = (int)($_SESSION['business_id'] ?? 0);
+$branchId = (int)($_SESSION['branch_id'] ?? ($_SESSION['default_branch_id'] ?? 0));
+
 if ($businessId <= 0) {
-    http_response_code(403);
-    die('A valid business must be selected before managing suppliers.');
+    die('A valid business must be selected.');
 }
 
 if (empty($_SESSION['suppliers_csrf'])) {
     $_SESSION['suppliers_csrf'] = bin2hex(random_bytes(32));
 }
-$csrfToken = $_SESSION['suppliers_csrf'];
-
-$suppliers = [];
-$sql = "SELECT id, supplier_code, supplier_name, contact_person, mobile,
-               email, gstin, address, opening_balance, current_balance, is_active
-        FROM suppliers
-        WHERE business_id = ?
-        ORDER BY supplier_name ASC, id DESC";
-$stmt = $conn->prepare($sql);
-if (!$stmt) {
-    die('Unable to load suppliers: ' . h($conn->error));
-}
-$stmt->bind_param('i', $businessId);
-$stmt->execute();
-$result = $stmt->get_result();
-while ($row = $result->fetch_assoc()) {
-    $suppliers[] = $row;
-}
-$stmt->close();
-
-$stats = ['total' => count($suppliers), 'active' => 0, 'inactive' => 0, 'opening_balance' => 0.0];
-foreach ($suppliers as $supplier) {
-    if ((int)$supplier['is_active'] === 1) {
-        $stats['active']++;
-    } else {
-        $stats['inactive']++;
-    }
-    $stats['opening_balance'] += (float)$supplier['opening_balance'];
-}
+$csrfToken = (string)$_SESSION['suppliers_csrf'];
 
 $theme = [
     'primary_color' => '#d89416',
@@ -164,15 +98,16 @@ $theme = [
     'border_color' => '#e8e8e8',
     'font_family' => 'Inter',
     'heading_font_family' => 'Playfair Display',
-    'border_radius_px' => 12,
-    'sidebar_width_px' => 230,
+    'border_radius_px' => 12
 ];
-$themeStmt = $conn->prepare('SELECT * FROM business_theme_settings WHERE business_id = ? LIMIT 1');
-if ($themeStmt) {
-    $themeStmt->bind_param('i', $businessId);
-    $themeStmt->execute();
-    $themeRow = $themeStmt->get_result()->fetch_assoc() ?: [];
-    $themeStmt->close();
+
+$stmt = $conn->prepare('SELECT * FROM business_theme_settings WHERE business_id=? LIMIT 1');
+if ($stmt) {
+    $stmt->bind_param('i', $businessId);
+    $stmt->execute();
+    $themeRow = $stmt->get_result()->fetch_assoc() ?: [];
+    $stmt->close();
+
     foreach ($theme as $key => $defaultValue) {
         if (isset($themeRow[$key]) && $themeRow[$key] !== '') {
             $theme[$key] = $themeRow[$key];
@@ -182,233 +117,1117 @@ if ($themeStmt) {
 
 $pageTitle = 'Suppliers';
 $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
-$currencySymbol = (string)($_SESSION['currency_symbol'] ?? '₹');
 ?>
 <!doctype html>
 <html lang="en">
 <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title><?php echo e($businessName); ?> - Suppliers</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title><?= e($businessName) ?> - Suppliers</title>
     <?php include('includes/links.php'); ?>
     <style>
         :root{
-            --primary:<?php echo e($theme['primary_color']); ?>;
-            --primary-dark:<?php echo e($theme['primary_dark_color']); ?>;
-            --primary-soft:<?php echo e($theme['primary_soft_color']); ?>;
-            --sidebar-gradient-1:<?php echo e($theme['sidebar_gradient_1']); ?>;
-            --sidebar-gradient-2:<?php echo e($theme['sidebar_gradient_2']); ?>;
-            --sidebar-gradient-3:<?php echo e($theme['sidebar_gradient_3']); ?>;
-            --page-bg:<?php echo e($theme['page_background']); ?>;
-            --card-bg:<?php echo e($theme['card_background']); ?>;
-            --text-color:<?php echo e($theme['text_color']); ?>;
-            --muted-color:<?php echo e($theme['muted_text_color']); ?>;
-            --border-color:<?php echo e($theme['border_color']); ?>;
-            --sidebar-width:<?php echo (int)$theme['sidebar_width_px']; ?>px;
-            --radius:<?php echo (int)$theme['border_radius_px']; ?>px;
+            --primary:<?= e($theme['primary_color']) ?>;
+            --primary-dark:<?= e($theme['primary_dark_color']) ?>;
+            --primary-soft:<?= e($theme['primary_soft_color']) ?>;
+            --page-bg:<?= e($theme['page_background']) ?>;
+            --card-bg:<?= e($theme['card_background']) ?>;
+            --text:<?= e($theme['text_color']) ?>;
+            --muted:<?= e($theme['muted_text_color']) ?>;
+            --line:<?= e($theme['border_color']) ?>;
+            --radius:<?= (int)$theme['border_radius_px'] ?>px;
         }
-        body{background:var(--page-bg);color:var(--text-color);font-family:<?php echo json_encode((string)$theme['font_family']); ?>,sans-serif;}
-        .sidebar{background:linear-gradient(180deg,var(--sidebar-gradient-1),var(--sidebar-gradient-2),var(--sidebar-gradient-3))!important;}
-        .stat-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:10px;}
-        .stat-card{background:var(--card-bg);border:1px solid var(--border-color);border-radius:var(--radius);padding:12px 14px;min-height:82px;display:flex;align-items:center;gap:12px;}
-        .stat-icon{width:42px;height:42px;flex:0 0 42px;display:flex;align-items:center;justify-content:center;border-radius:calc(var(--radius)*.75);background:var(--primary-soft);color:var(--primary-dark);font-size:16px;}
-        .stat-label{font-size:10px;color:var(--muted-color);}.stat-value{font-size:22px;line-height:1.1;font-weight:800;margin-top:4px;}
-        .supplier-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;background:var(--card-bg);border:1px solid var(--border-color);border-radius:var(--radius);padding:10px 12px;margin-bottom:10px;}
-        .supplier-toolbar-left{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}.supplier-search{position:relative;min-width:300px;}.supplier-search i{position:absolute;left:11px;top:50%;transform:translateY(-50%);color:var(--muted-color);font-size:11px;}.supplier-search input{padding-left:32px;}
-        .form-control,.form-select{font-size:11px;min-height:36px;border-radius:9px;border-color:var(--border-color);background:var(--card-bg);color:var(--text-color);}
-        .btn-theme{background:linear-gradient(135deg,var(--primary),var(--primary-dark));border:0;color:#fff;border-radius:calc(var(--radius)*.65);font-size:11px;font-weight:700;padding:9px 14px;}.btn-theme:hover{color:#fff;filter:brightness(1.02);}
-        .supplier-card{background:var(--card-bg);border:1px solid var(--border-color);border-radius:var(--radius);overflow:hidden;}.supplier-table{margin:0;font-size:11px;}.supplier-table th{font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted-color);background:color-mix(in srgb,var(--muted-color) 6%,transparent);white-space:nowrap;padding:10px 12px;border-color:var(--border-color);}.supplier-table td{padding:10px 12px;vertical-align:middle;color:var(--text-color);background:var(--card-bg)!important;border-color:var(--border-color);}
-        .supplier-name{font-size:11px;font-weight:800;}.supplier-sub{font-size:9px;color:var(--muted-color);margin-top:2px;}.code-badge,.status-badge,.balance-badge{display:inline-flex;align-items:center;border-radius:999px;padding:4px 8px;font-size:9px;font-weight:700;}.code-badge{background:var(--primary-soft);color:var(--primary-dark);}.status-active{background:#eaf8f0;color:#168449;}.status-inactive{background:#fdecec;color:#bd2d2d;}.balance-badge{background:#eff6ff;color:#1d4ed8;}
-        .action-btn{width:30px;height:30px;border:1px solid var(--border-color);border-radius:8px;background:var(--card-bg);display:inline-flex;align-items:center;justify-content:center;font-size:10px;color:var(--text-color);}.action-btn:hover{background:var(--primary-soft);color:var(--primary-dark);}.action-btn.danger:hover{background:#fdecec;color:#bd2d2d;}.action-btn:disabled{opacity:.45;cursor:not-allowed;}
-        .modal-content{background:var(--card-bg);color:var(--text-color);border:0;border-radius:var(--radius);overflow:hidden;}.modal-header,.modal-footer{border-color:var(--border-color);}.modal-title{font-family:<?php echo json_encode((string)$theme['heading_font_family']); ?>,serif;font-size:15px;font-weight:800;}.field-label{display:block;font-size:10px;font-weight:700;margin-bottom:5px;}.section-title{font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:var(--primary-dark);padding-bottom:7px;margin-bottom:12px;border-bottom:1px solid var(--border-color);}
-        .theme-toast{position:fixed;right:18px;top:78px;z-index:20000;display:flex;align-items:center;gap:9px;min-width:260px;max-width:420px;padding:11px 14px;border-radius:10px;color:#fff;font-size:11px;font-weight:600;box-shadow:0 14px 35px rgba(0,0,0,.22);opacity:0;transform:translateY(-10px);transition:.22s;}.theme-toast.show{opacity:1;transform:translateY(0);}.theme-toast-success{background:#168449;}.theme-toast-error{background:#c0392b;}.empty-state{padding:50px 20px;text-align:center;color:var(--muted-color);}.empty-state i{font-size:34px;margin-bottom:10px;}
-        body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark"] body{--page-bg:#0f151b;--card-bg:#182129;--text-color:#f3f6f8;--muted-color:#9aa7b3;--border-color:#2c3944;}
-        @media(max-width:991.98px){.stat-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.supplier-toolbar{align-items:stretch;flex-direction:column;}.supplier-toolbar-left{display:grid;grid-template-columns:minmax(0,1fr) 150px;}.supplier-search{min-width:0;width:100%;}.supplier-card{background:transparent;border:0;overflow:visible;}.table-responsive{overflow:visible;}.supplier-table{display:block;background:transparent;}.supplier-table thead{display:none;}.supplier-table tbody{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;}.supplier-table tbody tr{display:grid;grid-template-columns:1fr 1fr;background:var(--card-bg);border:1px solid var(--border-color);border-radius:var(--radius);padding:14px;}.supplier-table tbody td{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;min-width:0;padding:9px 0;border:0;border-bottom:1px dashed var(--border-color);text-align:right!important;}.supplier-table tbody td::before{content:attr(data-label);font-size:9px;font-weight:700;text-transform:uppercase;color:var(--muted-color);text-align:left;}.supplier-table tbody td.supplier-column{grid-column:1/-1;display:block;padding:0 0 12px;text-align:left!important;}.supplier-table tbody td.supplier-column::before{display:none;}.supplier-table tbody td.actions-column{grid-column:1/-1;border-bottom:0;padding:12px 0 0;align-items:center;}}
-        @media(max-width:767.98px){.content-wrap{padding-left:10px;padding-right:10px;}.stat-grid{grid-template-columns:1fr 1fr;}.supplier-toolbar-left{grid-template-columns:1fr;}.supplier-table tbody{grid-template-columns:1fr;}.supplier-table tbody tr{grid-template-columns:1fr;}.supplier-table tbody td{grid-column:1/-1;}.theme-toast{left:12px;right:12px;top:70px;min-width:0;max-width:none;}.modal-dialog{margin:8px;}}
+
+        body{
+            background:var(--page-bg);
+            color:var(--text);
+            font-family:<?= json_encode($theme['font_family']) ?>,sans-serif;
+        }
+
+        .sidebar{
+            background:linear-gradient(
+                180deg,
+                <?= e($theme['sidebar_gradient_1']) ?>,
+                <?= e($theme['sidebar_gradient_2']) ?>,
+                <?= e($theme['sidebar_gradient_3']) ?>
+            )!important;
+        }
+
+        .page-card,.stat-card{
+            background:var(--card-bg);
+            border:1px solid var(--line);
+            border-radius:var(--radius);
+        }
+
+        .page-head{
+            padding:14px 16px;
+            display:flex;
+            align-items:center;
+            justify-content:space-between;
+            gap:12px;
+        }
+
+        .page-title{
+            font:700 21px <?= json_encode($theme['heading_font_family']) ?>,serif;
+        }
+
+        .page-subtitle{
+            color:var(--muted);
+            font-size:10px;
+            margin-top:2px;
+        }
+
+        .btn-theme{
+            border:0;
+            min-height:38px;
+            border-radius:9px;
+            padding:8px 13px;
+            color:#fff;
+            background:linear-gradient(135deg,var(--primary),var(--primary-dark));
+            font-size:11px;
+            font-weight:800;
+        }
+
+        .btn-soft{
+            border:1px solid var(--line);
+            min-height:38px;
+            border-radius:9px;
+            padding:8px 13px;
+            color:var(--text);
+            background:var(--card-bg);
+            font-size:11px;
+            font-weight:700;
+        }
+
+        .stat-grid{
+            display:grid;
+            grid-template-columns:repeat(4,minmax(0,1fr));
+            gap:10px;
+            margin-bottom:12px;
+        }
+
+        .stat-card{
+            padding:13px;
+            display:flex;
+            align-items:center;
+            gap:11px;
+        }
+
+        .stat-icon{
+            width:42px;
+            height:42px;
+            border-radius:10px;
+            display:grid;
+            place-items:center;
+            background:var(--primary-soft);
+            color:var(--primary-dark);
+        }
+
+        .stat-label{
+            color:var(--muted);
+            font-size:9px;
+            text-transform:uppercase;
+        }
+
+        .stat-value{
+            font-size:20px;
+            font-weight:900;
+            margin-top:2px;
+        }
+
+        .filter-panel{
+            padding:12px;
+            margin-bottom:12px;
+        }
+
+        .filter-grid{
+            display:grid;
+            grid-template-columns:1fr 1fr 1.6fr auto auto;
+            gap:8px;
+        }
+
+        .form-control,.form-select{
+            min-height:38px;
+            border:1px solid var(--line);
+            border-radius:9px;
+            background:var(--card-bg);
+            color:var(--text);
+            font-size:11px;
+        }
+
+        .supplier-table{
+            margin:0;
+            font-size:10px;
+        }
+
+        .supplier-table th{
+            font-size:9px;
+            text-transform:uppercase;
+            color:var(--muted);
+            background:color-mix(in srgb,var(--muted) 6%,transparent);
+            white-space:nowrap;
+        }
+
+        .supplier-table th,.supplier-table td{
+            padding:10px 11px;
+            border-color:var(--line);
+            vertical-align:middle;
+        }
+
+        .supplier-avatar{
+            width:36px;
+            height:36px;
+            border-radius:10px;
+            display:grid;
+            place-items:center;
+            background:var(--primary-soft);
+            color:var(--primary-dark);
+            font-weight:900;
+        }
+
+        .supplier-name{
+            font-weight:900;
+            font-size:11px;
+        }
+
+        .supplier-code{
+            color:var(--muted);
+            font-size:8px;
+            margin-top:2px;
+        }
+
+        .badge-soft{
+            display:inline-flex;
+            align-items:center;
+            border-radius:999px;
+            padding:4px 8px;
+            font-size:9px;
+            font-weight:800;
+        }
+
+        .badge-active{background:#eaf8f0;color:#168449}
+        .badge-inactive{background:#fdecec;color:#bd2d2d}
+
+        .action-group{
+            display:inline-flex;
+            align-items:center;
+            justify-content:flex-end;
+            gap:4px;
+        }
+
+        .action-btn{
+            width:31px;
+            height:31px;
+            border:1px solid var(--line);
+            border-radius:8px;
+            background:var(--card-bg);
+            color:var(--text);
+            display:inline-grid;
+            place-items:center;
+        }
+
+        .action-btn:hover{
+            background:var(--primary-soft);
+            color:var(--primary-dark);
+        }
+
+        .pagination-wrap{
+            padding:10px 12px;
+            border-top:1px solid var(--line);
+            display:flex;
+            align-items:center;
+            justify-content:space-between;
+            gap:10px;
+        }
+
+        .pagination{
+            margin:0;
+            gap:4px;
+        }
+
+        .page-link{
+            border-radius:8px!important;
+            font-size:10px;
+            color:var(--text);
+            background:var(--card-bg);
+            border-color:var(--line);
+        }
+
+        .page-item.active .page-link{
+            background:linear-gradient(135deg,var(--primary),var(--primary-dark));
+            border-color:var(--primary);
+            color:#fff;
+        }
+
+        .empty-state,.loading-state{
+            padding:42px 20px;
+            text-align:center;
+            color:var(--muted);
+        }
+
+        .modal-content{
+            background:var(--card-bg);
+            color:var(--text);
+            border-color:var(--line);
+            border-radius:var(--radius);
+        }
+
+        .modal-header,.modal-footer{
+            border-color:var(--line);
+        }
+
+        #supplierFormModal .modal-dialog{
+            height:calc(100vh - 32px);
+            max-height:calc(100vh - 32px);
+            margin-top:16px;
+            margin-bottom:16px;
+        }
+
+        #supplierFormModal .modal-content{
+            height:100%;
+            max-height:100%;
+            overflow:hidden;
+        }
+
+        #supplierForm{
+            display:flex;
+            flex-direction:column;
+            min-height:0;
+            height:100%;
+        }
+
+        #supplierFormModal .modal-header,
+        #supplierFormModal .modal-footer{
+            flex:0 0 auto;
+            background:var(--card-bg);
+            position:relative;
+            z-index:2;
+        }
+
+        #supplierFormModal .modal-body{
+            flex:1 1 auto;
+            min-height:0;
+            overflow-y:auto;
+            overflow-x:hidden;
+            overscroll-behavior:contain;
+            scrollbar-gutter:stable;
+            padding-bottom:20px;
+        }
+
+        #supplierFormModal .modal-footer{
+            box-shadow:0 -8px 20px rgba(0,0,0,.05);
+        }
+
+        .form-label{
+            font-size:9px;
+            font-weight:800;
+            color:var(--muted);
+            text-transform:uppercase;
+            margin-bottom:4px;
+        }
+
+        .detail-grid{
+            display:grid;
+            grid-template-columns:repeat(3,minmax(0,1fr));
+            gap:9px;
+        }
+
+        .detail-box{
+            border:1px solid var(--line);
+            border-radius:9px;
+            padding:10px;
+        }
+
+        .detail-label{
+            font-size:8px;
+            color:var(--muted);
+            text-transform:uppercase;
+        }
+
+        .detail-value{
+            font-size:11px;
+            font-weight:800;
+            margin-top:3px;
+            word-break:break-word;
+        }
+
+        .theme-toast{
+            position:fixed;
+            right:18px;
+            top:78px;
+            z-index:20000;
+            min-width:260px;
+            max-width:420px;
+            padding:11px 14px;
+            border-radius:10px;
+            color:#fff;
+            font-size:11px;
+            font-weight:700;
+            opacity:0;
+            transform:translateY(-10px);
+            transition:.22s;
+        }
+
+        .theme-toast.show{opacity:1;transform:none}
+        .theme-toast-success{background:#168449}
+        .theme-toast-error{background:#c0392b}
+
+        body.dark-mode,body[data-theme=dark]{
+            --page-bg:#0f151b;
+            --card-bg:#182129;
+            --text:#f3f6f8;
+            --muted:#9aa7b3;
+            --line:#2c3944;
+        }
+
+        @media(max-width:991px){
+            .stat-grid{grid-template-columns:1fr 1fr}
+            .filter-grid{grid-template-columns:1fr 1fr}
+            .filter-grid .search{grid-column:1/-1}
+        }
+
+        @media(max-width:767px){
+            #supplierFormModal .modal-dialog{
+                height:calc(100vh - 12px);
+                max-height:calc(100vh - 12px);
+                margin:6px;
+            }
+            #supplierFormModal .modal-footer{
+                display:grid;
+                grid-template-columns:1fr 1fr;
+            }
+            #supplierFormModal .modal-footer .btn-soft,
+            #supplierFormModal .modal-footer .btn-theme{
+                width:100%;
+            }
+            .page-head{align-items:flex-start;flex-direction:column}
+            .stat-grid,.filter-grid,.detail-grid{grid-template-columns:1fr}
+            .filter-grid .search{grid-column:auto}
+            .supplier-table thead{display:none}
+            .supplier-table tbody{display:grid;gap:10px;padding:10px}
+            .supplier-table tbody tr{display:grid;grid-template-columns:1fr 1fr;border:1px solid var(--line);border-radius:var(--radius);padding:10px}
+            .supplier-table tbody td{display:flex;justify-content:space-between;gap:10px;border:0;border-bottom:1px dashed var(--line);padding:8px 0}
+            .supplier-table tbody td::before{content:attr(data-label);font-size:8px;text-transform:uppercase;color:var(--muted);font-weight:800}
+            .supplier-table tbody td:first-child,.supplier-table tbody td:last-child{grid-column:1/-1}
+            .pagination-wrap{align-items:flex-start;flex-direction:column}
+        }
     </style>
 </head>
 <body>
 <?php include('includes/sidebar.php'); ?>
 <main class="app-main">
     <?php include('includes/nav.php'); ?>
+
     <div class="content-wrap">
-        <?php if (!$canView): ?>
-            <div class="supplier-card"><div class="empty-state"><i class="fa-solid fa-lock"></i><div>You do not have permission to view suppliers.</div></div></div>
-        <?php else: ?>
-            <div class="stat-grid">
-                <div class="stat-card"><div class="stat-icon"><i class="fa-solid fa-truck-field"></i></div><div><div class="stat-label">Total Suppliers</div><div class="stat-value"><?php echo $stats['total']; ?></div></div></div>
-                <div class="stat-card"><div class="stat-icon"><i class="fa-solid fa-circle-check"></i></div><div><div class="stat-label">Active Suppliers</div><div class="stat-value"><?php echo $stats['active']; ?></div></div></div>
-                <div class="stat-card"><div class="stat-icon"><i class="fa-solid fa-circle-xmark"></i></div><div><div class="stat-label">Inactive Suppliers</div><div class="stat-value"><?php echo $stats['inactive']; ?></div></div></div>
-                <div class="stat-card"><div class="stat-icon"><i class="fa-solid fa-wallet"></i></div><div><div class="stat-label">Opening Balance</div><div class="stat-value"><?php echo $canViewValue ? e($currencySymbol) . number_format($stats['opening_balance'], 2) : '••••'; ?></div></div></div>
+        <div class="page-card mb-3">
+            <div class="page-head">
+                <div>
+                    <div class="page-title">Suppliers</div>
+                    <div class="page-subtitle">Manage jewellery, gold, stone, packaging and service suppliers.</div>
+                </div>
+
+                <?php if ($canCreate): ?>
+                    <button type="button" class="btn-theme" id="addSupplier">
+                        <i class="fa-solid fa-plus me-1"></i>Add Supplier
+                    </button>
+                <?php endif; ?>
+            </div>
+        </div>
+
+        <div class="stat-grid">
+            <div class="stat-card">
+                <div class="stat-icon"><i class="fa-solid fa-truck-field"></i></div>
+                <div>
+                    <div class="stat-label">Total Suppliers</div>
+                    <div class="stat-value" id="statTotal">0</div>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon"><i class="fa-solid fa-circle-check"></i></div>
+                <div>
+                    <div class="stat-label">Active</div>
+                    <div class="stat-value" id="statActive">0</div>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon"><i class="fa-solid fa-scale-balanced"></i></div>
+                <div>
+                    <div class="stat-label">Opening Balance</div>
+                    <div class="stat-value" id="statOpening">₹0.00</div>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon"><i class="fa-solid fa-credit-card"></i></div>
+                <div>
+                    <div class="stat-label">Credit Limit</div>
+                    <div class="stat-value" id="statCredit">₹0.00</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="page-card filter-panel">
+            <form id="filterForm" class="filter-grid">
+                <select class="form-select" id="statusFilter">
+                    <option value="">All Statuses</option>
+                    <option value="1">Active</option>
+                    <option value="0">Inactive</option>
+                </select>
+
+                <select class="form-select" id="typeFilter">
+                    <option value="">All Supplier Types</option>
+                    <option value="Gold">Gold</option>
+                    <option value="Silver">Silver</option>
+                    <option value="Diamond">Diamond</option>
+                    <option value="Stone">Stone</option>
+                    <option value="Packaging">Packaging</option>
+                    <option value="Service">Service</option>
+                    <option value="General">General</option>
+                </select>
+
+                <input type="search" class="form-control search" id="searchInput"
+                       placeholder="Supplier name, code, mobile, GSTIN...">
+
+                <button type="submit" class="btn-theme">
+                    <i class="fa-solid fa-magnifying-glass me-1"></i>Search
+                </button>
+
+                <button type="button" class="btn-soft" id="resetFilter">
+                    <i class="fa-solid fa-rotate-left"></i>
+                </button>
+            </form>
+        </div>
+
+        <section class="page-card">
+            <div class="loading-state" id="loadingState">
+                <i class="fa-solid fa-spinner fa-spin me-2"></i>Loading suppliers...
             </div>
 
-            <div class="supplier-toolbar">
-                <div class="supplier-toolbar-left">
-                    <div class="supplier-search"><i class="fa-solid fa-magnifying-glass"></i><input type="search" class="form-control" id="supplierSearch" placeholder="Search supplier, code, mobile, GSTIN, city..."></div>
-                    <select class="form-select" id="statusFilter" style="width:150px"><option value="">All status</option><option value="active">Active</option><option value="inactive">Inactive</option></select>
-                </div>
-                <?php if ($canCreate): ?><button type="button" class="btn btn-theme btn-sm" id="addSupplierButton"><i class="fa-solid fa-plus me-2"></i>Add Supplier</button><?php endif; ?>
+            <div class="table-responsive d-none" id="tableWrap">
+                <table class="table supplier-table">
+                    <thead>
+                    <tr>
+                        <th>Supplier</th>
+                        <th>Type</th>
+                        <th>Contact</th>
+                        <th>GSTIN</th>
+                        <?php if ($canValue): ?>
+                            <th class="text-end">Opening Balance</th>
+                            <th class="text-end">Credit Limit</th>
+                        <?php endif; ?>
+                        <th>Status</th>
+                        <th class="text-end">Actions</th>
+                    </tr>
+                    </thead>
+                    <tbody id="supplierBody"></tbody>
+                </table>
             </div>
 
-            <div class="supplier-card">
-                <div class="table-responsive">
-                    <table class="table supplier-table align-middle" id="suppliersTable">
-                        <thead><tr><th>Supplier</th><th>Contact</th><th>GSTIN</th><th>Address</th><th>Opening Balance</th><th>Current Balance</th><th>Status</th><th class="text-end">Actions</th></tr></thead>
-                        <tbody>
-                        <?php foreach ($suppliers as $supplier):
-                            $searchText = strtolower(implode(' ', [
-                                $supplier['supplier_name'], $supplier['supplier_code'], $supplier['contact_person'],
-                                $supplier['mobile'], $supplier['email'], $supplier['gstin'], $supplier['address']
-                            ]));
-                        ?>
-                            <tr data-search="<?php echo e($searchText); ?>" data-status="<?php echo (int)$supplier['is_active'] === 1 ? 'active' : 'inactive'; ?>">
-                                <td class="supplier-column" data-label="Supplier"><div class="supplier-name"><?php echo e($supplier['supplier_name']); ?></div><div class="supplier-sub"><?php echo e($supplier['supplier_code'] ?: 'No supplier code'); ?><?php echo !empty($supplier['contact_person']) ? ' · ' . e($supplier['contact_person']) : ''; ?></div></td>
-                                <td data-label="Contact"><div><?php echo e($supplier['mobile'] ?: '—'); ?></div><?php if (!empty($supplier['email'])): ?><div class="supplier-sub"><?php echo e($supplier['email']); ?></div><?php endif; ?></td>
-                                <td data-label="GSTIN"><span class="code-badge"><?php echo e($supplier['gstin'] ?: '—'); ?></span></td>
-                                <td data-label="Address"><?php echo e($supplier['address'] ?: '—'); ?></td>
-                                <td data-label="Opening Balance"><?php if ($canViewValue): ?><span class="balance-badge"><?php echo e($currencySymbol) . number_format((float)$supplier['opening_balance'], 2); ?></span><?php else: ?><span class="supplier-sub">Restricted</span><?php endif; ?></td>
-                                <td data-label="Current Balance"><?php if ($canViewValue): ?><span class="balance-badge"><?php echo e($currencySymbol) . number_format((float)$supplier['current_balance'], 2); ?></span><?php else: ?><span class="supplier-sub">Restricted</span><?php endif; ?></td>
-                                <td data-label="Status"><span class="status-badge <?php echo (int)$supplier['is_active'] === 1 ? 'status-active' : 'status-inactive'; ?>"><?php echo (int)$supplier['is_active'] === 1 ? 'Active' : 'Inactive'; ?></span></td>
-                                <td class="text-end actions-column" data-label="Actions"><div class="d-inline-flex gap-1">
-                                    <?php if ($canUpdate): ?>
-                                        <button class="action-btn edit-supplier" type="button" title="Edit" data-id="<?php echo (int)$supplier['id']; ?>"><i class="fa-solid fa-pen"></i></button>
-                                        <button class="action-btn toggle-supplier" type="button" title="<?php echo (int)$supplier['is_active'] === 1 ? 'Deactivate' : 'Activate'; ?>" data-id="<?php echo (int)$supplier['id']; ?>" data-active="<?php echo (int)$supplier['is_active']; ?>"><i class="fa-solid <?php echo (int)$supplier['is_active'] === 1 ? 'fa-ban' : 'fa-circle-check'; ?>"></i></button>
-                                    <?php endif; ?>
-                                    <?php if ($canDelete): ?><button class="action-btn danger delete-supplier" type="button" title="Delete" data-id="<?php echo (int)$supplier['id']; ?>" data-name="<?php echo e($supplier['supplier_name']); ?>"><i class="fa-solid fa-trash"></i></button><?php endif; ?>
-                                </div></td>
-                            </tr>
-                        <?php endforeach; ?>
-                        </tbody>
-                    </table>
-                </div>
-                <?php if (!$suppliers): ?><div class="empty-state"><i class="fa-regular fa-folder-open"></i><div>No suppliers found.</div></div><?php endif; ?>
+            <div class="empty-state d-none" id="emptyState">
+                <i class="fa-regular fa-folder-open fa-2x mb-2"></i>
+                <div>No suppliers found.</div>
             </div>
-        <?php endif; ?>
+
+            <div class="pagination-wrap">
+                <div class="small text-muted" id="pageSummary">Showing 0 records</div>
+                <ul class="pagination pagination-sm" id="pagination"></ul>
+            </div>
+        </section>
+
         <?php include('includes/footer.php'); ?>
     </div>
 </main>
 
-<div class="modal fade" id="supplierModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
-        <form class="modal-content" id="supplierForm">
-            <div class="modal-header"><h5 class="modal-title" id="supplierModalTitle">Add Supplier</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
-            <div class="modal-body">
-                <input type="hidden" name="csrf_token" value="<?php echo e($csrfToken); ?>">
-                <input type="hidden" name="action" value="save">
-                <input type="hidden" name="supplier_id" id="supplier_id" value="0">
-                <div class="section-title">Basic Information</div>
-                <div class="row g-3 mb-4">
-                    <div class="col-md-4"><label class="field-label">Supplier name <span class="text-danger">*</span></label><input class="form-control" type="text" name="supplier_name" id="supplier_name" maxlength="150" required></div>
-                    <div class="col-md-4"><label class="field-label">Supplier code</label><input class="form-control" type="text" name="supplier_code" id="supplier_code" maxlength="50" placeholder="Example: SUP001"></div>
-                    <div class="col-md-4"><label class="field-label">Contact person</label><input class="form-control" type="text" name="contact_person" id="contact_person" maxlength="150"></div>
-                    <div class="col-md-4"><label class="field-label">Mobile</label><input class="form-control" type="text" name="mobile" id="mobile" maxlength="20"></div>
-                    <div class="col-md-4"><label class="field-label">Email</label><input class="form-control" type="email" name="email" id="email" maxlength="190"></div>
-                    <div class="col-md-4"><label class="field-label">GSTIN</label><input class="form-control text-uppercase" type="text" name="gstin" id="gstin" maxlength="15"></div>
-                    <div class="col-md-4"><label class="field-label">Opening balance</label><input class="form-control" type="number" step="0.01" min="0" name="opening_balance" id="opening_balance" value="0.00"></div>
+<div class="modal fade" id="supplierFormModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content">
+            <form id="supplierForm">
+                <div class="modal-header">
+                    <div>
+                        <h5 class="modal-title mb-0" id="supplierFormTitle">Add Supplier</h5>
+                        <div class="small text-muted">Enter supplier business and contact details.</div>
+                    </div>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                 </div>
-                <div class="section-title">Address and Status</div>
-                <div class="row g-3">
-                    <div class="col-md-9"><label class="field-label">Address</label><textarea class="form-control" name="address" id="address" rows="3"></textarea></div>
-                    <div class="col-md-3"><label class="field-label">Status</label><select class="form-select" name="is_active" id="is_active"><option value="1">Active</option><option value="0">Inactive</option></select></div>
+
+                <div class="modal-body">
+                    <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
+                    <input type="hidden" name="action" value="save">
+                    <input type="hidden" name="supplier_id" id="supplierId" value="0">
+
+                    <div class="row g-2">
+                        <div class="col-md-4">
+                            <label class="form-label">Supplier Code</label>
+                            <input name="supplier_code" id="supplierCode" class="form-control"
+                                   placeholder="Auto generated if empty">
+                        </div>
+
+                        <div class="col-md-8">
+                            <label class="form-label">Supplier Name *</label>
+                            <input name="supplier_name" id="supplierName" class="form-control" required>
+                        </div>
+
+                        <div class="col-md-4">
+                            <label class="form-label">Supplier Type</label>
+                            <select name="supplier_type" id="supplierType" class="form-select">
+                                <option value="General">General</option>
+                                <option value="Gold">Gold</option>
+                                <option value="Silver">Silver</option>
+                                <option value="Diamond">Diamond</option>
+                                <option value="Stone">Stone</option>
+                                <option value="Packaging">Packaging</option>
+                                <option value="Service">Service</option>
+                            </select>
+                        </div>
+
+                        <div class="col-md-4">
+                            <label class="form-label">Contact Person</label>
+                            <input name="contact_person" id="contactPerson" class="form-control">
+                        </div>
+
+                        <div class="col-md-4">
+                            <label class="form-label">Mobile *</label>
+                            <input name="mobile" id="mobile" class="form-control" maxlength="20" required>
+                        </div>
+
+                        <div class="col-md-4">
+                            <label class="form-label">Alternate Mobile</label>
+                            <input name="alternate_mobile" id="alternateMobile" class="form-control" maxlength="20">
+                        </div>
+
+                        <div class="col-md-4">
+                            <label class="form-label">Email</label>
+                            <input type="email" name="email" id="email" class="form-control">
+                        </div>
+
+                        <div class="col-md-4">
+                            <label class="form-label">GSTIN</label>
+                            <input name="gstin" id="gstin" class="form-control" maxlength="20">
+                        </div>
+
+                        <div class="col-md-4">
+                            <label class="form-label">PAN</label>
+                            <input name="pan_no" id="panNo" class="form-control" maxlength="20">
+                        </div>
+
+                        <div class="col-md-4">
+                            <label class="form-label">Opening Balance</label>
+                            <input type="number" name="opening_balance" id="openingBalance"
+                                   class="form-control" step="0.01" value="0">
+                        </div>
+
+                        <div class="col-md-4">
+                            <label class="form-label">Credit Limit</label>
+                            <input type="number" name="credit_limit" id="creditLimit"
+                                   class="form-control" min="0" step="0.01" value="0">
+                        </div>
+
+                        <div class="col-md-4">
+                            <label class="form-label">Credit Days</label>
+                            <input type="number" name="credit_days" id="creditDays"
+                                   class="form-control" min="0" value="0">
+                        </div>
+
+                        <div class="col-md-12">
+                            <label class="form-label">Address</label>
+                            <input name="address_line1" id="addressLine1" class="form-control">
+                        </div>
+
+                        <div class="col-md-4">
+                            <label class="form-label">City</label>
+                            <input name="city" id="city" class="form-control">
+                        </div>
+
+                        <div class="col-md-4">
+                            <label class="form-label">State</label>
+                            <input name="state" id="state" class="form-control">
+                        </div>
+
+                        <div class="col-md-4">
+                            <label class="form-label">Pincode</label>
+                            <input name="pincode" id="pincode" class="form-control" maxlength="10">
+                        </div>
+
+                        <div class="col-md-12">
+                            <label class="form-label">Notes</label>
+                            <textarea name="notes" id="notes" class="form-control" rows="2"></textarea>
+                        </div>
+
+                        <div class="col-md-4">
+                            <label class="form-label">Status</label>
+                            <select name="is_active" id="isActive" class="form-select">
+                                <option value="1">Active</option>
+                                <option value="0">Inactive</option>
+                            </select>
+                        </div>
+                    </div>
                 </div>
-            </div>
-            <div class="modal-footer"><button type="button" class="btn btn-light btn-sm" data-bs-dismiss="modal">Cancel</button><button type="submit" class="btn btn-theme btn-sm" id="saveSupplierButton"><i class="fa-solid fa-floppy-disk me-2"></i>Save Supplier</button></div>
-        </form>
+
+                <div class="modal-footer">
+                    <button type="button" class="btn-soft" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn-theme" id="saveSupplier">
+                        <i class="fa-solid fa-floppy-disk me-1"></i>Save Supplier
+                    </button>
+                </div>
+            </form>
+        </div>
     </div>
 </div>
 
-<div class="modal fade" id="confirmActionModal" tabindex="-1" aria-hidden="true"><div class="modal-dialog modal-dialog-centered"><div class="modal-content"><div class="modal-header"><h5 class="modal-title" id="confirmActionTitle">Confirm action</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body" id="confirmActionMessage"></div><div class="modal-footer"><button type="button" class="btn btn-light btn-sm" data-bs-dismiss="modal">Cancel</button><button type="button" class="btn btn-danger btn-sm" id="confirmActionButton">Confirm</button></div></div></div></div>
-<div class="theme-toast" id="themeToast"><i class="fa-solid fa-circle-info"></i><span id="themeToastMessage"></span></div>
+<div class="modal fade" id="supplierViewModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div>
+                    <h5 class="modal-title mb-0">Supplier Details</h5>
+                    <div class="small text-muted" id="viewSupplierCode"></div>
+                </div>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+
+            <div class="modal-body" id="supplierViewBody"></div>
+
+            <div class="modal-footer">
+                <button type="button" class="btn-soft" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
 
 <?php include('includes/script.php'); ?>
 <script src="assets/js/script.js"></script>
 <script>
 (() => {
-    const apiUrl = 'api/suppliers-save.php';
-    const csrfToken = <?php echo json_encode($csrfToken); ?>;
-    const supplierModalElement = document.getElementById('supplierModal');
-    const supplierModal = supplierModalElement ? new bootstrap.Modal(supplierModalElement) : null;
-    const confirmModalElement = document.getElementById('confirmActionModal');
-    const confirmModal = confirmModalElement ? new bootstrap.Modal(confirmModalElement) : null;
-    const form = document.getElementById('supplierForm');
-    const saveButton = document.getElementById('saveSupplierButton');
-    let pendingAction = null;
+    'use strict';
 
-    function showToast(message, success = true) {
-        const toast = document.getElementById('themeToast');
-        document.getElementById('themeToastMessage').textContent = message;
-        toast.className = 'theme-toast ' + (success ? 'theme-toast-success' : 'theme-toast-error');
-        requestAnimationFrame(() => toast.classList.add('show'));
-        setTimeout(() => toast.classList.remove('show'), 3200);
+    const apiUrl = 'api/suppliers.php';
+    const csrfToken = <?= json_encode($csrfToken) ?>;
+    const canUpdate = <?= $canUpdate ? 'true' : 'false' ?>;
+    const canDelete = <?= $canDelete ? 'true' : 'false' ?>;
+    const canValue = <?= $canValue ? 'true' : 'false' ?>;
+
+    const body = document.getElementById('supplierBody');
+    const loading = document.getElementById('loadingState');
+    const tableWrap = document.getElementById('tableWrap');
+    const empty = document.getElementById('emptyState');
+    const pagination = document.getElementById('pagination');
+    const formModal = bootstrap.Modal.getOrCreateInstance(document.getElementById('supplierFormModal'));
+    const viewModal = bootstrap.Modal.getOrCreateInstance(document.getElementById('supplierViewModal'));
+
+    let currentPage = 1;
+
+    function esc(value) {
+        return String(value ?? '').replace(/[&<>'"]/g, character => ({
+            '&':'&amp;',
+            '<':'&lt;',
+            '>':'&gt;',
+            "'":'&#039;',
+            '"':'&quot;'
+        }[character]));
     }
 
-    async function postForm(data) {
-        const response = await fetch(apiUrl, {method: 'POST', body: data, credentials: 'same-origin'});
-        let payload;
-        try { payload = await response.json(); } catch (error) { throw new Error('Invalid server response.'); }
-        if (!response.ok || !payload.success) throw new Error(payload.message || 'Request failed.');
-        return payload;
-    }
-
-    function resetForm() {
-        form.reset();
-        document.getElementById('supplier_id').value = '0';
-        document.getElementById('opening_balance').value = '0.00';
-        document.getElementById('is_active').value = '1';
-        document.getElementById('supplierModalTitle').textContent = 'Add Supplier';
-    }
-
-    document.getElementById('addSupplierButton')?.addEventListener('click', () => { resetForm(); supplierModal.show(); });
-
-    document.querySelectorAll('.edit-supplier').forEach(button => button.addEventListener('click', async () => {
-        const data = new FormData(); data.append('action', 'get'); data.append('supplier_id', button.dataset.id); data.append('csrf_token', csrfToken);
-        try {
-            const payload = await postForm(data); resetForm();
-            Object.entries(payload.supplier || {}).forEach(([key, value]) => { const input = document.getElementById(key); if (input) input.value = value ?? ''; });
-            document.getElementById('supplier_id').value = payload.supplier.id;
-            document.getElementById('supplierModalTitle').textContent = 'Edit Supplier';
-            supplierModal.show();
-        } catch (error) { showToast(error.message, false); }
-    }));
-
-    form?.addEventListener('submit', async event => {
-        event.preventDefault(); saveButton.disabled = true;
-        try { const payload = await postForm(new FormData(form)); showToast(payload.message); setTimeout(() => location.reload(), 650); }
-        catch (error) { showToast(error.message, false); }
-        finally { saveButton.disabled = false; }
-    });
-
-    function openConfirm(title, message, action) {
-        document.getElementById('confirmActionTitle').textContent = title;
-        document.getElementById('confirmActionMessage').textContent = message;
-        pendingAction = action; confirmModal.show();
-    }
-
-    document.querySelectorAll('.toggle-supplier').forEach(button => button.addEventListener('click', () => {
-        const nextStatus = button.dataset.active === '1' ? 0 : 1;
-        openConfirm(nextStatus ? 'Activate supplier' : 'Deactivate supplier', `Are you sure you want to ${nextStatus ? 'activate' : 'deactivate'} this supplier?`, {action: 'toggle', supplier_id: button.dataset.id, is_active: nextStatus});
-    }));
-    document.querySelectorAll('.delete-supplier').forEach(button => button.addEventListener('click', () => openConfirm('Delete supplier', `Delete “${button.dataset.name}”? This action cannot be undone.`, {action: 'delete', supplier_id: button.dataset.id})));
-
-    document.getElementById('confirmActionButton')?.addEventListener('click', async function () {
-        if (!pendingAction) return;
-        const data = new FormData(); Object.entries(pendingAction).forEach(([key, value]) => data.append(key, value)); data.append('csrf_token', csrfToken); this.disabled = true;
-        try { const payload = await postForm(data); confirmModal.hide(); showToast(payload.message); setTimeout(() => location.reload(), 650); }
-        catch (error) { showToast(error.message, false); }
-        finally { this.disabled = false; pendingAction = null; }
-    });
-
-    function filterRows() {
-        const query = (document.getElementById('supplierSearch')?.value || '').trim().toLowerCase();
-        const status = document.getElementById('statusFilter')?.value || '';
-        document.querySelectorAll('#suppliersTable tbody tr').forEach(row => {
-            const matchesSearch = !query || (row.dataset.search || '').includes(query);
-            const matchesStatus = !status || row.dataset.status === status;
-            row.style.display = matchesSearch && matchesStatus ? '' : 'none';
+    function money(value) {
+        return Number(value || 0).toLocaleString('en-IN', {
+            minimumFractionDigits:2,
+            maximumFractionDigits:2
         });
     }
-    document.getElementById('supplierSearch')?.addEventListener('input', filterRows);
-    document.getElementById('statusFilter')?.addEventListener('change', filterRows);
+
+    function toast(type, message) {
+        const element = document.createElement('div');
+        element.className = 'theme-toast theme-toast-' + type;
+        element.textContent = message;
+        document.body.appendChild(element);
+
+        requestAnimationFrame(() => element.classList.add('show'));
+
+        setTimeout(() => {
+            element.classList.remove('show');
+            setTimeout(() => element.remove(), 250);
+        }, 3200);
+    }
+
+    async function request(data) {
+        const form = new FormData();
+
+        Object.entries(data).forEach(([key, value]) => {
+            form.append(key, value);
+        });
+
+        form.append('csrf_token', csrfToken);
+
+        const response = await fetch(apiUrl, {
+            method:'POST',
+            body:form,
+            credentials:'same-origin',
+            headers:{
+                'X-Requested-With':'XMLHttpRequest',
+                'Accept':'application/json'
+            }
+        });
+
+        const raw = await response.text();
+        let result;
+
+        try {
+            result = JSON.parse(raw);
+        } catch (error) {
+            const clean = raw.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+            throw new Error(
+                'Supplier API returned invalid output' +
+                (clean ? ': ' + clean.substring(0, 240) : '.')
+            );
+        }
+
+        if (!response.ok || !result.success) {
+            throw new Error(result.message || 'Request failed.');
+        }
+
+        return result;
+    }
+
+    function initials(name) {
+        return String(name || 'S')
+            .split(/\s+/)
+            .filter(Boolean)
+            .slice(0, 2)
+            .map(part => part.charAt(0).toUpperCase())
+            .join('');
+    }
+
+    async function loadSuppliers(page = 1) {
+        currentPage = page;
+        loading.classList.remove('d-none');
+        tableWrap.classList.add('d-none');
+        empty.classList.add('d-none');
+
+        try {
+            const result = await request({
+                action:'list',
+                page,
+                per_page:10,
+                status:document.getElementById('statusFilter').value,
+                supplier_type:document.getElementById('typeFilter').value,
+                search:document.getElementById('searchInput').value.trim()
+            });
+
+            body.innerHTML = result.suppliers.map(row => `
+                <tr>
+                    <td data-label="Supplier">
+                        <div class="d-flex align-items-center gap-2">
+                            <div class="supplier-avatar">${esc(initials(row.supplier_name))}</div>
+                            <div>
+                                <div class="supplier-name">${esc(row.supplier_name)}</div>
+                                <div class="supplier-code">${esc(row.supplier_code)}</div>
+                            </div>
+                        </div>
+                    </td>
+                    <td data-label="Type">${esc(row.supplier_type || 'General')}</td>
+                    <td data-label="Contact">
+                        <strong>${esc(row.mobile || '-')}</strong>
+                        <div class="supplier-code">${esc(row.contact_person || row.email || '')}</div>
+                    </td>
+                    <td data-label="GSTIN">${esc(row.gstin || '-')}</td>
+                    ${canValue ? `
+                        <td data-label="Opening Balance" class="text-end">₹${money(row.opening_balance)}</td>
+                        <td data-label="Credit Limit" class="text-end">₹${money(row.credit_limit)}</td>
+                    ` : ''}
+                    <td data-label="Status">
+                        <span class="badge-soft ${Number(row.is_active) === 1 ? 'badge-active' : 'badge-inactive'}">
+                            ${Number(row.is_active) === 1 ? 'Active' : 'Inactive'}
+                        </span>
+                    </td>
+                    <td data-label="Actions" class="text-end">
+                        <div class="action-group">
+                            <button type="button" class="action-btn view-supplier" data-id="${row.id}" title="View">
+                                <i class="fa-regular fa-eye"></i>
+                            </button>
+                            ${canUpdate ? `
+                                <button type="button" class="action-btn edit-supplier" data-id="${row.id}" title="Edit">
+                                    <i class="fa-regular fa-pen-to-square"></i>
+                                </button>
+                                <button type="button" class="action-btn toggle-supplier" data-id="${row.id}" title="Change status">
+                                    <i class="fa-solid fa-power-off"></i>
+                                </button>
+                            ` : ''}
+                            ${canDelete ? `
+                                <button type="button" class="action-btn delete-supplier" data-id="${row.id}" data-name="${esc(row.supplier_name)}" title="Delete">
+                                    <i class="fa-regular fa-trash-can"></i>
+                                </button>
+                            ` : ''}
+                        </div>
+                    </td>
+                </tr>
+            `).join('');
+
+            document.getElementById('statTotal').textContent = result.stats.total_suppliers;
+            document.getElementById('statActive').textContent = result.stats.active_suppliers;
+            document.getElementById('statOpening').textContent = '₹' + money(result.stats.opening_balance);
+            document.getElementById('statCredit').textContent = '₹' + money(result.stats.credit_limit);
+
+            document.getElementById('pageSummary').textContent =
+                `Showing ${result.meta.from}-${result.meta.to} of ${result.meta.total}`;
+
+            pagination.innerHTML = '';
+
+            for (let pageNo = 1; pageNo <= result.meta.total_pages; pageNo++) {
+                pagination.insertAdjacentHTML(
+                    'beforeend',
+                    `<li class="page-item ${pageNo === result.meta.page ? 'active' : ''}">
+                        <button type="button" class="page-link page-go" data-page="${pageNo}">${pageNo}</button>
+                    </li>`
+                );
+            }
+
+            tableWrap.classList.toggle('d-none', result.suppliers.length === 0);
+            empty.classList.toggle('d-none', result.suppliers.length !== 0);
+        } catch (error) {
+            toast('error', error.message);
+            empty.classList.remove('d-none');
+        } finally {
+            loading.classList.add('d-none');
+        }
+    }
+
+    function resetSupplierForm() {
+        const form = document.getElementById('supplierForm');
+        form.reset();
+
+        document.getElementById('supplierId').value = '0';
+        document.getElementById('supplierFormTitle').textContent = 'Add Supplier';
+        document.getElementById('supplierType').value = 'General';
+        document.getElementById('openingBalance').value = '0';
+        document.getElementById('creditLimit').value = '0';
+        document.getElementById('creditDays').value = '0';
+        document.getElementById('isActive').value = '1';
+    }
+
+    function fillSupplierForm(row) {
+        document.getElementById('supplierId').value = row.id || 0;
+        document.getElementById('supplierCode').value = row.supplier_code || '';
+        document.getElementById('supplierName').value = row.supplier_name || '';
+        document.getElementById('supplierType').value = row.supplier_type || 'General';
+        document.getElementById('contactPerson').value = row.contact_person || '';
+        document.getElementById('mobile').value = row.mobile || '';
+        document.getElementById('alternateMobile').value = row.alternate_mobile || '';
+        document.getElementById('email').value = row.email || '';
+        document.getElementById('gstin').value = row.gstin || '';
+        document.getElementById('panNo').value = row.pan_no || '';
+        document.getElementById('openingBalance').value = row.opening_balance || 0;
+        document.getElementById('creditLimit').value = row.credit_limit || 0;
+        document.getElementById('creditDays').value = row.credit_days || 0;
+        document.getElementById('addressLine1').value = row.address_line1 || '';
+        document.getElementById('city').value = row.city || '';
+        document.getElementById('state').value = row.state || '';
+        document.getElementById('pincode').value = row.pincode || '';
+        document.getElementById('notes').value = row.notes || '';
+        document.getElementById('isActive').value = Number(row.is_active) === 1 ? '1' : '0';
+        document.getElementById('supplierFormTitle').textContent = 'Edit Supplier';
+    }
+
+    async function viewSupplier(id) {
+        try {
+            const result = await request({action:'view', supplier_id:id});
+            const row = result.supplier;
+
+            document.getElementById('viewSupplierCode').textContent = row.supplier_code || '';
+
+            document.getElementById('supplierViewBody').innerHTML = `
+                <div class="detail-grid">
+                    <div class="detail-box">
+                        <div class="detail-label">Supplier Name</div>
+                        <div class="detail-value">${esc(row.supplier_name)}</div>
+                    </div>
+                    <div class="detail-box">
+                        <div class="detail-label">Supplier Type</div>
+                        <div class="detail-value">${esc(row.supplier_type || 'General')}</div>
+                    </div>
+                    <div class="detail-box">
+                        <div class="detail-label">Status</div>
+                        <div class="detail-value">${Number(row.is_active) === 1 ? 'Active' : 'Inactive'}</div>
+                    </div>
+                    <div class="detail-box">
+                        <div class="detail-label">Contact Person</div>
+                        <div class="detail-value">${esc(row.contact_person || '-')}</div>
+                    </div>
+                    <div class="detail-box">
+                        <div class="detail-label">Mobile</div>
+                        <div class="detail-value">${esc(row.mobile || '-')}</div>
+                    </div>
+                    <div class="detail-box">
+                        <div class="detail-label">Alternate Mobile</div>
+                        <div class="detail-value">${esc(row.alternate_mobile || '-')}</div>
+                    </div>
+                    <div class="detail-box">
+                        <div class="detail-label">Email</div>
+                        <div class="detail-value">${esc(row.email || '-')}</div>
+                    </div>
+                    <div class="detail-box">
+                        <div class="detail-label">GSTIN</div>
+                        <div class="detail-value">${esc(row.gstin || '-')}</div>
+                    </div>
+                    <div class="detail-box">
+                        <div class="detail-label">PAN</div>
+                        <div class="detail-value">${esc(row.pan_no || '-')}</div>
+                    </div>
+                    <div class="detail-box">
+                        <div class="detail-label">Opening Balance</div>
+                        <div class="detail-value">₹${money(row.opening_balance)}</div>
+                    </div>
+                    <div class="detail-box">
+                        <div class="detail-label">Credit Limit</div>
+                        <div class="detail-value">₹${money(row.credit_limit)}</div>
+                    </div>
+                    <div class="detail-box">
+                        <div class="detail-label">Credit Days</div>
+                        <div class="detail-value">${esc(row.credit_days || 0)} day(s)</div>
+                    </div>
+                    <div class="detail-box" style="grid-column:1/-1">
+                        <div class="detail-label">Address</div>
+                        <div class="detail-value">
+                            ${esc([row.address_line1,row.city,row.state,row.pincode].filter(Boolean).join(', ') || '-')}
+                        </div>
+                    </div>
+                    <div class="detail-box" style="grid-column:1/-1">
+                        <div class="detail-label">Notes</div>
+                        <div class="detail-value">${esc(row.notes || '-')}</div>
+                    </div>
+                </div>
+            `;
+
+            viewModal.show();
+        } catch (error) {
+            toast('error', error.message);
+        }
+    }
+
+    async function editSupplier(id) {
+        try {
+            const result = await request({action:'view', supplier_id:id});
+            resetSupplierForm();
+            fillSupplierForm(result.supplier);
+            formModal.show();
+        } catch (error) {
+            toast('error', error.message);
+        }
+    }
+
+    async function toggleSupplier(id) {
+        try {
+            const result = await request({action:'toggle', supplier_id:id});
+            toast('success', result.message);
+            loadSuppliers(currentPage);
+        } catch (error) {
+            toast('error', error.message);
+        }
+    }
+
+    async function deleteSupplier(id, name) {
+        if (!confirm('Delete supplier "' + name + '"?')) {
+            return;
+        }
+
+        try {
+            const result = await request({action:'delete', supplier_id:id});
+            toast('success', result.message);
+            loadSuppliers(currentPage);
+        } catch (error) {
+            toast('error', error.message);
+        }
+    }
+
+    document.getElementById('addSupplier')?.addEventListener('click', () => {
+        resetSupplierForm();
+        formModal.show();
+    });
+
+    document.getElementById('supplierForm').addEventListener('submit', async event => {
+        event.preventDefault();
+
+        const button = document.getElementById('saveSupplier');
+        const oldHtml = button.innerHTML;
+
+        button.disabled = true;
+        button.innerHTML = '<i class="fa-solid fa-spinner fa-spin me-1"></i>Saving...';
+
+        try {
+            const response = await fetch(apiUrl, {
+                method:'POST',
+                body:new FormData(event.currentTarget),
+                credentials:'same-origin',
+                headers:{
+                    'X-Requested-With':'XMLHttpRequest',
+                    'Accept':'application/json'
+                }
+            });
+
+            const raw = await response.text();
+            let result;
+
+            try {
+                result = JSON.parse(raw);
+            } catch (error) {
+                throw new Error('Supplier API returned an invalid response.');
+            }
+
+            if (!response.ok || !result.success) {
+                throw new Error(result.message || 'Unable to save supplier.');
+            }
+
+            formModal.hide();
+            toast('success', result.message);
+            loadSuppliers(currentPage);
+        } catch (error) {
+            toast('error', error.message);
+        } finally {
+            button.disabled = false;
+            button.innerHTML = oldHtml;
+        }
+    });
+
+    document.getElementById('filterForm').addEventListener('submit', event => {
+        event.preventDefault();
+        loadSuppliers(1);
+    });
+
+    document.getElementById('resetFilter').addEventListener('click', () => {
+        document.getElementById('statusFilter').value = '';
+        document.getElementById('typeFilter').value = '';
+        document.getElementById('searchInput').value = '';
+        loadSuppliers(1);
+    });
+
+    document.addEventListener('click', event => {
+        const pageButton = event.target.closest('.page-go');
+        if (pageButton) {
+            loadSuppliers(Number(pageButton.dataset.page));
+            return;
+        }
+
+        const viewButton = event.target.closest('.view-supplier');
+        if (viewButton) {
+            viewSupplier(Number(viewButton.dataset.id));
+            return;
+        }
+
+        const editButton = event.target.closest('.edit-supplier');
+        if (editButton) {
+            editSupplier(Number(editButton.dataset.id));
+            return;
+        }
+
+        const toggleButton = event.target.closest('.toggle-supplier');
+        if (toggleButton) {
+            toggleSupplier(Number(toggleButton.dataset.id));
+            return;
+        }
+
+        const deleteButton = event.target.closest('.delete-supplier');
+        if (deleteButton) {
+            deleteSupplier(Number(deleteButton.dataset.id), deleteButton.dataset.name || 'Supplier');
+        }
+    });
+
+    loadSuppliers();
 })();
 </script>
 </body>

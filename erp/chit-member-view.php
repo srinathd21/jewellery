@@ -29,7 +29,7 @@ $businessId = (int) ($_SESSION['business_id'] ?? 0);
 $memberId = (int) ($_GET['id'] ?? $_GET['member_id'] ?? 0);
 if ($memberId <= 0)
     die('Invalid chit member.');
-$stmt = $conn->prepare("SELECT cm.*,c.customer_code,c.customer_name,c.mobile,c.email,c.address_line1,c.city,c.state,c.pincode,cg.group_no,cg.group_name,cg.total_months,cg.installment_amount,cg.chit_value,cg.status group_status FROM chit_members cm INNER JOIN customers c ON c.id=cm.customer_id INNER JOIN chit_groups cg ON cg.id=cm.chit_group_id WHERE cm.id=? AND cm.business_id=? LIMIT 1");
+$stmt = $conn->prepare("SELECT cm.*,c.customer_code,c.customer_name,c.mobile,c.email,c.address_line1,c.city,c.state,c.pincode,cg.group_no,cg.group_name,cg.chit_type,cg.total_months,cg.installment_amount,cg.chit_value,cg.status group_status FROM chit_members cm INNER JOIN customers c ON c.id=cm.customer_id INNER JOIN chit_groups cg ON cg.id=cm.chit_group_id WHERE cm.id=? AND cm.business_id=? LIMIT 1");
 $stmt->bind_param('ii', $memberId, $businessId);
 $stmt->execute();
 $m = $stmt->get_result()->fetch_assoc();
@@ -38,7 +38,14 @@ if (!$m)
     die('Chit member not found.');
 $memberId = (int) $m['id'];
 $groupId = (int) $m['chit_group_id'];
-$stmt = $conn->prepare("SELECT cc.*,ci.installment_no,ci.due_date,pm.method_name FROM chit_collections cc INNER JOIN chit_installments ci ON ci.id=cc.chit_installment_id LEFT JOIN payment_methods pm ON pm.id=cc.payment_method_id WHERE cc.chit_member_id=? ORDER BY ci.installment_no");
+$stmt = $conn->prepare("SELECT cc.*,ci.installment_no,ci.due_date,pm.method_name,
+       m.metal_name,m.metal_code
+FROM chit_collections cc
+INNER JOIN chit_installments ci ON ci.id=cc.chit_installment_id
+LEFT JOIN payment_methods pm ON pm.id=cc.payment_method_id
+LEFT JOIN metals m ON m.id=cc.gold_metal_id AND m.business_id=cc.business_id
+WHERE cc.chit_member_id=?
+ORDER BY ci.installment_no");
 $stmt->bind_param('i', $memberId);
 $stmt->execute();
 $collections = [];
@@ -52,6 +59,10 @@ $paidInstallments = count(array_unique(array_map(
     $collections
 )));
 $totalMonths = (int) ($m['total_months'] ?? 0);
+$totalGoldGrams = array_sum(array_map(
+    static fn(array $row): float => (float)($row['gold_weight_grams'] ?? 0),
+    $collections
+));
 $isClaimed = $totalMonths > 0 && $paidInstallments >= $totalMonths;
 
 if (te($conn, 'chit_prizes')) {
@@ -279,6 +290,10 @@ $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
                             'Total Months' => $m['total_months'],
                             'Chit Value' => '₹' . number_format((float) $m['chit_value'], 2)
                         ];
+
+                        if (($m['chit_type'] ?? '') === 'Gold') {
+                            $items['Total Gold Saved'] = number_format($totalGoldGrams, 6) . ' g';
+                        }
                         foreach ($items as $l => $v): ?>
                             <div class="info">
                                 <div class="lbl"><?= h($l) ?></div>
@@ -309,6 +324,10 @@ $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
                                 <th>Discount</th>
                                 <th>Penalty</th>
                                 <th>Net</th>
+                                <?php if (($m['chit_type'] ?? '') === 'Gold'): ?>
+                                    <th>Gold Rate</th>
+                                    <th>Gold Grams</th>
+                                <?php endif; ?>
                                 <th>Method</th>
                             </tr>
                         </thead>
@@ -323,10 +342,34 @@ $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
                                     <td>₹<?= number_format((float) $c['discount_amount'], 2) ?></td>
                                     <td>₹<?= number_format((float) $c['penalty_amount'], 2) ?></td>
                                     <td>₹<?= number_format((float) $c['net_amount'], 2) ?></td>
+                                    <?php if (($m['chit_type'] ?? '') === 'Gold'): ?>
+                                        <td>
+                                            <?php if ((float)($c['gold_rate_per_gram'] ?? 0) > 0): ?>
+                                                ₹<?= number_format((float)$c['gold_rate_per_gram'], 2) ?>/g
+                                                <div class="small text-muted">
+                                                    <?= h($c['metal_name'] ?: $c['metal_code'] ?: 'Gold') ?>
+                                                    <?php if (!empty($c['gold_purity'])): ?>
+                                                        · <?= number_format((float)$c['gold_purity'], 4) ?>%
+                                                    <?php endif; ?>
+                                                </div>
+                                            <?php else: ?>
+                                                —
+                                            <?php endif; ?>
+                                        </td>
+                                        <td>
+                                            <strong><?= number_format((float)($c['gold_weight_grams'] ?? 0), 6) ?> g</strong>
+                                            <?php if (!empty($c['gold_rate_effective_from'])): ?>
+                                                <div class="small text-muted">
+                                                    Rate date:
+                                                    <?= h(date('d-m-Y', strtotime($c['gold_rate_effective_from']))) ?>
+                                                </div>
+                                            <?php endif; ?>
+                                        </td>
+                                    <?php endif; ?>
                                     <td><?= h($c['method_name'] ?: '—') ?></td>
                                 </tr><?php endforeach; ?><?php if (!$collections): ?>
                                 <tr>
-                                    <td colspan="10" class="text-center text-muted py-4">No payments collected.</td>
+                                    <td colspan="<?= (($m['chit_type'] ?? '') === 'Gold') ? 12 : 10 ?>" class="text-center text-muted py-4">No payments collected.</td>
                                 </tr><?php endif; ?>
                         </tbody>
                     </table>

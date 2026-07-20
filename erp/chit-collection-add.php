@@ -29,7 +29,7 @@ $businessId = (int) ($_SESSION['business_id'] ?? 0);
 $memberId = (int) ($_GET['member_id'] ?? $_GET['id'] ?? 0);
 if ($memberId <= 0)
     die('Invalid member.');
-$stmt = $conn->prepare("SELECT cm.*,c.customer_name,c.mobile,cg.group_no,cg.group_name,cg.installment_amount,cg.status group_status,cg.branch_id FROM chit_members cm INNER JOIN customers c ON c.id=cm.customer_id INNER JOIN chit_groups cg ON cg.id=cm.chit_group_id WHERE cm.id=? AND cm.business_id=? LIMIT 1");
+$stmt = $conn->prepare("SELECT cm.*,c.customer_name,c.mobile,cg.group_no,cg.group_name,cg.chit_type,cg.installment_amount,cg.status group_status,cg.branch_id FROM chit_members cm INNER JOIN customers c ON c.id=cm.customer_id INNER JOIN chit_groups cg ON cg.id=cm.chit_group_id WHERE cm.id=? AND cm.business_id=? LIMIT 1");
 $stmt->bind_param('ii', $memberId, $businessId);
 $stmt->execute();
 $m = $stmt->get_result()->fetch_assoc();
@@ -57,6 +57,24 @@ if (te($conn, 'payment_methods')) {
     while ($x = $r->fetch_assoc())
         $methods[] = $x;
     $s->close();
+}
+
+$goldMetals = [];
+if (($m['chit_type'] ?? '') === 'Gold' && te($conn, 'metals')) {
+    $s = $conn->prepare("SELECT id,metal_code,metal_name,default_purity
+                         FROM metals
+                         WHERE business_id=?
+                           AND is_active=1
+                           AND (UPPER(metal_code) LIKE '%GOLD%' OR UPPER(metal_name) LIKE '%GOLD%')
+                         ORDER BY default_purity DESC, metal_name");
+    if ($s) {
+        $s->bind_param('i', $businessId);
+        $s->execute();
+        $r = $s->get_result();
+        while ($x = $r->fetch_assoc())
+            $goldMetals[] = $x;
+        $s->close();
+    }
 }
 if (empty($_SESSION['chit_collection_csrf']))
     $_SESSION['chit_collection_csrf'] = bin2hex(random_bytes(32));
@@ -191,6 +209,30 @@ $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
             font-size: 10px
         }
 
+        .gold-credit-box {
+            grid-column: 1 / -1;
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 10px;
+            padding: 12px;
+            border: 1px solid color-mix(in srgb, var(--p) 30%, var(--line));
+            border-radius: 10px;
+            background: color-mix(in srgb, var(--p) 7%, var(--card));
+        }
+
+        .gold-credit-title {
+            grid-column: 1 / -1;
+            font-size: 10px;
+            font-weight: 800;
+            color: var(--pd);
+        }
+
+        .gold-credit-help {
+            grid-column: 1 / -1;
+            color: var(--muted);
+            font-size: 9px;
+        }
+
         .theme-toast {
             position: fixed;
             right: 18px;
@@ -245,6 +287,10 @@ $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
 
             .s12 {
                 grid-column: 1/-1
+            }
+
+            .gold-credit-box {
+                grid-template-columns: 1fr;
             }
         }
 
@@ -303,7 +349,7 @@ $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
                                         </option><?php endforeach; ?>
                                 </select></div>
                             <div class="s4"><label class="lbl">Collection Date</label><input type="date"
-                                    name="collection_date" class="form-control" value="<?= date('Y-m-d') ?>" required></div>
+                                    name="collection_date" id="collection_date" class="form-control" value="<?= date('Y-m-d') ?>" required></div>
                             <div class="s4"><label class="lbl">Due Amount</label><input type="number" step="0.01" min="0"
                                     name="due_amount" id="due_amount" class="form-control"
                                     value="<?= number_format((float) $m['installment_amount'], 2, '.', '') ?>" required></div>
@@ -316,6 +362,47 @@ $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
                                     name="penalty_amount" id="penalty_amount" class="form-control" value="0.00"></div>
                             <div class="s3"><label class="lbl">Net Received</label><input type="number" step="0.01" min="0"
                                     name="net_amount" id="net_amount" class="form-control" readonly></div>
+                            <?php if (($m['chit_type'] ?? '') === 'Gold'): ?>
+                                <div class="gold-credit-box">
+                                    <div class="gold-credit-title">
+                                        <i class="fa-solid fa-coins me-1"></i>Gold Credit for This Collection
+                                    </div>
+
+                                    <div>
+                                        <label class="lbl">Gold Metal / Purity</label>
+                                        <select name="gold_metal_id" id="gold_metal_id" class="form-select" required>
+                                            <option value="">Select gold metal</option>
+                                            <?php foreach ($goldMetals as $goldMetal): ?>
+                                                <option value="<?= (int)$goldMetal['id'] ?>">
+                                                    <?= h($goldMetal['metal_name']) ?>
+                                                    <?php if ($goldMetal['default_purity'] !== null): ?>
+                                                        · <?= h(number_format((float)$goldMetal['default_purity'], 4)) ?>%
+                                                    <?php endif; ?>
+                                                </option>
+                                            <?php endforeach; ?>
+                                        </select>
+                                    </div>
+
+                                    <div>
+                                        <label class="lbl">Rate per Gram on Collection Date</label>
+                                        <input type="number" step="0.01" min="0" name="gold_rate_per_gram"
+                                               id="gold_rate_per_gram" class="form-control" readonly required>
+                                    </div>
+
+                                    <div>
+                                        <label class="lbl">Gold Grams Credited</label>
+                                        <input type="number" step="0.000001" min="0" name="gold_weight_grams"
+                                               id="gold_weight_grams" class="form-control" readonly required>
+                                    </div>
+
+                                    <input type="hidden" name="gold_rate_effective_from" id="gold_rate_effective_from">
+
+                                    <div class="gold-credit-help" id="goldCreditHelp">
+                                        Gold grams are calculated from the paid installment amount only:
+                                        Paid Amount ÷ Rate per Gram. Penalty is not converted to gold.
+                                    </div>
+                                </div>
+                            <?php endif; ?>
                             <div class="s4"><label class="lbl">Payment Method</label><select name="payment_method_id"
                                     class="form-select">
                                     <option value="">Select method</option><?php foreach ($methods as $pm): ?>
@@ -339,7 +426,190 @@ $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
         </div>
     </main><?php include 'includes/script.php'; ?>
     <script src="assets/js/script.js"></script>
-    <script>(() => { const f = document.getElementById('collectForm'), p = document.getElementById('paid_amount'), d = document.getElementById('discount_amount'), pen = document.getElementById('penalty_amount'), n = document.getElementById('net_amount'); function calc() { n.value = Math.max(0, Number(p?.value || 0) + Number(pen?.value || 0) - Number(d?.value || 0)).toFixed(2) } [p, d, pen].forEach(x => x?.addEventListener('input', calc)); calc(); f?.addEventListener('submit', async e => { e.preventDefault(); const b = document.getElementById('saveBtn'), old = b.innerHTML; b.disabled = true; b.innerHTML = 'Saving...'; try { const r = await fetch('api/chit-collection-save.php', { method: 'POST', body: new FormData(f), credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest' } }); const t = await r.text(); let j; try { j = JSON.parse(t) } catch (_) { throw new Error(t || 'Invalid API response.') } if (!r.ok || !j.success) throw new Error(j.message || 'Unable to save collection.'); location.href = 'chit-members.php?group_id=' + <?= $groupId ?> + '&msg=payment_collected' } catch (err) { const x = document.createElement('div'); x.className = 'theme-toast theme-toast-error'; x.textContent = err.message; document.body.appendChild(x); requestAnimationFrame(() => x.classList.add('show')); setTimeout(() => x.remove(), 3500) } finally { b.disabled = false; b.innerHTML = old } }) })();</script>
+    <script>
+    (() => {
+        const form = document.getElementById('collectForm');
+        const paid = document.getElementById('paid_amount');
+        const discount = document.getElementById('discount_amount');
+        const penalty = document.getElementById('penalty_amount');
+        const net = document.getElementById('net_amount');
+        const collectionDate = document.getElementById('collection_date');
+        const goldMetal = document.getElementById('gold_metal_id');
+        const goldRate = document.getElementById('gold_rate_per_gram');
+        const goldWeight = document.getElementById('gold_weight_grams');
+        const goldEffective = document.getElementById('gold_rate_effective_from');
+        const goldHelp = document.getElementById('goldCreditHelp');
+        let rateTimer = null;
+
+        function toast(type, message) {
+            const item = document.createElement('div');
+            item.className = 'theme-toast theme-toast-' + type;
+            item.innerHTML = '<i class="fa-solid ' +
+                (type === 'success' ? 'fa-circle-check' : 'fa-circle-exclamation') +
+                ' me-2"></i><span></span>';
+            item.querySelector('span').textContent = message;
+            document.body.appendChild(item);
+            requestAnimationFrame(() => item.classList.add('show'));
+            setTimeout(() => {
+                item.classList.remove('show');
+                setTimeout(() => item.remove(), 250);
+            }, 3500);
+        }
+
+        function calculateNet() {
+            net.value = Math.max(
+                0,
+                Number(paid?.value || 0) +
+                Number(penalty?.value || 0) -
+                Number(discount?.value || 0)
+            ).toFixed(2);
+
+            calculateGoldWeight();
+        }
+
+        function calculateGoldWeight() {
+            if (!goldWeight || !goldRate) return;
+
+            const paidAmount = Number(paid?.value || 0);
+            const rate = Number(goldRate.value || 0);
+
+            goldWeight.value = paidAmount > 0 && rate > 0
+                ? (paidAmount / rate).toFixed(6)
+                : '';
+        }
+
+        async function loadGoldRate() {
+            if (!goldMetal || !goldRate || !goldWeight) return;
+
+            const metalId = Number(goldMetal.value || 0);
+            const selectedDate = collectionDate?.value || '';
+
+            goldRate.value = '';
+            goldWeight.value = '';
+            if (goldEffective) goldEffective.value = '';
+
+            if (!(metalId > 0) || !selectedDate) {
+                if (goldHelp) {
+                    goldHelp.textContent = 'Select gold metal and collection date to load the applicable rate.';
+                }
+                return;
+            }
+
+            clearTimeout(rateTimer);
+            rateTimer = setTimeout(async () => {
+                const data = new FormData();
+                data.append('action', 'gold_rate_preview');
+                data.append('csrf_token', <?= json_encode($csrf) ?>);
+                data.append('member_id', <?= (int)$memberId ?>);
+                data.append('group_id', <?= (int)$groupId ?>);
+                data.append('gold_metal_id', String(metalId));
+                data.append('collection_date', selectedDate);
+
+                try {
+                    const response = await fetch('api/chit-collection-save.php', {
+                        method: 'POST',
+                        body: data,
+                        credentials: 'same-origin',
+                        headers: {'X-Requested-With': 'XMLHttpRequest'}
+                    });
+
+                    const result = await response.json().catch(() => ({
+                        success: false,
+                        message: 'Invalid API response.'
+                    }));
+
+                    if (!response.ok || !result.success) {
+                        throw new Error(result.message || 'Unable to load gold rate.');
+                    }
+
+                    goldRate.value = Number(result.rate_per_gram || 0).toFixed(2);
+                    if (goldEffective) goldEffective.value = result.effective_from || '';
+                    calculateGoldWeight();
+
+                    if (goldHelp) {
+                        goldHelp.textContent =
+                            'Rate effective from ' + (result.effective_from_display || result.effective_from) +
+                            '. Gold grams use paid amount only; penalty is excluded.';
+                    }
+                } catch (error) {
+                    if (goldHelp) goldHelp.textContent = error.message;
+                    toast('error', error.message);
+                }
+            }, 180);
+        }
+
+        [paid, discount, penalty].forEach(element => {
+            element?.addEventListener('input', calculateNet);
+        });
+
+        collectionDate?.addEventListener('change', loadGoldRate);
+        collectionDate?.addEventListener('input', loadGoldRate);
+        goldMetal?.addEventListener('change', loadGoldRate);
+
+        calculateNet();
+
+        if (goldMetal && goldMetal.options.length === 2) {
+            goldMetal.selectedIndex = 1;
+            loadGoldRate();
+        }
+
+        form?.addEventListener('submit', async event => {
+            event.preventDefault();
+
+            if (goldMetal) {
+                if (!(Number(goldMetal.value || 0) > 0)) {
+                    toast('error', 'Select the gold metal and purity.');
+                    goldMetal.focus();
+                    return;
+                }
+
+                if (!(Number(goldRate?.value || 0) > 0) || !(Number(goldWeight?.value || 0) > 0)) {
+                    toast('error', 'Gold rate is unavailable for the selected collection date.');
+                    return;
+                }
+            }
+
+            const button = document.getElementById('saveBtn');
+            const original = button.innerHTML;
+            button.disabled = true;
+            button.innerHTML = '<i class="fa-solid fa-spinner fa-spin me-1"></i>Saving...';
+
+            try {
+                const response = await fetch('api/chit-collection-save.php', {
+                    method: 'POST',
+                    body: new FormData(form),
+                    credentials: 'same-origin',
+                    headers: {'X-Requested-With': 'XMLHttpRequest'}
+                });
+
+                const result = await response.json().catch(() => ({
+                    success: false,
+                    message: 'Invalid API response.'
+                }));
+
+                if (!response.ok || !result.success) {
+                    throw new Error(result.message || 'Unable to save collection.');
+                }
+
+                toast(
+                    'success',
+                    result.gold_weight_grams
+                        ? result.message + ' Gold credited: ' + Number(result.gold_weight_grams).toFixed(6) + ' g'
+                        : result.message
+                );
+
+                setTimeout(() => {
+                    location.href = 'chit-members.php?group_id=<?= (int)$groupId ?>&msg=payment_collected';
+                }, 700);
+            } catch (error) {
+                toast('error', error.message);
+            } finally {
+                button.disabled = false;
+                button.innerHTML = original;
+            }
+        });
+    })();
+    </script>
 </body>
 
 </html>

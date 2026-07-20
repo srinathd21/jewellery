@@ -359,6 +359,26 @@ foreach ($metalStock as $metal) {
   }
 }
 
+
+$purchaseSummary = dbOne($conn, "
+    SELECT
+        COALESCE(SUM(CASE
+            WHEN purchase_date >= '{$currentMonthStart}'
+             AND purchase_date < '{$nextMonthStart}'
+             AND workflow_status <> 'Cancelled'
+            THEN grand_total ELSE 0 END),0) AS current_purchases,
+        COALESCE(SUM(CASE
+            WHEN workflow_status <> 'Cancelled'
+            THEN balance_amount ELSE 0 END),0) AS supplier_outstanding,
+        COUNT(CASE
+            WHEN workflow_status <> 'Cancelled'
+             AND balance_amount > 0
+            THEN 1 END) AS unpaid_purchases
+    FROM purchases
+    WHERE business_id{$scopeBusiness}
+      " . ($branchId > 0 ? "AND branch_id = {$branchId}" : '') . "
+");
+
 $pendingOrders = dbOne($conn, "
     SELECT COUNT(*) AS pending_count, COALESCE(SUM(making_charge),0) AS pending_value
     FROM karigar_orders
@@ -457,6 +477,25 @@ foreach ($chartValues as $index => $value) {
   $chartPoints[] = round($x, 2) . ',' . round($y, 2);
 }
 $chartPointString = implode(' ', $chartPoints);
+
+/*
+ * ERP page URL map used by this dashboard:
+ * Dashboard       : index.php
+ * New Sale        : billing.php
+ * Sales List      : sales-list.php
+ * Sale View       : sales-view.php?id={id}
+ * Customers       : customers.php
+ * Customer View   : customer-view.php?id={id}
+ * Products        : products.php
+ * Stock Overview  : stock-overview.php
+ * Add Purchase    : purchase-add.php
+ * Purchase List   : purchases.php
+ * Purchase View   : purchase-view.php?id={id}
+ * Purchase Edit   : purchase-edit.php?id={id}
+ * Suppliers       : suppliers.php
+ * Payment History : payment-history.php
+ * Reports         : sales-report.php, report-purchase.php, reports-stock.php
+ */
 
 $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
 $branchName = (string) ($_SESSION['branch_name'] ?? '');
@@ -626,6 +665,22 @@ $branchName = (string) ($_SESSION['branch_name'] ?? '');
     .dashboard-context {
       font-size: 11px;
       color: var(--muted-color);
+    }
+
+    .dashboard-quick-actions .mini-btn {
+      display:inline-flex;
+      align-items:center;
+      min-height:34px;
+      white-space:nowrap;
+    }
+
+    @media (max-width: 767.98px) {
+      .dashboard-quick-actions .d-flex:last-child {
+        width:100%;
+        overflow-x:auto;
+        flex-wrap:nowrap!important;
+        padding-bottom:3px;
+      }
     }
 
 
@@ -856,6 +911,26 @@ $branchName = (string) ($_SESSION['branch_name'] ?? '');
     <?php include('includes/nav.php'); ?>
 
     <div class="content-wrap">
+
+      <div class="card-panel mb-2 p-2 dashboard-quick-actions">
+        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
+          <div>
+            <div class="fw-bold">Quick Actions</div>
+            <div class="dashboard-context">Open frequently used ERP pages.</div>
+          </div>
+          <div class="d-flex flex-wrap gap-2">
+            <a href="billing.php" class="mini-btn text-decoration-none"><i class="fa-solid fa-file-invoice me-1"></i>New Sale</a>
+            <a href="sales-list.php" class="mini-btn text-decoration-none"><i class="fa-solid fa-list me-1"></i>Sales List</a>
+            <a href="purchase-add.php" class="mini-btn text-decoration-none"><i class="fa-solid fa-cart-plus me-1"></i>Add Purchase</a>
+            <a href="purchases.php" class="mini-btn text-decoration-none"><i class="fa-solid fa-bag-shopping me-1"></i>Purchases</a>
+            <a href="products.php" class="mini-btn text-decoration-none"><i class="fa-solid fa-box me-1"></i>Products</a>
+            <a href="suppliers.php" class="mini-btn text-decoration-none"><i class="fa-solid fa-handshake me-1"></i>Suppliers</a>
+            <a href="customers.php" class="mini-btn text-decoration-none"><i class="fa-solid fa-user me-1"></i>Customers</a>
+            <a href="stock-overview.php" class="mini-btn text-decoration-none"><i class="fa-solid fa-warehouse me-1"></i>Stock</a>
+            <a href="payment-history.php" class="mini-btn text-decoration-none"><i class="fa-solid fa-clock-rotate-left me-1"></i>Payments</a>
+          </div>
+        </div>
+      </div>
      
 
       <section class="row g-2">
@@ -909,12 +984,16 @@ $branchName = (string) ($_SESSION['branch_name'] ?? '');
         </div>
         <div class="col-12 col-sm-6 col-xl-2">
           <div class="card-panel metric-card d-flex gap-2">
-            <div class="metric-icon"><i class="fa-regular fa-clipboard"></i></div>
+            <div class="metric-icon"><i class="fa-solid fa-cart-shopping"></i></div>
             <div>
-              <p class="metric-label">Pending Orders</p>
-              <div class="metric-value"><?php echo (int) ($pendingOrders['pending_count'] ?? 0); ?></div>
-              <div class="metric-meta <?php echo !$canViewValue ? 'masked-value' : ''; ?>">
-                <?php echo e(maskedValue($canViewValue, moneyInr((float) ($pendingOrders['pending_value'] ?? 0), $currency) . ' Value')); ?>
+              <p class="metric-label">Monthly Purchases</p>
+              <div class="metric-value <?php echo !$canViewValue ? 'masked-value' : ''; ?>">
+                <?php echo e(maskedValue($canViewValue, moneyInr((float) ($purchaseSummary['current_purchases'] ?? 0), $currency))); ?>
+              </div>
+              <div class="metric-meta">
+                <a href="purchases.php" class="text-decoration-none" style="color:inherit">
+                  <?php echo (int) ($purchaseSummary['unpaid_purchases'] ?? 0); ?> unpaid purchase(s)
+                </a>
               </div>
             </div>
           </div>
@@ -978,7 +1057,7 @@ $branchName = (string) ($_SESSION['branch_name'] ?? '');
           <div class="card-panel h-100">
             <div class="section-head">
               <h2 class="section-title">Recent Invoices</h2><?php if ($canView): ?><a
-                  class="mini-btn text-decoration-none" href="sales.php">View All</a><?php endif; ?>
+                  class="mini-btn text-decoration-none" href="sales-list.php">View All</a><?php endif; ?>
             </div>
             <div class="table-responsive">
               <table class="table invoice-table">
@@ -1003,7 +1082,13 @@ $branchName = (string) ($_SESSION['branch_name'] ?? '');
                   <?php else:
                     foreach ($recentInvoices as $invoice): ?>
                       <tr>
-                        <td><?php echo e($invoice['invoice_no']); ?></td>
+                        <td>
+                          <a href="sales-view.php?id=<?php echo (int) $invoice['id']; ?>"
+                             class="text-decoration-none fw-semibold"
+                             style="color:var(--primary-dark)">
+                            <?php echo e($invoice['invoice_no']); ?>
+                          </a>
+                        </td>
                         <td><?php echo e($invoice['customer_name'] ?: 'Walk-in Customer'); ?></td>
                         <td><?php echo e(date('d M Y', strtotime($invoice['invoice_date']))); ?></td>
                         <td class="<?php echo !$canViewValue ? 'masked-value' : ''; ?>">
@@ -1035,7 +1120,13 @@ $branchName = (string) ($_SESSION['branch_name'] ?? '');
                   <div class="customer-item">
                     <div class="customer-avatar"><?php echo e(initials($customer['customer_name'])); ?></div>
                     <div class="flex-grow-1 overflow-hidden">
-                      <div class="fw-semibold text-truncate"><?php echo e($customer['customer_name']); ?></div>
+                      <div class="fw-semibold text-truncate">
+                        <a href="customer-view.php?id=<?php echo (int) $customer['id']; ?>"
+                           class="text-decoration-none"
+                           style="color:inherit">
+                          <?php echo e($customer['customer_name']); ?>
+                        </a>
+                      </div>
                       <div class="small-muted text-truncate"><?php echo e($customer['email'] ?: 'No email'); ?></div>
                     </div>
                     <div class="text-end">
@@ -1086,7 +1177,7 @@ $branchName = (string) ($_SESSION['branch_name'] ?? '');
           <div class="card-panel h-100">
             <div class="section-head">
               <h2 class="section-title">Inventory Summary</h2><?php if ($canView): ?><a
-                  class="mini-btn text-decoration-none" href="stock.php">View All</a><?php endif; ?>
+                  class="mini-btn text-decoration-none" href="stock-overview.php">View Stock</a><?php endif; ?>
             </div>
             <div class="section-body">
               <div class="row g-2">

@@ -44,6 +44,7 @@ if (empty($_SESSION['products_csrf']))
 $csrfToken = $_SESSION['products_csrf'];
 $categories = [];
 $metals = [];
+$units = [];
 foreach ([['SELECT id,category_name name FROM product_categories WHERE business_id=? AND is_active=1 ORDER BY category_name', 'categories'], ['SELECT id,metal_name name FROM metals WHERE business_id=? AND is_active=1 ORDER BY metal_name', 'metals']] as $q) {
     $stmt = $conn->prepare($q[0]);
     if ($stmt) {
@@ -54,6 +55,17 @@ foreach ([['SELECT id,category_name name FROM product_categories WHERE business_
             ${$q[1]}[] = $x;
         $stmt->close();
     }
+}
+
+$stmt = $conn->prepare('SELECT id, unit_name name FROM units WHERE business_id=? AND is_active=1 ORDER BY unit_name');
+if ($stmt) {
+    $stmt->bind_param('i', $businessId);
+    $stmt->execute();
+    $r = $stmt->get_result();
+    while ($x = $r->fetch_assoc()) {
+        $units[] = $x;
+    }
+    $stmt->close();
 }
 $theme = ['primary_color' => '#d89416', 'primary_dark_color' => '#b86a0b', 'primary_soft_color' => '#fff6e5', 'page_background' => '#f4f3f0', 'card_background' => '#fff', 'text_color' => '#171717', 'muted_text_color' => '#7d8794', 'border_color' => '#e8e8e8', 'font_family' => 'Inter', 'heading_font_family' => 'Playfair Display', 'border_radius_px' => 12, 'sidebar_width_px' => 230, 'sidebar_gradient_1' => '#171c21', 'sidebar_gradient_2' => '#20272d', 'sidebar_gradient_3' => '#101419'];
 $stmt = $conn->prepare('SELECT * FROM business_theme_settings WHERE business_id=? LIMIT 1');
@@ -233,7 +245,7 @@ $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
                     <div>
                         <div class="form-title">Add Product</div>
                         <div class="small text-muted">Create a jewellery product master record.</div>
-                    </div><a href="products.php" class="btn btn-light btn-sm"><i
+                    </div><a href="products.php" class="btn btn-light btn-sm js-leave-link"><i
                             class="fa-solid fa-arrow-left me-2"></i>Back</a>
                 </div><input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>"><input type="hidden"
                     name="action" value="save"><input type="hidden" name="product_id" value="0">
@@ -271,12 +283,14 @@ $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
                         </div>
 
                         <div class="col-md-3">
-                            <label class="field-label">Unit</label>
-                            <input class="form-control" type="text" name="unit_name" maxlength="50"
-                                placeholder="Example: Gram, Piece, Pair">
-                            <div class="small text-muted mt-1">
-
-                            </div>
+                            <label class="field-label">Unit *</label>
+                            <select class="form-select" name="unit_id" required>
+                                <option value="">Select unit</option>
+                                <?php foreach ($units as $unit): ?>
+                                    <option value="<?= (int) $unit['id'] ?>"><?= e($unit['name']) ?></option>
+                                <?php endforeach ?>
+                            </select>
+                            
                         </div>
 
                         <div class="col-md-2">
@@ -364,15 +378,221 @@ $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
                         </div>
                     </div>
                 </div>
-                <div class="section text-end"><a href="products.php" class="btn btn-light btn-sm me-2">Cancel</a><button
+                <div class="section text-end"><a href="products.php" class="btn btn-light btn-sm me-2 js-leave-link">Cancel</a><button
                         class="btn btn-theme" id="saveBtn"><i class="fa-solid fa-floppy-disk me-2"></i>Save
                         Product</button></div>
             </form><?php include('includes/footer.php'); ?>
         </div>
-    </main><?php include('includes/script.php'); ?>
+    </main>
+    <div class="modal fade" id="unsavedChangesModal" tabindex="-1" aria-labelledby="unsavedChangesTitle" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content" style="border-radius:14px;border:1px solid var(--line);">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="unsavedChangesTitle"><i class="fa-solid fa-triangle-exclamation text-warning me-2"></i>Unsaved Changes</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div id="unsavedChangesMessage">
+                        You have entered product information that has not been saved. Leaving this page will discard those changes.
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-light btn-sm" data-bs-dismiss="modal">Stay on Page</button>
+                    <button type="button" class="btn btn-danger btn-sm" id="discardChangesBtn">Discard and Leave</button>
+                </div>
+            </div>
+        </div>
+    </div>
+<?php include('includes/script.php'); ?>
     <script src="assets/js/script.js"></script>
     <script>
-        (() => { const f = document.getElementById('productForm'), b = document.getElementById('saveBtn'); function toast(t, m) { const x = document.createElement('div'); x.className = 'theme-toast theme-toast-' + t; x.textContent = m; document.body.appendChild(x); requestAnimationFrame(() => x.classList.add('show')); setTimeout(() => { x.classList.remove('show'); setTimeout(() => x.remove(), 250) }, 3000) } document.querySelectorAll('.weight').forEach(x => x.addEventListener('input', () => { const g = parseFloat(f.gross_weight.value) || 0, s = parseFloat(f.stone_weight.value) || 0; f.net_weight.value = Math.max(0, g - s).toFixed(3) })); document.getElementById('image').addEventListener('change', e => { const file = e.target.files[0]; if (!file) return; const img = document.createElement('img'); img.src = URL.createObjectURL(file); document.getElementById('preview').replaceChildren(img) }); f.addEventListener('submit', async e => { e.preventDefault(); const unit = (f.unit_name?.value || '').trim(); if (!unit) { toast('error', 'Enter the product unit.'); f.unit_name?.focus(); return; } const old = b.innerHTML; b.disabled = true; b.innerHTML = '<i class="fa-solid fa-spinner fa-spin me-2"></i>Saving...'; try { const r = await fetch('api/products-save.php', { method: 'POST', body: new FormData(f), credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest' } }), j = await r.json().catch(() => ({ success: false, message: 'Invalid server response.' })); if (!r.ok || !j.success) throw new Error(j.message || 'Unable to save product.'); toast('success', j.message); setTimeout(() => location.href = 'products.php', 600) } catch (x) { toast('error', x.message) } finally { b.disabled = false; b.innerHTML = old } }) })();
+        (() => {
+            const form = document.getElementById('productForm');
+            const saveButton = document.getElementById('saveBtn');
+            const discardButton = document.getElementById('discardChangesBtn');
+            const modalElement = document.getElementById('unsavedChangesModal');
+            const modalMessage = document.getElementById('unsavedChangesMessage');
+            let isDirty = false;
+            let isSubmitting = false;
+            let pendingUrl = null;
+            let pendingAction = 'leave';
+            let handlingPopState = false;
+            const unsavedModal = modalElement && window.bootstrap ? new bootstrap.Modal(modalElement, { backdrop: 'static', keyboard: false }) : null;
+
+            function toast(type, message) {
+                const element = document.createElement('div');
+                element.className = 'theme-toast theme-toast-' + type;
+                element.textContent = message;
+                document.body.appendChild(element);
+                requestAnimationFrame(() => element.classList.add('show'));
+                setTimeout(() => { element.classList.remove('show'); setTimeout(() => element.remove(), 250); }, 3000);
+            }
+
+            function markDirty() { if (!isSubmitting) isDirty = true; }
+
+            function hasEnteredValue() {
+                return Array.from(form.querySelectorAll('input, select, textarea')).some(control => {
+                    if (['hidden', 'submit', 'button'].includes(control.type)) return false;
+                    if (control.type === 'checkbox' || control.type === 'radio') return control.checked !== control.defaultChecked;
+                    if (control.type === 'file') return control.files && control.files.length > 0;
+                    if (control.tagName === 'SELECT') return control.value !== '';
+                    return String(control.value || '').trim() !== String(control.defaultValue || '').trim();
+                });
+            }
+
+            function shouldWarn() { return !isSubmitting && (isDirty || hasEnteredValue()); }
+
+            function showUnsavedModal(action = 'leave', url = null) {
+                pendingAction = action;
+                pendingUrl = url;
+
+                if (modalMessage) {
+                    modalMessage.textContent = action === 'refresh'
+                        ? 'You have entered product information that has not been saved. Refreshing this page will discard those changes.'
+                        : 'You have entered product information that has not been saved. Leaving this page will discard those changes.';
+                }
+
+                if (discardButton) {
+                    discardButton.textContent = action === 'refresh'
+                        ? 'Discard and Refresh'
+                        : 'Discard and Leave';
+                }
+
+                unsavedModal?.show();
+            }
+
+            function requestLeave(url = null) {
+                if (!shouldWarn()) {
+                    isSubmitting = true;
+                    if (url) window.location.href = url; else history.back();
+                    return;
+                }
+
+                showUnsavedModal('leave', url);
+            }
+
+            function requestRefresh() {
+                if (!shouldWarn()) {
+                    isSubmitting = true;
+                    window.location.reload();
+                    return;
+                }
+
+                showUnsavedModal('refresh');
+            }
+
+            document.querySelectorAll('.weight').forEach(input => {
+                input.addEventListener('input', () => {
+                    const gross = parseFloat(form.gross_weight.value) || 0;
+                    const stone = parseFloat(form.stone_weight.value) || 0;
+                    form.net_weight.value = Math.max(0, gross - stone).toFixed(3);
+                    markDirty();
+                });
+            });
+
+            document.getElementById('image').addEventListener('change', event => {
+                const file = event.target.files[0];
+                if (!file) return;
+                const image = document.createElement('img');
+                image.src = URL.createObjectURL(file);
+                document.getElementById('preview').replaceChildren(image);
+                markDirty();
+            });
+
+            form.querySelectorAll('input, select, textarea').forEach(control => {
+                control.addEventListener('input', markDirty);
+                control.addEventListener('change', markDirty);
+            });
+
+            document.querySelectorAll('.js-leave-link').forEach(link => {
+                link.addEventListener('click', event => {
+                    if (!shouldWarn()) return;
+                    event.preventDefault();
+                    requestLeave(link.href);
+                });
+            });
+
+            discardButton?.addEventListener('click', () => {
+                isDirty = false;
+                isSubmitting = true;
+                unsavedModal?.hide();
+
+                if (pendingAction === 'refresh') {
+                    window.location.reload();
+                    return;
+                }
+
+                if (pendingUrl) {
+                    window.location.href = pendingUrl;
+                } else {
+                    handlingPopState = true;
+                    history.back();
+                }
+            });
+
+            history.pushState({ productFormGuard: true }, '', window.location.href);
+            window.addEventListener('popstate', () => {
+                if (handlingPopState || isSubmitting) return;
+                if (shouldWarn()) {
+                    history.pushState({ productFormGuard: true }, '', window.location.href);
+                    showUnsavedModal('leave', null);
+                }
+            });
+
+            // F5, Ctrl+R and Cmd+R can be intercepted and shown using the Bootstrap modal.
+            document.addEventListener('keydown', event => {
+                const key = String(event.key || '').toLowerCase();
+                const isRefreshShortcut =
+                    key === 'f5' ||
+                    ((event.ctrlKey || event.metaKey) && key === 'r');
+
+                if (!isRefreshShortcut) return;
+
+                event.preventDefault();
+                requestRefresh();
+            });
+
+            // Browser toolbar refresh and closing the tab cannot display a custom
+            // Bootstrap modal. Browsers only permit their own built-in confirmation.
+            window.addEventListener('beforeunload', event => {
+                if (!shouldWarn()) return;
+                event.preventDefault();
+                event.returnValue = '';
+            });
+
+            form.addEventListener('submit', async event => {
+                event.preventDefault();
+                const unitId = parseInt(form.unit_id?.value || '0', 10);
+                if (!(unitId > 0)) {
+                    toast('error', 'Select the product unit.');
+                    form.unit_id?.focus();
+                    return;
+                }
+                const oldContent = saveButton.innerHTML;
+                isSubmitting = true;
+                saveButton.disabled = true;
+                saveButton.innerHTML = '<i class="fa-solid fa-spinner fa-spin me-2"></i>Saving...';
+                try {
+                    const response = await fetch('api/products-save.php', {
+                        method: 'POST',
+                        body: new FormData(form),
+                        credentials: 'same-origin',
+                        headers: { 'X-Requested-With': 'XMLHttpRequest' }
+                    });
+                    const result = await response.json().catch(() => ({ success: false, message: 'Invalid server response.' }));
+                    if (!response.ok || !result.success) throw new Error(result.message || 'Unable to save product.');
+                    isDirty = false;
+                    toast('success', result.message);
+                    setTimeout(() => { window.location.href = 'products.php'; }, 600);
+                } catch (error) {
+                    isSubmitting = false;
+                    toast('error', error.message);
+                } finally {
+                    saveButton.disabled = false;
+                    saveButton.innerHTML = oldContent;
+                }
+            });
+        })();
     </script>
 </body>
 

@@ -1,658 +1,189 @@
 <?php
-if (session_status() === PHP_SESSION_NONE) {
+if (session_status() === PHP_SESSION_NONE)
     session_start();
-}
-
-date_default_timezone_set((string)($_SESSION['timezone'] ?? 'Asia/Kolkata'));
-
-foreach ([
-    __DIR__ . '/config/config.php',
-    __DIR__ . '/config.php',
-    __DIR__ . '/includes/config.php',
-    __DIR__ . '/super-admin/includes/config.php',
-] as $configFile) {
-    if (is_file($configFile)) {
-        require_once $configFile;
+date_default_timezone_set((string) ($_SESSION['timezone'] ?? 'Asia/Kolkata'));
+foreach ([__DIR__ . '/config/config.php', __DIR__ . '/config.php', __DIR__ . '/includes/config.php', __DIR__ . '/super-admin/includes/config.php'] as $f) {
+    if (is_file($f)) {
+        require_once $f;
         break;
     }
 }
-
-if (!isset($conn) || !($conn instanceof mysqli)) {
+if (!isset($conn) || !($conn instanceof mysqli))
     die('Database configuration is not available.');
-}
-
 $conn->set_charset('utf8mb4');
-
-if (empty($_SESSION['user_id'])) {
-    header('Location: login.php');
-    exit;
+if (empty($_SESSION['user_id']))
+    die('Session expired.');
+foreach ([__DIR__ . '/vendor/autoload.php', __DIR__ . '/fpdf/fpdf.php', __DIR__ . '/includes/fpdf/fpdf.php', __DIR__ . '/libs/fpdf/fpdf.php'] as $f) {
+    if (is_file($f)) {
+        require_once $f;
+        break;
+    }
 }
-
-function e($value): string
+if (!class_exists('FPDF'))
+    die('FPDF library not found.');
+function rows(mysqli $c, string $sql, string $types = '', array $params = []): array
 {
-    return htmlspecialchars((string)($value ?? ''), ENT_QUOTES, 'UTF-8');
+    $s = $c->prepare($sql);
+    if (!$s)
+        throw new RuntimeException($c->error);
+    if ($types !== '') {
+        $a = [$types];
+        foreach ($params as $k => $v)
+            $a[] =& $params[$k];
+        call_user_func_array([$s, 'bind_param'], $a);
+    }
+    if (!$s->execute())
+        throw new RuntimeException($s->error);
+    $r = $s->get_result();
+    $o = [];
+    while ($x = $r->fetch_assoc())
+        $o[] = $x;
+    $s->close();
+    return $o;
 }
-
-$businessId = (int)($_SESSION['business_id'] ?? 0);
-$branchId = (int)($_SESSION['branch_id'] ?? ($_SESSION['default_branch_id'] ?? 0));
-$estimateId = (int)($_GET['id'] ?? 0);
-
-if ($businessId <= 0 || $branchId <= 0) {
-    die('A valid business and branch must be selected.');
+function txt($v)
+{
+    $v = str_replace(['₹', '–', '—'], ['Rs. ', '-', '-'], (string) ($v ?? ''));
+    $x = @iconv('UTF-8', 'windows-1252//TRANSLIT//IGNORE', $v);
+    return $x !== false ? $x : $v;
 }
-
-if ($estimateId <= 0) {
-    die('Invalid estimate ID.');
+$businessId = (int) ($_SESSION['business_id'] ?? 0);
+$estimateId = (int) ($_GET['id'] ?? 0);
+if ($businessId <= 0 || $estimateId <= 0)
+    die('Invalid estimate.');
+try {
+    $er = rows($conn, "SELECT e.*,c.customer_code,c.email,c.gstin customer_gstin,c.address_line1,c.address_line2,c.city,c.state,c.pincode,b.business_name,b.legal_name,b.mobile business_mobile,b.email business_email,b.website,b.gstin business_gstin,br.branch_name,br.mobile branch_mobile,br.email branch_email,br.address_line1 branch_address1,br.address_line2 branch_address2,br.city branch_city,br.state branch_state,br.pincode branch_pincode,br.gstin branch_gstin FROM estimates e LEFT JOIN customers c ON c.id=e.customer_id LEFT JOIN businesses b ON b.id=e.business_id LEFT JOIN branches br ON br.id=e.branch_id WHERE e.id=? AND e.business_id=? LIMIT 1", 'ii', [$estimateId, $businessId]);
+    if (!$er)
+        die('Estimate not found.');
+    $e = $er[0];
+    $items = rows($conn, 'SELECT * FROM estimate_items WHERE estimate_id=? AND business_id=? ORDER BY sort_order,id', 'ii', [$estimateId, $businessId]);
+    $pays = rows($conn, 'SELECT ep.*,pm.method_name FROM estimate_payments ep LEFT JOIN payment_methods pm ON pm.id=ep.payment_method_id WHERE ep.estimate_id=? AND ep.business_id=? ORDER BY ep.id', 'ii', [$estimateId, $businessId]);
+    $claims = rows($conn, "SELECT ec.*,cg.group_name,cg.group_no,cm.ticket_no FROM estimate_chit_claims ec LEFT JOIN chit_groups cg ON cg.id=ec.chit_group_id LEFT JOIN chit_members cm ON cm.id=ec.chit_member_id WHERE ec.estimate_id=? AND ec.business_id=?", 'ii', [$estimateId, $businessId]);
+    $ex = rows($conn, 'SELECT * FROM estimate_exchange_items WHERE estimate_id=? AND business_id=? ORDER BY id', 'ii', [$estimateId, $businessId]);
+    $settings = rows($conn, "SELECT * FROM invoice_settings WHERE business_id=? AND (branch_id=? OR branch_id IS NULL) AND document_type='Estimate' AND is_active=1 ORDER BY (branch_id=?) DESC,is_default DESC,id DESC LIMIT 1", 'iii', [$businessId, (int) $e['branch_id'], (int) $e['branch_id']]);
+    if (!$settings)
+        $settings = rows($conn, "SELECT * FROM invoice_settings WHERE business_id=? AND (branch_id=? OR branch_id IS NULL) AND document_type='Invoice' AND is_active=1 ORDER BY (branch_id=?) DESC,is_default DESC,id DESC LIMIT 1", 'iii', [$businessId, (int) $e['branch_id'], (int) $e['branch_id']]);
+    $set = $settings ? $settings[0] : [];
+} catch (Throwable $x) {
+    die('Unable to build estimate: ' . htmlspecialchars($x->getMessage()));
 }
-
-if (empty($_SESSION['estimate_print_csrf'])) {
-    $_SESSION['estimate_print_csrf'] = bin2hex(random_bytes(32));
+$paper = $set['paper_size'] ?? 'A4';
+$orientation = ($set['orientation'] ?? 'Portrait') === 'Landscape' ? 'L' : 'P';
+if ($paper === '80mm') {
+    $size = [80, 220];
+    $orientation = 'P';
+} elseif ($paper === '58mm') {
+    $size = [58, 220];
+    $orientation = 'P';
+} elseif ($paper === 'Custom' && !empty($set['custom_width_mm']) && !empty($set['custom_height_mm'])) {
+    $size = [(float) $set['custom_width_mm'], (float) $set['custom_height_mm']];
+} else {
+    $size = $paper;
 }
-
-$csrfToken = (string)$_SESSION['estimate_print_csrf'];
-
-$theme = [
-    'primary_color' => '#d89416',
-    'primary_dark_color' => '#b86a0b',
-    'primary_soft_color' => '#fff6e5',
-    'page_background' => '#f4f3f0',
-    'card_background' => '#ffffff',
-    'text_color' => '#171717',
-    'muted_text_color' => '#7d8794',
-    'border_color' => '#e8e8e8',
-    'font_family' => 'Inter',
-    'heading_font_family' => 'Playfair Display',
-    'border_radius_px' => 12,
-    'sidebar_width_px' => 230,
-    'sidebar_gradient_1' => '#171c21',
-    'sidebar_gradient_2' => '#20272d',
-    'sidebar_gradient_3' => '#101419',
-];
-
-$stmt = $conn->prepare('SELECT * FROM business_theme_settings WHERE business_id = ? LIMIT 1');
-if ($stmt) {
-    $stmt->bind_param('i', $businessId);
-    $stmt->execute();
-    $row = $stmt->get_result()->fetch_assoc() ?: [];
-    $stmt->close();
-
-    foreach ($theme as $key => $defaultValue) {
-        if (isset($row[$key]) && $row[$key] !== '') {
-            $theme[$key] = $row[$key];
+class EstimatePDF extends FPDF
+{
+    public $footerText = '';
+    function Footer()
+    {
+        if ($this->footerText !== '') {
+            $this->SetY(-12);
+            $this->SetFont('Arial', '', 7);
+            $this->SetTextColor(100);
+            $this->MultiCell(0, 4, txt($this->footerText), 0, 'C');
         }
     }
 }
-
-$pageTitle = 'Estimate Print';
-$businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
-?>
-<!doctype html>
-<html lang="en">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title><?= e($businessName) ?> - Estimate Print</title>
-    <?php include('includes/links.php'); ?>
-
-    <style>
-        :root{
-            --primary:<?=e($theme['primary_color'])?>;
-            --primary-dark:<?=e($theme['primary_dark_color'])?>;
-            --primary-soft:<?=e($theme['primary_soft_color'])?>;
-            --page-bg:<?=e($theme['page_background'])?>;
-            --card-bg:<?=e($theme['card_background'])?>;
-            --text:<?=e($theme['text_color'])?>;
-            --muted:<?=e($theme['muted_text_color'])?>;
-            --line:<?=e($theme['border_color'])?>;
-            --radius:<?=(int)$theme['border_radius_px']?>px;
-            --sidebar-width:<?=(int)$theme['sidebar_width_px']?>px;
-            --sidebar-gradient-1:<?=e($theme['sidebar_gradient_1'])?>;
-            --sidebar-gradient-2:<?=e($theme['sidebar_gradient_2'])?>;
-            --sidebar-gradient-3:<?=e($theme['sidebar_gradient_3'])?>;
-        }
-
-        body{
-            background:var(--page-bg);
-            color:var(--text);
-            font-family:<?=json_encode($theme['font_family'])?>,sans-serif;
-        }
-
-        .sidebar{
-            background:linear-gradient(
-                180deg,
-                var(--sidebar-gradient-1),
-                var(--sidebar-gradient-2),
-                var(--sidebar-gradient-3)
-            )!important;
-        }
-
-        .page-card{
-            background:var(--card-bg);
-            border:1px solid var(--line);
-            border-radius:var(--radius);
-        }
-
-        .page-head{
-            padding:15px 17px;
-            border-bottom:1px solid var(--line);
-            display:flex;
-            justify-content:space-between;
-            align-items:center;
-            gap:12px;
-        }
-
-        .page-title{
-            font:700 20px <?=json_encode($theme['heading_font_family'])?>,serif;
-        }
-
-        .btn-theme{
-            border:0;
-            border-radius:9px;
-            padding:9px 15px;
-            color:#fff;
-            background:linear-gradient(135deg,var(--primary),var(--primary-dark));
-            font-size:11px;
-            font-weight:700;
-            text-decoration:none;
-        }
-
-        .btn-soft{
-            border:1px solid var(--line);
-            border-radius:9px;
-            padding:9px 15px;
-            background:var(--card-bg);
-            color:var(--text);
-            font-size:11px;
-            font-weight:700;
-            text-decoration:none;
-        }
-
-        .estimate-sheet{
-            width:100%;
-            max-width:900px;
-            margin:0 auto;
-            background:#fff;
-            color:#171717;
-            border:1px solid #dedede;
-            border-radius:12px;
-            padding:28px;
-            box-shadow:0 8px 30px rgba(0,0,0,.05);
-        }
-
-        .company-name{
-            font:700 24px <?=json_encode($theme['heading_font_family'])?>,serif;
-            text-align:center;
-        }
-
-        .company-sub{
-            text-align:center;
-            font-size:11px;
-            color:#666;
-            margin-top:4px;
-        }
-
-        .estimate-label{
-            margin:18px 0;
-            padding:8px;
-            text-align:center;
-            font-size:14px;
-            font-weight:800;
-            letter-spacing:.12em;
-            border-top:2px solid #222;
-            border-bottom:2px solid #222;
-        }
-
-        .cancelled-label{
-            color:#b42318;
-            border-color:#b42318;
-        }
-
-        .info-grid{
-            display:grid;
-            grid-template-columns:1fr 1fr;
-            gap:0;
-            border:1px solid #dcdcdc;
-            margin-bottom:16px;
-        }
-
-        .info-cell{
-            padding:9px 11px;
-            border-bottom:1px solid #dcdcdc;
-            font-size:11px;
-        }
-
-        .info-cell:nth-child(odd){
-            border-right:1px solid #dcdcdc;
-        }
-
-        .info-label{
-            color:#777;
-            font-size:9px;
-            text-transform:uppercase;
-            margin-bottom:2px;
-        }
-
-        .info-value{
-            font-weight:700;
-        }
-
-        .print-table{
-            width:100%;
-            border-collapse:collapse;
-            font-size:10px;
-        }
-
-        .print-table th,
-        .print-table td{
-            border:1px solid #dcdcdc;
-            padding:7px;
-            vertical-align:middle;
-        }
-
-        .print-table th{
-            background:#f3f3f3;
-            text-transform:uppercase;
-            font-size:9px;
-        }
-
-        .summary-wrap{
-            display:grid;
-            grid-template-columns:1fr 330px;
-            gap:18px;
-            margin-top:16px;
-        }
-
-        .summary-table{
-            width:100%;
-            border-collapse:collapse;
-            font-size:10px;
-        }
-
-        .summary-table td{
-            border:1px solid #dcdcdc;
-            padding:7px 9px;
-        }
-
-        .summary-table td:last-child{
-            text-align:right;
-            font-weight:700;
-        }
-
-        .grand-row td{
-            font-size:12px;
-            font-weight:800;
-            background:#f5f5f5;
-        }
-
-        .section-title{
-            font-size:10px;
-            font-weight:800;
-            text-transform:uppercase;
-            margin-bottom:7px;
-        }
-
-        .payment-row{
-            display:flex;
-            justify-content:space-between;
-            gap:10px;
-            border-bottom:1px dashed #ccc;
-            padding:7px 0;
-            font-size:10px;
-        }
-
-        .signature-row{
-            display:flex;
-            justify-content:space-between;
-            margin-top:55px;
-            font-size:10px;
-        }
-
-        .loading-box{
-            padding:60px;
-            text-align:center;
-            color:var(--muted);
-        }
-
-        .error-box{
-            padding:25px;
-            text-align:center;
-            color:#b42318;
-        }
-
-        body.dark-mode,body[data-theme=dark]{
-            --page-bg:#0f151b;
-            --card-bg:#182129;
-            --text:#f3f6f8;
-            --muted:#9aa7b3;
-            --line:#2c3944;
-        }
-
-        @media(max-width:767px){
-            .summary-wrap{grid-template-columns:1fr}
-            .estimate-sheet{padding:14px}
-            .info-grid{grid-template-columns:1fr}
-            .info-cell:nth-child(odd){border-right:0}
-        }
-
-        @media print{
-            body{
-                background:#fff!important;
-            }
-
-            .sidebar,
-            .app-main > nav,
-            .print-toolbar,
-            footer{
-                display:none!important;
-            }
-
-            .app-main,
-            .content-wrap{
-                margin:0!important;
-                padding:0!important;
-                width:100%!important;
-            }
-
-            .page-card{
-                border:0!important;
-            }
-
-            .estimate-sheet{
-                max-width:none;
-                width:100%;
-                margin:0;
-                border:0;
-                border-radius:0;
-                box-shadow:none;
-                padding:8mm;
-            }
-
-            @page{
-                size:A4;
-                margin:8mm;
-            }
-        }
-    </style>
-</head>
-<body>
-<?php include('includes/sidebar.php'); ?>
-
-<main class="app-main">
-    <?php include('includes/nav.php'); ?>
-
-    <div class="content-wrap">
-        <div class="page-card mb-3 print-toolbar">
-            <div class="page-head">
-                <div>
-                    <div class="page-title">Estimate Print</div>
-                    <div class="small text-muted">Preview and print estimate.</div>
-                </div>
-
-                <div class="d-flex gap-2">
-                    <a href="estimates.php" class="btn-soft">
-                        <i class="fa-solid fa-arrow-left me-2"></i>Back
-                    </a>
-
-                    <button type="button" class="btn-theme" onclick="window.print()">
-                        <i class="fa-solid fa-print me-2"></i>Print
-                    </button>
-                </div>
-            </div>
-        </div>
-
-        <div class="page-card p-3">
-            <div id="loadingBox" class="loading-box">
-                <i class="fa-solid fa-spinner fa-spin me-2"></i>Loading estimate...
-            </div>
-
-            <div id="errorBox" class="error-box" style="display:none"></div>
-            <div id="estimateSheet" class="estimate-sheet" style="display:none"></div>
-        </div>
-
-        <?php include('includes/footer.php'); ?>
-    </div>
-</main>
-
-<?php include('includes/script.php'); ?>
-<script src="assets/js/script.js"></script>
-
-<script>
-(() => {
-    'use strict';
-
-    const apiUrl = 'api/estimate-print.php';
-    const estimateId = <?= (int)$estimateId ?>;
-    const csrfToken = <?= json_encode($csrfToken) ?>;
-
-    function esc(value) {
-        return String(value ?? '').replace(/[&<>'"]/g, character => ({
-            '&':'&amp;',
-            '<':'&lt;',
-            '>':'&gt;',
-            "'":'&#039;',
-            '"':'&quot;'
-        }[character]));
-    }
-
-    function money(value) {
-        return Number(value || 0).toLocaleString('en-IN', {
-            minimumFractionDigits:2,
-            maximumFractionDigits:2
-        });
-    }
-
-    async function loadEstimate() {
-        const form = new FormData();
-        form.append('action', 'load');
-        form.append('estimate_id', estimateId);
-        form.append('csrf_token', csrfToken);
-
-        try {
-            const response = await fetch(apiUrl, {
-                method:'POST',
-                body:form,
-                credentials:'same-origin',
-                headers:{
-                    'X-Requested-With':'XMLHttpRequest',
-                    'Accept':'application/json'
-                }
-            });
-
-            const raw = await response.text();
-            let result;
-
-            try {
-                result = JSON.parse(raw);
-            } catch (error) {
-                const clean = raw.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
-
-                throw new Error(
-                    'Estimate Print API did not return JSON. HTTP ' +
-                    response.status +
-                    (clean ? ': ' + clean.substring(0, 300) : '')
-                );
-            }
-
-            if (!response.ok || !result.success) {
-                throw new Error(result.message || 'Unable to load estimate.');
-            }
-
-            renderEstimate(result);
-        } catch (error) {
-            document.getElementById('loadingBox').style.display = 'none';
-            document.getElementById('errorBox').style.display = '';
-            document.getElementById('errorBox').textContent = error.message;
-        }
-    }
-
-    function renderEstimate(result) {
-        const estimate = result.estimate;
-        const company = result.company;
-        const items = result.items;
-        const payments = result.payments;
-
-        const companyAddress = [
-            company.address_line1,
-            company.address_line2,
-            company.city,
-            company.state,
-            company.pincode
-        ].filter(Boolean).join(', ');
-
-        const companyContact = [
-            company.mobile ? 'Mobile: ' + company.mobile : '',
-            company.email ? 'Email: ' + company.email : ''
-        ].filter(Boolean).join(' | ');
-
-        const taxLine = [
-            company.gstin ? 'GSTIN: ' + company.gstin : '',
-            company.pan_no ? 'PAN: ' + company.pan_no : ''
-        ].filter(Boolean).join(' | ');
-
-        const cancelled = estimate.workflow_status === 'Cancelled';
-
-        document.getElementById('estimateSheet').innerHTML = `
-            <div class="company-name">${esc(company.company_name || 'Company Name')}</div>
-            ${companyAddress ? `<div class="company-sub">${esc(companyAddress)}</div>` : ''}
-            ${companyContact ? `<div class="company-sub">${esc(companyContact)}</div>` : ''}
-            ${taxLine ? `<div class="company-sub">${esc(taxLine)}</div>` : ''}
-
-            <div class="estimate-label ${cancelled ? 'cancelled-label' : ''}">
-                ${cancelled ? 'ESTIMATE - CANCELLED' : 'ESTIMATE'}
-            </div>
-
-            <div class="info-grid">
-                <div class="info-cell">
-                    <div class="info-label">Estimate Number</div>
-                    <div class="info-value">${esc(estimate.invoice_no)}</div>
-                </div>
-
-                <div class="info-cell">
-                    <div class="info-label">Date and Time</div>
-                    <div class="info-value">${esc(estimate.invoice_date_display)} ${esc(estimate.invoice_time_display)}</div>
-                </div>
-
-                <div class="info-cell">
-                    <div class="info-label">Customer</div>
-                    <div class="info-value">${esc(estimate.customer_name || 'Walk-in Customer')}</div>
-                </div>
-
-                <div class="info-cell">
-                    <div class="info-label">Mobile</div>
-                    <div class="info-value">${esc(estimate.customer_mobile || '-')}</div>
-                </div>
-
-                <div class="info-cell">
-                    <div class="info-label">Payment Status</div>
-                    <div class="info-value">${esc(estimate.payment_status)}</div>
-                </div>
-
-                <div class="info-cell">
-                    <div class="info-label">Workflow Status</div>
-                    <div class="info-value">${esc(estimate.workflow_status)}</div>
-                </div>
-            </div>
-
-            <table class="print-table">
-                <thead>
-                    <tr>
-                        <th>#</th>
-                        <th>Item</th>
-                        <th>HSN</th>
-                        <th>Qty</th>
-                        <th>Net Wt</th>
-                        <th>Rate</th>
-                        <th>Taxable</th>
-                        <th>Tax</th>
-                        <th>Total</th>
-                    </tr>
-                </thead>
-
-                <tbody>
-                    ${items.map((item, index) => `
-                        <tr>
-                            <td>${index + 1}</td>
-                            <td>
-                                <strong>${esc(item.item_name)}</strong>
-                                ${item.product_code ? `<div>${esc(item.product_code)}</div>` : ''}
-                            </td>
-                            <td>${esc(item.hsn_code || '')}</td>
-                            <td style="text-align:right">${Number(item.quantity).toFixed(3)}</td>
-                            <td style="text-align:right">${Number(item.net_weight).toFixed(3)}</td>
-                            <td style="text-align:right">₹${money(item.metal_rate)}</td>
-                            <td style="text-align:right">₹${money(item.taxable_amount)}</td>
-                            <td style="text-align:right">₹${money(item.tax_amount)}</td>
-                            <td style="text-align:right"><strong>₹${money(item.line_total)}</strong></td>
-                        </tr>
-                    `).join('')}
-                </tbody>
-            </table>
-
-            <div class="summary-wrap">
-                <div>
-                    <div class="section-title">Payment Details</div>
-
-                    ${payments.length
-                        ? payments.map(payment => `
-                            <div class="payment-row">
-                                <span>
-                                    ${esc(payment.method_name)}
-                                    ${payment.reference_no ? ' - ' + esc(payment.reference_no) : ''}
-                                </span>
-                                <strong>₹${money(payment.amount)}</strong>
-                            </div>
-                        `).join('')
-                        : '<div class="small text-muted">No payment details.</div>'
-                    }
-
-                    ${estimate.notes
-                        ? `
-                            <div class="section-title mt-3">Notes</div>
-                            <div style="font-size:10px">${esc(estimate.notes)}</div>
-                        `
-                        : ''
-                    }
-
-                    ${company.terms_conditions
-                        ? `
-                            <div class="section-title mt-3">Terms & Conditions</div>
-                            <div style="font-size:9px;white-space:pre-line">${esc(company.terms_conditions)}</div>
-                        `
-                        : ''
-                    }
-                </div>
-
-                <table class="summary-table">
-                    <tr><td>Subtotal</td><td>₹${money(estimate.subtotal)}</td></tr>
-                    <tr><td>Discount</td><td>₹${money(estimate.discount_amount)}</td></tr>
-                    <tr><td>Taxable Amount</td><td>₹${money(estimate.taxable_amount)}</td></tr>
-                    <tr><td>CGST</td><td>₹${money(estimate.cgst_amount)}</td></tr>
-                    <tr><td>SGST</td><td>₹${money(estimate.sgst_amount)}</td></tr>
-                    <tr><td>IGST</td><td>₹${money(estimate.igst_amount)}</td></tr>
-                    <tr><td>Round Off</td><td>₹${money(estimate.round_off)}</td></tr>
-                    <tr class="grand-row"><td>Grand Total</td><td>₹${money(estimate.grand_total)}</td></tr>
-                    <tr><td>Paid Amount</td><td>₹${money(estimate.paid_amount)}</td></tr>
-                    <tr><td>Balance Amount</td><td>₹${money(estimate.balance_amount)}</td></tr>
-                </table>
-            </div>
-
-            <div class="signature-row">
-                <div>Customer Signature</div>
-                <div>Authorised Signature</div>
-            </div>
-
-            ${company.bill_footer
-                ? `<div class="company-sub" style="margin-top:24px">${esc(company.bill_footer)}</div>`
-                : ''
-            }
-        `;
-
-        document.getElementById('loadingBox').style.display = 'none';
-        document.getElementById('estimateSheet').style.display = '';
-    }
-
-    loadEstimate();
-})();
-</script>
-</body>
-</html>
+$pdf = new EstimatePDF($orientation, 'mm', $size);
+$pdf->footerText = (string) ($set['footer_text'] ?? '');
+$pdf->SetMargins(8, 8, 8);
+$pdf->SetAutoPageBreak(true, 16);
+$pdf->AddPage();
+$w = $pdf->GetPageWidth() - 16;
+$thermal = is_array($size) && $size[0] <= 80;
+$logo = (string) ($set['invoice_logo_path'] ?? '');
+if (!empty($set['show_business_logo']) && $logo !== '' && is_file(__DIR__ . '/' . $logo)) {
+    $pdf->Image(__DIR__ . '/' . $logo, 8, 8, $thermal ? 14 : 22);
+}
+$pdf->SetFont('Arial', 'B', $thermal ? 12 : 16);
+$pdf->Cell(0, 7, txt($e['business_name'] ?? 'Business'), 0, 1, 'C');
+$pdf->SetFont('Arial', '', 7);
+$address = trim(implode(', ', array_filter([$e['branch_address1'], $e['branch_address2'], $e['branch_city'], $e['branch_state'], $e['branch_pincode']])));
+if ($address !== '')
+    $pdf->MultiCell(0, 4, txt($address), 0, 'C');
+if (!empty($set['show_gstin']))
+    $pdf->Cell(0, 4, txt('GSTIN: ' . ($e['branch_gstin'] ?: $e['business_gstin'])), 0, 1, 'C');
+$pdf->Ln(2);
+$pdf->SetDrawColor(180);
+$pdf->Line(8, $pdf->GetY(), $pdf->GetPageWidth() - 8, $pdf->GetY());
+$pdf->Ln(3);
+$pdf->SetFont('Arial', 'B', $thermal ? 10 : 13);
+$pdf->Cell(0, 6, txt($set['header_text'] ?? 'ESTIMATE'), 0, 1, 'C');
+$pdf->SetFont('Arial', '', 8);
+$pdf->Cell($w / 2, 5, txt('Estimate: ' . $e['estimate_no']), 0, 0);
+$pdf->Cell($w / 2, 5, txt('Date: ' . date('d-m-Y', strtotime($e['estimate_date']))), 0, 1, 'R');
+$pdf->Cell($w / 2, 5, txt('Customer: ' . ($e['customer_name'] ?: 'Walk-in Customer')), 0, 0);
+$pdf->Cell($w / 2, 5, txt('Mobile: ' . ($e['customer_mobile'] ?: '-')), 0, 1, 'R');
+$pdf->Ln(2);
+$cols = $thermal ? [.46, .12, .18, .24] : [.30, .08, .10, .10, .10, .10, .10, .12];
+$heads = $thermal ? ['Item', 'Qty', 'Rate', 'Total'] : ['Item', 'Qty', 'Net g', 'Rate', 'Waste', 'Making', 'Tax', 'Total'];
+$pdf->SetFont('Arial', 'B', 7);
+$pdf->SetFillColor(240);
+foreach ($heads as $i => $h)
+    $pdf->Cell($w * $cols[$i], 6, txt($h), 1, 0, 'C', true);
+$pdf->Ln();
+$pdf->SetFont('Arial', '', 7);
+foreach ($items as $i) {
+    $vals = $thermal ? [$i['item_name'], $i['quantity'], number_format((float) $i['metal_rate'], 2), number_format((float) $i['line_total'], 2)] : [$i['item_name'], $i['quantity'], $i['net_weight'], number_format((float) $i['metal_rate'], 2), number_format((float) $i['wastage_amount'], 2), number_format((float) $i['making_charge'], 2), number_format((float) $i['tax_amount'], 2), number_format((float) $i['line_total'], 2)];
+    foreach ($vals as $j => $v)
+        $pdf->Cell($w * $cols[$j], 6, txt($v), 1, 0, $j === 0 ? 'L' : 'R');
+    $pdf->Ln();
+}
+if ($ex) {
+    $pdf->Ln(2);
+    $pdf->SetFont('Arial', 'B', 8);
+    $pdf->Cell(0, 5, txt('Proposed Exchange Items'), 0, 1);
+    $pdf->SetFont('Arial', '', 7);
+    foreach ($ex as $x)
+        $pdf->Cell(0, 4, txt($x['item_name'] . ' | ' . $x['eligible_weight'] . ' g x Rs. ' . number_format((float) $x['rate_per_gram'], 2) . ' = Rs. ' . number_format((float) $x['exchange_value'], 2)), 0, 1);
+}
+if ($claims) {
+    $pdf->Ln(2);
+    $pdf->SetFont('Arial', 'B', 8);
+    $pdf->Cell(0, 5, txt('Proposed Gold Gram Claims'), 0, 1);
+    $pdf->SetFont('Arial', '', 7);
+    foreach ($claims as $c)
+        $pdf->Cell(0, 4, txt(($c['group_name'] ?: 'Chit') . ' ' . $c['ticket_no'] . ' | ' . number_format((float) $c['claim_grams'], 6) . ' g x Rs. ' . number_format((float) $c['rate_per_gram'], 2) . ' = Rs. ' . number_format((float) $c['claim_amount'], 2)), 0, 1);
+}
+$pdf->Ln(2);
+$labelW = $thermal ? $w * .58 : $w * .72;
+$valueW = $w - $labelW;
+$summary = [['Subtotal', $e['subtotal']], ['Discount', -$e['discount_amount']], ['CGST', $e['cgst_amount']], ['SGST', $e['sgst_amount']], ['Exchange', -$e['exchange_amount']], ['Gold Claim', -$e['chit_claim_amount']], ['Net Estimate', $e['net_estimate_amount']], ['Proposed Paid', $e['proposed_paid_amount']], ['Proposed Balance', $e['proposed_balance_amount']]];
+foreach ($summary as $idx => $r) {
+    $pdf->SetFont('Arial', $idx >= 6 ? 'B' : '', 8);
+    $pdf->Cell($labelW, 5, txt($r[0]), 0, 0, 'R');
+    $pdf->Cell($valueW, 5, txt('Rs. ' . number_format((float) $r[1], 2)), 0, 1, 'R');
+}
+if ($pays) {
+    $pdf->Ln(2);
+    $pdf->SetFont('Arial', 'B', 8);
+    $pdf->Cell(0, 5, txt('Proposed Payments'), 0, 1);
+    $pdf->SetFont('Arial', '', 7);
+    foreach ($pays as $p)
+        $pdf->Cell(0, 4, txt(($p['method_name'] ?: 'Payment') . ' - Rs. ' . number_format((float) $p['amount'], 2) . ($p['reference_no'] ? ' (' . $p['reference_no'] . ')' : '')), 0, 1);
+}
+if (!empty($e['notes'])) {
+    $pdf->Ln(2);
+    $pdf->SetFont('Arial', 'B', 7);
+    $pdf->Cell(0, 4, txt('Notes'), 0, 1);
+    $pdf->SetFont('Arial', '', 7);
+    $pdf->MultiCell(0, 4, txt($e['notes']));
+}
+if (!empty($set['terms_conditions'])) {
+    $pdf->Ln(3);
+    $pdf->SetFont('Arial', 'B', 7);
+    $pdf->Cell(0, 4, txt('Terms & Conditions'), 0, 1);
+    $pdf->SetFont('Arial', '', 6);
+    $pdf->MultiCell(0, 3, txt($set['terms_conditions']));
+}
+$disp = (isset($_GET['inline']) && $_GET['inline'] === '1') ? 'I' : 'D';
+$pdf->Output($disp, 'estimate-' . $e['estimate_no'] . '.pdf');

@@ -199,9 +199,77 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
         .modal-header,.modal-footer{border-color:var(--line)}
         .detail-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
         .detail-box{padding:10px;border:1px solid var(--line);border-radius:9px}.detail-label{font-size:9px;color:var(--muted)}.detail-value{font-size:11px;font-weight:700}
+        .print-float-modal .modal-dialog{max-width:980px}
+        .print-float-modal .modal-content{height:min(88vh,900px)}
+        .print-float-modal .modal-header{
+            display:grid;
+            grid-template-columns:minmax(0,1fr) auto;
+            align-items:center;
+            gap:16px;
+            padding:14px 18px;
+        }
+        .print-preview-title-wrap{
+            min-width:0;
+        }
+        .print-preview-title-wrap .modal-title{
+            line-height:1.2;
+        }
+        .print-preview-actions{
+            display:flex;
+            align-items:center;
+            justify-content:flex-end;
+            gap:10px;
+            flex:0 0 auto;
+        }
+        .print-preview-actions .btn-theme{
+            min-height:38px;
+            height:38px;
+            padding:7px 14px;
+            display:inline-flex;
+            align-items:center;
+            justify-content:center;
+            gap:5px;
+            margin:0;
+        }
+        .print-preview-actions .btn-close{
+            width:38px;
+            height:38px;
+            min-width:38px;
+            padding:0;
+            margin:0;
+            border:1px solid var(--line);
+            border-radius:9px;
+            background-color:var(--card-bg);
+            opacity:.75;
+            box-sizing:border-box;
+            background-size:13px;
+        }
+        .print-preview-actions .btn-close:hover{
+            opacity:1;
+            background-color:var(--primary-soft);
+        }
+        .print-float-modal .modal-body{padding:0;overflow:hidden;background:#eef1f4}
+        .print-frame{width:100%;height:100%;min-height:680px;border:0;background:#fff}
+        .action-group{display:inline-flex;align-items:center;gap:4px;flex-wrap:wrap;justify-content:flex-end}
+        .pay-action{color:#168449}
+        .print-action{color:#1d4ed8}
         body.dark-mode,body[data-theme=dark]{--page-bg:#0f151b;--card-bg:#182129;--text:#f3f6f8;--muted:#9aa7b3;--line:#2c3944}
         @media(max-width:991px){.stat-grid{grid-template-columns:1fr 1fr}.filter-grid{grid-template-columns:1fr 1fr}.filter-grid .search{grid-column:1/-1}}
-        @media(max-width:767px){.stat-grid,.filter-grid,.detail-grid{grid-template-columns:1fr}.filter-grid .search{grid-column:auto}.content-wrap{padding-left:10px;padding-right:10px}}
+        @media(max-width:767px){
+            .stat-grid,.filter-grid,.detail-grid{grid-template-columns:1fr}
+            .filter-grid .search{grid-column:auto}
+            .content-wrap{padding-left:10px;padding-right:10px}
+            .print-float-modal .modal-header{
+                grid-template-columns:1fr;
+                gap:10px;
+            }
+            .print-preview-actions{
+                justify-content:flex-start;
+            }
+            .print-preview-actions .btn-theme{
+                flex:1;
+            }
+        }
     </style>
 </head>
 <body>
@@ -278,6 +346,29 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
             <div class="modal-body" id="modalBody"></div>
             <div class="modal-footer">
                 <button class="btn-soft" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade print-float-modal" id="printPreviewModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div class="print-preview-title-wrap">
+                    <h5 class="modal-title mb-1">Invoice Print Preview</h5>
+                    <div class="small text-muted" id="printPreviewInvoice"></div>
+                </div>
+                <div class="print-preview-actions">
+                    <button type="button" class="btn-theme" id="printFrameButton">
+                        <i class="fa-solid fa-print"></i>
+                        <span>Print</span>
+                    </button>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+            </div>
+            <div class="modal-body">
+                <iframe id="printPreviewFrame" class="print-frame" title="Invoice preview"></iframe>
             </div>
         </div>
     </div>
@@ -377,8 +468,12 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
                     ${canValue ? `<td class="text-end">₹${money(row.grand_total)}</td><td class="text-end">₹${money(row.paid_amount)}</td><td class="text-end">₹${money(row.balance_amount)}</td>` : ''}
                     <td>${statusBadge(row)}</td>
                     <td class="text-end">
-                        <button type="button" class="action-btn view-sale" data-id="${row.id}" title="View"><i class="fa-regular fa-eye"></i></button>
-                        ${canCancel && row.workflow_status !== 'Cancelled' ? `<button type="button" class="action-btn cancel-sale" data-id="${row.id}" data-no="${esc(row.invoice_no)}" title="Cancel"><i class="fa-solid fa-ban"></i></button>` : ''}
+                        <div class="action-group">
+                            <a class="action-btn" href="sales-view.php?id=${row.id}" title="Full details"><i class="fa-regular fa-eye"></i></a>
+                            <button type="button" class="action-btn print-action print-sale" data-id="${row.id}" data-no="${esc(row.invoice_no)}" title="Print invoice"><i class="fa-solid fa-print"></i></button>
+                            ${Number(row.balance_amount || 0) > 0 && row.workflow_status !== 'Cancelled' ? `<a class="action-btn pay-action" href="sale-make-payment.php?id=${row.id}" title="Make balance payment"><i class="fa-solid fa-indian-rupee-sign"></i></a>` : ''}
+                            ${canCancel && row.workflow_status !== 'Cancelled' ? `<button type="button" class="action-btn cancel-sale" data-id="${row.id}" data-no="${esc(row.invoice_no)}" title="Cancel"><i class="fa-solid fa-ban"></i></button>` : ''}
+                        </div>
                     </td>
                 </tr>`).join('');
 
@@ -433,6 +528,23 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
         }
     }
 
+    function openPrintPreview(id, invoiceNo) {
+        const frame = document.getElementById('printPreviewFrame');
+        document.getElementById('printPreviewInvoice').textContent = invoiceNo || '';
+        frame.src = 'sale-invoice-pdf.php?sale_id=' + encodeURIComponent(id) + '&inline=1';
+        bootstrap.Modal.getOrCreateInstance(document.getElementById('printPreviewModal')).show();
+    }
+
+    document.getElementById('printFrameButton').addEventListener('click', () => {
+        const frame = document.getElementById('printPreviewFrame');
+        try {
+            frame.contentWindow.focus();
+            frame.contentWindow.print();
+        } catch (error) {
+            toast('error', 'Use the PDF viewer print button.');
+        }
+    });
+
     async function cancelSale(id, invoiceNo) {
         const reason = prompt('Enter cancellation reason for ' + invoiceNo + ':', 'Cancelled from sales list');
         if (reason === null) return;
@@ -461,8 +573,8 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
     document.addEventListener('click', e => {
         const pageButton = e.target.closest('.page-go');
         if (pageButton) loadSales(Number(pageButton.dataset.page));
-        const viewButton = e.target.closest('.view-sale');
-        if (viewButton) viewSale(viewButton.dataset.id);
+        const printButton = e.target.closest('.print-sale');
+        if (printButton) openPrintPreview(printButton.dataset.id, printButton.dataset.no);
         const cancelButton = e.target.closest('.cancel-sale');
         if (cancelButton) cancelSale(cancelButton.dataset.id, cancelButton.dataset.no);
     });

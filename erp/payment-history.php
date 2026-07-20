@@ -143,6 +143,14 @@ body{background:var(--page-bg);color:var(--text-color);font-family:<?php echo js
 .amount-in{color:#168449;font-weight:800}.amount-out{color:#c0392b;font-weight:800}.record-no{font-weight:800}.subtext{font-size:8px;color:var(--muted-color);margin-top:2px}
 .empty-state{padding:42px 20px;text-align:center;color:var(--muted-color)}
 .section-total{font-size:10px;font-weight:800;color:var(--primary-dark)}
+
+.statement-banner{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;padding:12px 14px;background:linear-gradient(135deg,color-mix(in srgb,var(--primary) 9%,var(--card-bg)),var(--card-bg));border-bottom:1px solid var(--border-color)}
+.statement-title{font-size:13px;font-weight:900}.statement-meta{font-size:9px;color:var(--muted-color);margin-top:3px}.statement-balance{text-align:right}.statement-balance .value{font-size:20px;font-weight:900;color:var(--primary-dark)}
+.statement-table th,.statement-table td{padding:9px 10px!important}
+.statement-table .running-balance{font-weight:900;color:var(--primary-dark)}
+.statement-table .invoice-link{color:var(--primary-dark);font-weight:800;text-decoration:none}
+.statement-table .invoice-link:hover{text-decoration:underline}
+.export-note{font-size:9px;color:var(--muted-color)}
 .theme-toast{position:fixed;right:18px;top:78px;z-index:20000;display:flex;align-items:center;gap:9px;min-width:260px;max-width:420px;padding:11px 14px;border-radius:10px;color:#fff;font-size:11px;font-weight:600;box-shadow:0 14px 35px rgba(0,0,0,.22);opacity:0;transform:translateY(-10px);transition:.22s}.theme-toast.show{opacity:1;transform:translateY(0)}.theme-toast-success{background:#168449}.theme-toast-error{background:#c0392b}
 body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark"] body{--page-bg:#0f151b;--card-bg:#182129;--text-color:#f3f6f8;--muted-color:#9aa7b3;--border-color:#2c3944}
 @media(max-width:1199px){.filter-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.span-2,.span-3,.span-4,.span-6,.span-12{grid-column:span 1}}
@@ -161,11 +169,11 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
             <div class="page-subtitle"><?php echo h($businessName); ?> · Track incoming and outgoing payments</div>
         </div>
         <div class="d-flex flex-wrap gap-2">
-            <button type="button" class="btn btn-light-custom" id="exportCsv">
-                <i class="fa-solid fa-file-csv me-1"></i>Export CSV
+            <button type="button" class="btn btn-light-custom" id="exportExcel">
+                <i class="fa-solid fa-file-excel me-1"></i>Export Excel
             </button>
-            <button type="button" class="btn btn-light-custom" onclick="window.print()">
-                <i class="fa-solid fa-print me-1"></i>Print
+            <button type="button" class="btn btn-light-custom" id="exportPdf">
+                <i class="fa-solid fa-file-pdf me-1"></i>Export PDF
             </button>
         </div>
     </div>
@@ -220,6 +228,12 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
                     </select>
                 </div>
                 <div class="span-2">
+                    <label class="field-label">Invoice</label>
+                    <select name="sale_id" id="invoiceFilter" class="form-select">
+                        <option value="">All Invoices</option>
+                    </select>
+                </div>
+                <div class="span-2">
                     <label class="field-label">Supplier</label>
                     <select name="supplier_id" id="supplierFilter" class="form-select">
                         <option value="">All Suppliers</option>
@@ -266,6 +280,7 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
     const filterForm=document.getElementById('filterForm');
     const dateRange=document.getElementById('dateRange');
     const customerFilter=document.getElementById('customerFilter');
+    const invoiceFilter=document.getElementById('invoiceFilter');
     const supplierFilter=document.getElementById('supplierFilter');
     const loadingState=document.getElementById('loadingState');
     const emptyState=document.getElementById('emptyState');
@@ -318,6 +333,8 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
             (result.customers||[]).map(row=>`<option value="${Number(row.id)}">${escapeHtml(row.name)}${row.code?' ('+escapeHtml(row.code)+')':''}</option>`).join('');
         supplierFilter.innerHTML='<option value="">All Suppliers</option>'+
             (result.suppliers||[]).map(row=>`<option value="${Number(row.id)}">${escapeHtml(row.name)}${row.code?' ('+escapeHtml(row.code)+')':''}</option>`).join('');
+        invoiceFilter.innerHTML='<option value="">All Invoices</option>'+
+            (result.invoices||[]).map(row=>`<option value="${Number(row.id)}">${escapeHtml(row.invoice_no)} · ${escapeHtml(row.customer_name||'Walk-in')} · ₹${money(row.net_payable_amount)}</option>`).join('');
     }
 
     function rowTable(title,total,rows,columns,type){
@@ -339,6 +356,44 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
                     <tbody>${body}</tbody>
                 </table>
             </div>
+        </div>`;
+    }
+
+
+    function statementTable(result){
+        const rows=result.statement_rows||[];
+        if(!rows.length)return '';
+
+        const body=rows.map(row=>`
+            <tr>
+                <td data-label="Date">${escapeHtml(row.date_display)}</td>
+                <td data-label="Document">
+                    ${row.sale_id?`<a class="invoice-link" href="sales-view.php?id=${Number(row.sale_id)}">${escapeHtml(row.document_no||'—')}</a>`:`<strong>${escapeHtml(row.document_no||'—')}</strong>`}
+                    <div class="subtext">${escapeHtml(row.transaction_type||'')}</div>
+                </td>
+                <td data-label="Customer">${escapeHtml(row.party_name||'—')}<div class="subtext">${escapeHtml(row.mobile||'')}</div></td>
+                <td data-label="Method">${escapeHtml(row.method||'—')}</td>
+                <td data-label="Reference">${escapeHtml(row.reference||'—')}</td>
+                <td data-label="Debit" class="amount-out text-end">${Number(row.debit||0)>0?'₹'+money(row.debit):'—'}</td>
+                <td data-label="Credit" class="amount-in text-end">${Number(row.credit||0)>0?'₹'+money(row.credit):'—'}</td>
+                <td data-label="Balance" class="running-balance text-end">₹${money(row.running_balance)}</td>
+            </tr>`).join('');
+
+        return `<div class="statement-banner">
+            <div>
+                <div class="statement-title">Payment Statement</div>
+                <div class="statement-meta">${escapeHtml(result.statement.party_label||'All Parties')} · ${escapeHtml(result.period.from_display)} to ${escapeHtml(result.period.to_display)}</div>
+            </div>
+            <div class="statement-balance">
+                <div class="field-label mb-0">Closing Balance</div>
+                <div class="value">₹${money(result.statement.closing_balance)}</div>
+            </div>
+        </div>
+        <div class="table-responsive">
+            <table class="table compact-table responsive-table statement-table">
+                <thead><tr><th>Date</th><th>Document</th><th>Customer</th><th>Method</th><th>Reference</th><th class="text-end">Debit</th><th class="text-end">Credit</th><th class="text-end">Balance</th></tr></thead>
+                <tbody>${body}</tbody>
+            </table>
         </div>`;
     }
 
@@ -392,6 +447,7 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
 
         let html='';
         if(activeTab==='all'||activeTab==='customer'){
+            html+=statementTable(result);
             html+=rowTable('Customer Payments (Incoming)',result.totals.customer,result.customer_payments,customerColumns,'customer');
         }
         if(activeTab==='all'||activeTab==='pawn'){
@@ -455,11 +511,36 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
         if(lastResult)renderResult(lastResult);
     });
 
-    document.getElementById('exportCsv').addEventListener('click',()=>{
+    function exportParams(){
         const params=new URLSearchParams(new FormData(filterForm));
+        params.set('tab',activeTab);
+        return params;
+    }
+
+    document.getElementById('exportExcel').addEventListener('click',()=>{
+        const params=exportParams();
         params.set('action','export');
-        params.set('format','csv');
+        params.set('format','excel');
         window.location.href='api/payment-history.php?'+params.toString();
+    });
+
+    document.getElementById('exportPdf').addEventListener('click',()=>{
+        const params=exportParams();
+        params.set('inline','1');
+        window.open('payment-history-pdf.php?'+params.toString(),'_blank');
+    });
+
+    customerFilter.addEventListener('change',async()=>{
+        try{
+            const params=new URLSearchParams();
+            params.set('action','invoices');
+            params.set('customer_id',customerFilter.value);
+            const result=await requestJson('api/payment-history.php?'+params.toString());
+            invoiceFilter.innerHTML='<option value="">All Invoices</option>'+
+                (result.invoices||[]).map(row=>`<option value="${Number(row.id)}">${escapeHtml(row.invoice_no)} · ₹${money(row.net_payable_amount)}</option>`).join('');
+        }catch(error){
+            toast('error',error.message);
+        }
     });
 
     toggleCustomDate();
