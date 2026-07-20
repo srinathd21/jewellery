@@ -1,8 +1,6 @@
 <?php
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
-date_default_timezone_set((string)($_SESSION['timezone'] ?? 'Asia/Kolkata'));
+session_start();
+date_default_timezone_set('Asia/Kolkata');
 
 $configCandidates = [
     __DIR__ . '/config/config.php',
@@ -20,21 +18,27 @@ foreach ($configCandidates as $configFile) {
     }
 }
 
-if (!$configLoaded || !isset($conn) || !($conn instanceof mysqli)) {
-    die('Database configuration is not available.');
+if (!$configLoaded) {
+    die('Database configuration file not found.');
+}
+
+if (!isset($conn) || !($conn instanceof mysqli)) {
+    die('Database connection is not available. Check the common config file.');
 }
 
 mysqli_report(MYSQLI_REPORT_OFF);
 $conn->set_charset('utf8mb4');
 
 if (!function_exists('h')) {
-    function h($value): string {
+    function h($value): string
+    {
         return htmlspecialchars((string)($value ?? ''), ENT_QUOTES, 'UTF-8');
     }
 }
 
 if (!function_exists('tableExists')) {
-    function tableExists(mysqli $conn, string $tableName): bool {
+    function tableExists(mysqli $conn, string $tableName): bool
+    {
         $safe = $conn->real_escape_string($tableName);
         $res = $conn->query("SHOW TABLES LIKE '{$safe}'");
         return $res && $res->num_rows > 0;
@@ -42,7 +46,8 @@ if (!function_exists('tableExists')) {
 }
 
 if (!function_exists('hasColumn')) {
-    function hasColumn(mysqli $conn, string $table, string $column): bool {
+    function hasColumn(mysqli $conn, string $table, string $column): bool
+    {
         $table = $conn->real_escape_string($table);
         $column = $conn->real_escape_string($column);
         $res = $conn->query("SHOW COLUMNS FROM `{$table}` LIKE '{$column}'");
@@ -64,7 +69,6 @@ if (!function_exists('addAuditLog')) {
             INSERT INTO audit_logs (business_id, user_id, module_name, action_type, reference_id, description, ip_address, user_agent, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())
         ");
-
         if ($stmt) {
             $stmt->bind_param(
                 'iississs',
@@ -83,26 +87,56 @@ if (!function_exists('addAuditLog')) {
     }
 }
 
-function moneyf($amount): string {
+function moneyf($amount): string
+{
     return number_format((float)$amount, 2, '.', '');
 }
 
-function qtyf($qty): string {
+function qtyf($qty): string
+{
     return number_format((float)$qty, 3, '.', '');
+}
+
+function generatePurchaseNo(mysqli $conn, int $businessId, bool $hasBusinessId): string
+{
+    $prefix = 'PUR' . date('Ymd');
+    $lastNo = '';
+
+    if ($hasBusinessId) {
+        $stmt = $conn->prepare("SELECT purchase_no FROM purchases WHERE business_id = ? AND purchase_no LIKE ? ORDER BY id DESC LIMIT 1");
+        $like = $prefix . '%';
+        $stmt->bind_param('is', $businessId, $like);
+    } else {
+        $stmt = $conn->prepare("SELECT purchase_no FROM purchases WHERE purchase_no LIKE ? ORDER BY id DESC LIMIT 1");
+        $like = $prefix . '%';
+        $stmt->bind_param('s', $like);
+    }
+
+    if ($stmt) {
+        $stmt->execute();
+        $res = $stmt->get_result();
+        $row = $res ? $res->fetch_assoc() : null;
+        $lastNo = (string)($row['purchase_no'] ?? '');
+        $stmt->close();
+    }
+
+    $running = 1;
+    if ($lastNo !== '' && preg_match('/(\d{4})$/', $lastNo, $m)) {
+        $running = ((int)$m[1]) + 1;
+    }
+
+    return $prefix . str_pad((string)$running, 4, '0', STR_PAD_LEFT);
 }
 
 function getProductRow(mysqli $conn, int $productId, int $businessId, bool $prdHasBusinessId): ?array
 {
     $sql = "SELECT p.* FROM products p WHERE p.id = ?";
-
     if ($prdHasBusinessId) {
         $sql .= " AND p.business_id = ?";
     }
-
     $sql .= " LIMIT 1";
 
     $stmt = $conn->prepare($sql);
-
     if (!$stmt) {
         return null;
     }
@@ -121,378 +155,7 @@ function getProductRow(mysqli $conn, int $productId, int $businessId, bool $prdH
     return $row ?: null;
 }
 
-function updateProductStockQty(mysqli $conn, int $productId, int $businessId, bool $prdHasBusinessId, bool $prdHasCurrentStockQty, float $qtyDelta): void
-{
-    if (!$prdHasCurrentStockQty || $productId <= 0 || $qtyDelta == 0.0) {
-        return;
-    }
-
-    if ($prdHasBusinessId) {
-        $stmt = $conn->prepare("UPDATE products SET current_stock_qty = COALESCE(current_stock_qty, 0) + ? WHERE id = ? AND business_id = ? LIMIT 1");
-        if ($stmt) {
-            $stmt->bind_param('dii', $qtyDelta, $productId, $businessId);
-            $stmt->execute();
-            $stmt->close();
-        }
-    } else {
-        $stmt = $conn->prepare("UPDATE products SET current_stock_qty = COALESCE(current_stock_qty, 0) + ? WHERE id = ? LIMIT 1");
-        if ($stmt) {
-            $stmt->bind_param('di', $qtyDelta, $productId);
-            $stmt->execute();
-            $stmt->close();
-        }
-    }
-}
-
-function updateProductStockTable(
-    mysqli $conn,
-    int $productId,
-    int $businessId,
-    bool $productStockExists,
-    bool $productStockHasBiz,
-    bool $productStockHasProduct,
-    bool $productStockHasInQty,
-    bool $productStockHasInWt,
-    bool $productStockHasCloseQty,
-    bool $productStockHasCloseWt,
-    float $qtyDelta,
-    float $weightDelta
-): void {
-    if (!$productStockExists || !$productStockHasProduct || $productId <= 0 || ($qtyDelta == 0.0 && $weightDelta == 0.0)) {
-        return;
-    }
-
-    if ($productStockHasBiz) {
-        $stmt = $conn->prepare("SELECT id FROM product_stock WHERE product_id = ? AND business_id = ? LIMIT 1");
-        if ($stmt) {
-            $stmt->bind_param('ii', $productId, $businessId);
-        }
-    } else {
-        $stmt = $conn->prepare("SELECT id FROM product_stock WHERE product_id = ? LIMIT 1");
-        if ($stmt) {
-            $stmt->bind_param('i', $productId);
-        }
-    }
-
-    $stockRow = null;
-
-    if ($stmt) {
-        $stmt->execute();
-        $res = $stmt->get_result();
-        $stockRow = $res ? $res->fetch_assoc() : null;
-        $stmt->close();
-    }
-
-    if ($stockRow) {
-        $updates = [];
-        $types = '';
-        $values = [];
-
-        if ($productStockHasInQty) {
-            $updates[] = "in_qty = GREATEST(COALESCE(in_qty, 0) + ?, 0)";
-            $types .= 'd';
-            $values[] = $qtyDelta;
-        }
-
-        if ($productStockHasInWt) {
-            $updates[] = "in_weight = GREATEST(COALESCE(in_weight, 0) + ?, 0)";
-            $types .= 'd';
-            $values[] = $weightDelta;
-        }
-
-        if ($productStockHasCloseQty) {
-            $updates[] = "closing_qty = GREATEST(COALESCE(closing_qty, 0) + ?, 0)";
-            $types .= 'd';
-            $values[] = $qtyDelta;
-        }
-
-        if ($productStockHasCloseWt) {
-            $updates[] = "closing_weight = GREATEST(COALESCE(closing_weight, 0) + ?, 0)";
-            $types .= 'd';
-            $values[] = $weightDelta;
-        }
-
-        if (!empty($updates)) {
-            $sql = "UPDATE product_stock SET " . implode(', ', $updates) . " WHERE id = ?";
-            $types .= 'i';
-            $values[] = (int)$stockRow['id'];
-
-            $stmt = $conn->prepare($sql);
-
-            if ($stmt) {
-                $bindValues = [];
-                $bindValues[] = $types;
-
-                for ($i = 0; $i < count($values); $i++) {
-                    $bindValues[] = &$values[$i];
-                }
-
-                call_user_func_array([$stmt, 'bind_param'], $bindValues);
-                $stmt->execute();
-                $stmt->close();
-            }
-        }
-    } else {
-        $fields = [];
-        $placeholders = [];
-        $types = '';
-        $values = [];
-
-        if ($productStockHasBiz) {
-            $fields[] = 'business_id';
-            $placeholders[] = '?';
-            $types .= 'i';
-            $values[] = $businessId;
-        }
-
-        if ($productStockHasProduct) {
-            $fields[] = 'product_id';
-            $placeholders[] = '?';
-            $types .= 'i';
-            $values[] = $productId;
-        }
-
-        if ($productStockHasInQty) {
-            $fields[] = 'in_qty';
-            $placeholders[] = '?';
-            $types .= 'd';
-            $values[] = max($qtyDelta, 0);
-        }
-
-        if ($productStockHasInWt) {
-            $fields[] = 'in_weight';
-            $placeholders[] = '?';
-            $types .= 'd';
-            $values[] = max($weightDelta, 0);
-        }
-
-        if ($productStockHasCloseQty) {
-            $fields[] = 'closing_qty';
-            $placeholders[] = '?';
-            $types .= 'd';
-            $values[] = max($qtyDelta, 0);
-        }
-
-        if ($productStockHasCloseWt) {
-            $fields[] = 'closing_weight';
-            $placeholders[] = '?';
-            $types .= 'd';
-            $values[] = max($weightDelta, 0);
-        }
-
-        if (!empty($fields)) {
-            $sql = "INSERT INTO product_stock (" . implode(', ', $fields) . ") VALUES (" . implode(', ', $placeholders) . ")";
-            $stmt = $conn->prepare($sql);
-
-            if ($stmt) {
-                $bindValues = [];
-                $bindValues[] = $types;
-
-                for ($i = 0; $i < count($values); $i++) {
-                    $bindValues[] = &$values[$i];
-                }
-
-                call_user_func_array([$stmt, 'bind_param'], $bindValues);
-                $stmt->execute();
-                $stmt->close();
-            }
-        }
-    }
-}
-
-
-function updateCurrentProductStock(
-    mysqli $conn,
-    int $businessId,
-    int $branchId,
-    int $productId,
-    float $quantityDelta,
-    float $grossWeightDelta,
-    float $netWeightDelta,
-    float $valueDelta
-): void {
-    if ($productId <= 0 || !tableExists($conn, 'product_stock')) {
-        return;
-    }
-
-    $stmt = $conn->prepare("
-        SELECT id, quantity, gross_weight, net_weight, stock_value
-        FROM product_stock
-        WHERE business_id = ?
-          AND branch_id = ?
-          AND product_id = ?
-        LIMIT 1
-        FOR UPDATE
-    ");
-
-    if (!$stmt) {
-        throw new Exception('Failed to prepare product stock lookup: ' . $conn->error);
-    }
-
-    $stmt->bind_param('iii', $businessId, $branchId, $productId);
-    $stmt->execute();
-    $stock = $stmt->get_result()->fetch_assoc();
-    $stmt->close();
-
-    if ($stock) {
-        $newQuantity = max(0, (float)$stock['quantity'] + $quantityDelta);
-        $newGrossWeight = max(0, (float)$stock['gross_weight'] + $grossWeightDelta);
-        $newNetWeight = max(0, (float)$stock['net_weight'] + $netWeightDelta);
-        $newStockValue = max(0, (float)$stock['stock_value'] + $valueDelta);
-        $newAverageCost = $newQuantity > 0 ? $newStockValue / $newQuantity : 0.0;
-        $stockId = (int)$stock['id'];
-
-        $stmt = $conn->prepare("
-            UPDATE product_stock
-            SET quantity = ?,
-                gross_weight = ?,
-                net_weight = ?,
-                average_cost = ?,
-                stock_value = ?
-            WHERE id = ?
-        ");
-
-        if (!$stmt) {
-            throw new Exception('Failed to prepare product stock update: ' . $conn->error);
-        }
-
-        $stmt->bind_param(
-            'dddddi',
-            $newQuantity,
-            $newGrossWeight,
-            $newNetWeight,
-            $newAverageCost,
-            $newStockValue,
-            $stockId
-        );
-
-        if (!$stmt->execute()) {
-            throw new Exception('Failed to update product stock: ' . $stmt->error);
-        }
-
-        $stmt->close();
-        return;
-    }
-
-    if ($quantityDelta <= 0 && $grossWeightDelta <= 0 && $netWeightDelta <= 0 && $valueDelta <= 0) {
-        return;
-    }
-
-    $newQuantity = max(0, $quantityDelta);
-    $newGrossWeight = max(0, $grossWeightDelta);
-    $newNetWeight = max(0, $netWeightDelta);
-    $newStockValue = max(0, $valueDelta);
-    $newAverageCost = $newQuantity > 0 ? $newStockValue / $newQuantity : 0.0;
-
-    $stmt = $conn->prepare("
-        INSERT INTO product_stock
-        (
-            business_id,
-            branch_id,
-            product_id,
-            quantity,
-            gross_weight,
-            net_weight,
-            average_cost,
-            stock_value
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ");
-
-    if (!$stmt) {
-        throw new Exception('Failed to prepare product stock insert: ' . $conn->error);
-    }
-
-    $stmt->bind_param(
-        'iiiddddd',
-        $businessId,
-        $branchId,
-        $productId,
-        $newQuantity,
-        $newGrossWeight,
-        $newNetWeight,
-        $newAverageCost,
-        $newStockValue
-    );
-
-    if (!$stmt->execute()) {
-        throw new Exception('Failed to insert product stock: ' . $stmt->error);
-    }
-
-    $stmt->close();
-}
-
-function insertPurchaseStockMovement(
-    mysqli $conn,
-    int $businessId,
-    int $branchId,
-    int $productId,
-    int $purchaseId,
-    float $quantity,
-    float $netWeight,
-    float $rate,
-    float $valueAmount,
-    int $userId,
-    string $remarks
-): void {
-    if ($productId <= 0 || !tableExists($conn, 'stock_movements')) {
-        return;
-    }
-
-    $stmt = $conn->prepare("
-        INSERT INTO stock_movements
-        (
-            business_id,
-            branch_id,
-            product_id,
-            movement_date,
-            movement_type,
-            reference_table,
-            reference_id,
-            quantity_in,
-            quantity_out,
-            weight_in,
-            weight_out,
-            rate,
-            value_amount,
-            remarks,
-            created_by
-        )
-        VALUES
-        (
-            ?, ?, ?, NOW(), 'Purchase', 'purchases', ?,
-            ?, 0, ?, 0, ?, ?, ?, ?
-        )
-    ");
-
-    if (!$stmt) {
-        throw new Exception('Failed to prepare stock movement insert: ' . $conn->error);
-    }
-
-    $stmt->bind_param(
-        'iiiiddddsi',
-        $businessId,
-        $branchId,
-        $productId,
-        $purchaseId,
-        $quantity,
-        $netWeight,
-        $rate,
-        $valueAmount,
-        $remarks,
-        $userId
-    );
-
-    if (!$stmt->execute()) {
-        throw new Exception('Failed to insert stock movement: ' . $stmt->error);
-    }
-
-    $stmt->close();
-}
-
 $pageTitle = 'Edit Purchase';
-$page_title = 'Edit Purchase';
-$currentPage = 'purchases';
 
 /* -------------------------------------------------------
    AUTH CHECK
@@ -504,14 +167,15 @@ if (!isset($_SESSION['user_id']) || (int)$_SESSION['user_id'] <= 0) {
 
 $userId = (int)$_SESSION['user_id'];
 $businessId = (int)($_SESSION['business_id'] ?? 0);
-$branchId = (int)($_SESSION['branch_id'] ?? 0);
+$branchId = (int)($_SESSION['branch_id'] ?? $_SESSION['default_branch_id'] ?? 0);
 
-if ($businessId <= 0) {
-    die('Business session not found. Please login again.');
+if ($businessId <= 0 || $branchId <= 0) {
+    die('Business or branch session not found. Please login again.');
 }
 
 /* -------------------------------------------------------
-   ROLE / PERMISSION CHECK
+   ROLE CHECK
+   The new authentication flow loads the effective role into session.
 ------------------------------------------------------- */
 $roleName = strtolower(trim((string)($_SESSION['role_name'] ?? '')));
 $roleCode = strtolower(trim((string)($_SESSION['role_code'] ?? '')));
@@ -525,6 +189,7 @@ $allowedByRole = (
 
 $allowedByPermission = false;
 $sessionPermissions = $_SESSION['permissions'] ?? [];
+
 foreach (['perm.purchases', 'perm.purchase'] as $permissionCode) {
     if (
         isset($sessionPermissions[$permissionCode])
@@ -559,120 +224,59 @@ $supHasBusinessId      = hasColumn($conn, 'suppliers', 'business_id');
 $prdHasBusinessId      = tableExists($conn, 'products') && hasColumn($conn, 'products', 'business_id');
 $prdHasCurrentStockQty = tableExists($conn, 'products') && hasColumn($conn, 'products', 'current_stock_qty');
 
-$productStockExists      = tableExists($conn, 'product_stock');
-$stockMovementExists     = tableExists($conn, 'stock_movements');
+$productStockExists     = tableExists($conn, 'product_stock');
+$stockMovementExists    = tableExists($conn, 'stock_movements');
 
-$productStockHasBiz      = $productStockExists && hasColumn($conn, 'product_stock', 'business_id');
-$productStockHasProduct  = $productStockExists && hasColumn($conn, 'product_stock', 'product_id');
-$productStockHasInQty    = $productStockExists && hasColumn($conn, 'product_stock', 'in_qty');
-$productStockHasInWt     = $productStockExists && hasColumn($conn, 'product_stock', 'in_weight');
-$productStockHasCloseQty = $productStockExists && hasColumn($conn, 'product_stock', 'closing_qty');
-$productStockHasCloseWt  = $productStockExists && hasColumn($conn, 'product_stock', 'closing_weight');
+$productStockHasBiz     = $productStockExists && hasColumn($conn, 'product_stock', 'business_id');
+$productStockHasProduct = $productStockExists && hasColumn($conn, 'product_stock', 'product_id');
+$productStockHasInQty   = $productStockExists && hasColumn($conn, 'product_stock', 'in_qty');
+$productStockHasInWt    = $productStockExists && hasColumn($conn, 'product_stock', 'in_weight');
+$productStockHasCloseQty= $productStockExists && hasColumn($conn, 'product_stock', 'closing_qty');
+$productStockHasCloseWt = $productStockExists && hasColumn($conn, 'product_stock', 'closing_weight');
 
-$stockMoveHasBiz       = $stockMovementExists && hasColumn($conn, 'stock_movements', 'business_id');
-$stockMoveHasDate      = $stockMovementExists && hasColumn($conn, 'stock_movements', 'movement_date');
-$stockMoveHasProductId = $stockMovementExists && hasColumn($conn, 'stock_movements', 'product_id');
-$stockMoveHasType      = $stockMovementExists && hasColumn($conn, 'stock_movements', 'movement_type');
-$stockMoveHasRefTable  = $stockMovementExists && hasColumn($conn, 'stock_movements', 'ref_table');
-$stockMoveHasRefId     = $stockMovementExists && hasColumn($conn, 'stock_movements', 'ref_id');
-$stockMoveHasQtyIn     = $stockMovementExists && hasColumn($conn, 'stock_movements', 'qty_in');
-$stockMoveHasWeightIn  = $stockMovementExists && hasColumn($conn, 'stock_movements', 'weight_in');
-$stockMoveHasRemarks   = $stockMovementExists && hasColumn($conn, 'stock_movements', 'remarks');
-$stockMoveHasCreatedBy = $stockMovementExists && hasColumn($conn, 'stock_movements', 'created_by');
+$stockMoveHasBiz        = $stockMovementExists && hasColumn($conn, 'stock_movements', 'business_id');
+$stockMoveHasDate       = $stockMovementExists && hasColumn($conn, 'stock_movements', 'movement_date');
+$stockMoveHasProductId  = $stockMovementExists && hasColumn($conn, 'stock_movements', 'product_id');
+$stockMoveHasType       = $stockMovementExists && hasColumn($conn, 'stock_movements', 'movement_type');
+$stockMoveHasRefTable   = $stockMovementExists && hasColumn($conn, 'stock_movements', 'ref_table');
+$stockMoveHasRefId      = $stockMovementExists && hasColumn($conn, 'stock_movements', 'ref_id');
+$stockMoveHasQtyIn      = $stockMovementExists && hasColumn($conn, 'stock_movements', 'qty_in');
+$stockMoveHasWeightIn   = $stockMovementExists && hasColumn($conn, 'stock_movements', 'weight_in');
+$stockMoveHasRemarks    = $stockMovementExists && hasColumn($conn, 'stock_movements', 'remarks');
+$stockMoveHasCreatedBy  = $stockMovementExists && hasColumn($conn, 'stock_movements', 'created_by');
 
-$paymentMethodExists = tableExists($conn, 'payment_methods');
-
-/* -------------------------------------------------------
-   PURCHASE ID
-------------------------------------------------------- */
-$purchaseId = 0;
-
-if (isset($_GET['id']) && (int)$_GET['id'] > 0) {
-    $purchaseId = (int)$_GET['id'];
-} elseif (isset($_GET['purchase_id']) && (int)$_GET['purchase_id'] > 0) {
-    $purchaseId = (int)$_GET['purchase_id'];
-} elseif (isset($_POST['purchase_id']) && (int)$_POST['purchase_id'] > 0) {
-    $purchaseId = (int)$_POST['purchase_id'];
-}
-
-if ($purchaseId <= 0) {
-    header('Location: purchases.php');
-    exit;
-}
-
-/* -------------------------------------------------------
-   LOAD PURCHASE
-------------------------------------------------------- */
-$sql = "SELECT * FROM purchases WHERE id = ?";
-
-if ($purHasBusinessId) {
-    $sql .= " AND business_id = ?";
-}
-
-$sql .= " LIMIT 1";
-
-$stmt = $conn->prepare($sql);
-
-if (!$stmt) {
-    die('Failed to prepare purchase query: ' . $conn->error);
-}
-
-if ($purHasBusinessId) {
-    $stmt->bind_param('ii', $purchaseId, $businessId);
-} else {
-    $stmt->bind_param('i', $purchaseId);
-}
-
-$stmt->execute();
-$res = $stmt->get_result();
-$purchase = $res ? $res->fetch_assoc() : null;
-$stmt->close();
-
-if (!$purchase) {
-    die('Purchase not found.');
-}
+$paymentMethodExists    = tableExists($conn, 'payment_methods');
 
 /* -------------------------------------------------------
    LOAD SUPPLIERS
 ------------------------------------------------------- */
 $suppliers = [];
-
 $sql = "SELECT id, supplier_name";
-
 if (hasColumn($conn, 'suppliers', 'supplier_code')) {
     $sql .= ", supplier_code";
 }
-
 if (hasColumn($conn, 'suppliers', 'mobile')) {
     $sql .= ", mobile";
 }
-
 $sql .= " FROM suppliers WHERE 1=1";
-
 if ($supHasBusinessId) {
     $sql .= " AND business_id = ?";
 }
-
 if (hasColumn($conn, 'suppliers', 'is_active')) {
     $sql .= " AND is_active = 1";
 }
-
 $sql .= " ORDER BY supplier_name ASC";
 
 $stmt = $conn->prepare($sql);
-
 if ($stmt) {
     if ($supHasBusinessId) {
         $stmt->bind_param('i', $businessId);
     }
-
     $stmt->execute();
     $res = $stmt->get_result();
-
-    while ($res && ($row = $res->fetch_assoc())) {
+    while ($res && $row = $res->fetch_assoc()) {
         $suppliers[] = $row;
     }
-
     $stmt->close();
 }
 
@@ -680,52 +284,54 @@ if ($stmt) {
    LOAD PRODUCTS
 ------------------------------------------------------- */
 $products = [];
-
 if (tableExists($conn, 'products')) {
     $sql = "SELECT id, product_name, product_code";
-
     if (hasColumn($conn, 'products', 'barcode')) {
         $sql .= ", barcode";
     }
-
     if (hasColumn($conn, 'products', 'purity')) {
         $sql .= ", purity";
     }
-
     if (hasColumn($conn, 'products', 'purchase_rate')) {
         $sql .= ", purchase_rate";
     }
-
+    if (hasColumn($conn, 'products', 'gross_weight')) {
+        $sql .= ", gross_weight";
+    }
+    if (hasColumn($conn, 'products', 'stone_weight')) {
+        $sql .= ", stone_weight";
+    }
     if (hasColumn($conn, 'products', 'net_weight')) {
         $sql .= ", net_weight";
     }
-
+    if (hasColumn($conn, 'products', 'hsn_code')) {
+        $sql .= ", hsn_code";
+    }
+    if (hasColumn($conn, 'products', 'tax_percent')) {
+        $sql .= ", tax_percent";
+    }
+    if (hasColumn($conn, 'products', 'category_id')) {
+        $sql .= ", category_id";
+    }
     $sql .= " FROM products WHERE 1=1";
-
     if ($prdHasBusinessId) {
         $sql .= " AND business_id = ?";
     }
-
     if (hasColumn($conn, 'products', 'is_active')) {
         $sql .= " AND is_active = 1";
     }
-
     $sql .= " ORDER BY product_name ASC";
 
     $stmt = $conn->prepare($sql);
-
     if ($stmt) {
         if ($prdHasBusinessId) {
             $stmt->bind_param('i', $businessId);
         }
-
         $stmt->execute();
         $res = $stmt->get_result();
-
-        while ($res && ($row = $res->fetch_assoc())) {
+        while ($res && $row = $res->fetch_assoc()) {
             $products[] = $row;
         }
-
         $stmt->close();
     }
 }
@@ -734,118 +340,122 @@ if (tableExists($conn, 'products')) {
    LOAD PAYMENT METHODS
 ------------------------------------------------------- */
 $paymentMethods = [];
-
 if ($paymentMethodExists) {
     $sql = "SELECT id, method_name FROM payment_methods WHERE 1=1";
-
     if (hasColumn($conn, 'payment_methods', 'is_active')) {
         $sql .= " AND is_active = 1";
     }
-
     $sql .= " ORDER BY id ASC";
     $res = $conn->query($sql);
-
-    while ($res && ($row = $res->fetch_assoc())) {
+    while ($res && $row = $res->fetch_assoc()) {
         $paymentMethods[] = $row;
     }
 }
 
 /* -------------------------------------------------------
-   LOAD EXISTING ITEMS
+   LOAD PURCHASE FOR EDIT
 ------------------------------------------------------- */
-$formItems = [];
-
-$sql = "SELECT * FROM purchase_items WHERE purchase_id = ?";
-
-if ($pitHasBusinessId) {
-    $sql .= " AND business_id = ?";
+$purchaseId = (int)($_GET['id'] ?? $_POST['purchase_id'] ?? 0);
+if ($purchaseId <= 0) {
+    http_response_code(422);
+    die('Invalid purchase ID.');
 }
 
-$sql .= " ORDER BY id ASC";
+$purchaseStmt = $conn->prepare(
+    "SELECT * FROM purchases
+     WHERE id=? AND business_id=? AND branch_id=?
+     LIMIT 1"
+);
+if (!$purchaseStmt) {
+    die('Unable to prepare purchase lookup: ' . h($conn->error));
+}
+$purchaseStmt->bind_param('iii', $purchaseId, $businessId, $branchId);
+$purchaseStmt->execute();
+$purchase = $purchaseStmt->get_result()->fetch_assoc();
+$purchaseStmt->close();
 
-$stmt = $conn->prepare($sql);
-
-if ($stmt) {
-    if ($pitHasBusinessId) {
-        $stmt->bind_param('ii', $purchaseId, $businessId);
-    } else {
-        $stmt->bind_param('i', $purchaseId);
-    }
-
-    $stmt->execute();
-    $res = $stmt->get_result();
-
-    while ($res && ($row = $res->fetch_assoc())) {
-        $formItems[] = [
-            'product_id'       => (string)($row['product_id'] ?? ''),
-            'item_name'        => (string)($row['item_name'] ?? ''),
-            'purity'           => (string)($row['purity'] ?? '925'),
-            'hsn_code'         => (string)($row['hsn_code'] ?? ''),
-            'qty'              => qtyf($row['quantity'] ?? $row['qty'] ?? 0),
-            'gross_weight'     => qtyf($row['gross_weight'] ?? 0),
-            'less_weight'      => qtyf(max(
-                (float)($row['gross_weight'] ?? 0) - (float)($row['net_weight'] ?? 0),
-                0
-            )),
-            'net_weight'       => qtyf($row['net_weight'] ?? 0),
-            'rate_per_gram'    => moneyf($row['rate'] ?? $row['rate_per_gram'] ?? 0),
-            'making_charge'    => moneyf($row['making_charge'] ?? 0),
-            'stone_charge'     => moneyf($row['stone_charge'] ?? 0),
-            'item_amount'      => moneyf(
-                ((float)($row['line_total'] ?? $row['total_amount'] ?? 0))
-                - ((float)($row['tax_amount'] ?? $row['gst_amount'] ?? 0))
-            ),
-            'discount_amount'  => moneyf($row['discount_amount'] ?? 0),
-            'taxable_amount'   => moneyf(
-                ((float)($row['line_total'] ?? $row['total_amount'] ?? 0))
-                - ((float)($row['tax_amount'] ?? $row['gst_amount'] ?? 0))
-            ),
-            'gst_percent'      => moneyf($row['tax_percent'] ?? $row['gst_percent'] ?? 3),
-            'gst_amount'       => moneyf($row['tax_amount'] ?? $row['gst_amount'] ?? 0),
-            'total_amount'     => moneyf($row['line_total'] ?? $row['total_amount'] ?? 0),
-        ];
-    }
-
-    $stmt->close();
+if (!$purchase) {
+    http_response_code(404);
+    die('Purchase not found.');
 }
 
-if (empty($formItems)) {
-    $formItems[] = [
-        'product_id'       => '',
-        'item_name'        => '',
-        'purity'           => '925',
-        'hsn_code'         => '',
-        'qty'              => '1.000',
-        'gross_weight'     => '0.000',
-        'less_weight'      => '0.000',
-        'net_weight'       => '0.000',
-        'rate_per_gram'    => '0.00',
-        'making_charge'    => '0.00',
-        'stone_charge'     => '0.00',
-        'item_amount'      => '0.00',
-        'discount_amount'  => '0.00',
-        'taxable_amount'   => '0.00',
-        'gst_percent'      => '3.00',
-        'gst_amount'       => '0.00',
-        'total_amount'     => '0.00',
-    ];
+if ((string)($purchase['workflow_status'] ?? '') === 'Cancelled') {
+    die('Cancelled purchases cannot be edited.');
 }
 
-/* -------------------------------------------------------
-   DEFAULT VALUES
-------------------------------------------------------- */
 $success = '';
 $error = '';
 
 $purchaseNo = (string)($purchase['purchase_no'] ?? '');
 $purchaseDate = (string)($purchase['purchase_date'] ?? date('Y-m-d'));
 $supplierId = (int)($purchase['supplier_id'] ?? 0);
-$invoiceNo = (string)($purchase['supplier_invoice_no'] ?? $purchase['invoice_no'] ?? '');
-$paymentMethodId = (int)($purchase['payment_method_id'] ?? 0);
+$invoiceNo = (string)($purchase['supplier_invoice_no'] ?? '');
+$paymentMethodId = 0;
 $notes = (string)($purchase['notes'] ?? '');
 $discountAmount = moneyf($purchase['discount_amount'] ?? 0);
-$roundOff = moneyf($purchase['round_off'] ?? 0);
+$roundOff = '0.00';
 $paidAmount = moneyf($purchase['paid_amount'] ?? 0);
+
+$formItems = [];
+$itemLoadStmt = $conn->prepare(
+    "SELECT * FROM purchase_items
+     WHERE purchase_id=? AND business_id=? AND branch_id=?
+     ORDER BY id ASC"
+);
+if (!$itemLoadStmt) {
+    die('Unable to prepare purchase items: ' . h($conn->error));
+}
+$itemLoadStmt->bind_param('iii', $purchaseId, $businessId, $branchId);
+$itemLoadStmt->execute();
+$itemResult = $itemLoadStmt->get_result();
+while ($item = $itemResult->fetch_assoc()) {
+    $qty = (float)($item['quantity'] ?? 0);
+    $gross = (float)($item['gross_weight'] ?? 0);
+    $net = (float)($item['net_weight'] ?? 0);
+    $taxPercent = (float)($item['tax_percent'] ?? 0);
+    $taxAmount = (float)($item['tax_amount'] ?? 0);
+    $lineTotal = (float)($item['line_total'] ?? 0);
+    $taxable = max(0, $lineTotal - $taxAmount);
+    $gramPerQty = $qty > 0 ? $gross / $qty : 0;
+
+    $product = null;
+    if ((int)($item['product_id'] ?? 0) > 0) {
+        $product = getProductRow($conn, (int)$item['product_id'], $businessId, $prdHasBusinessId);
+    }
+
+    $formItems[] = [
+        'product_id' => (int)($item['product_id'] ?? 0),
+        'item_name' => (string)($item['item_name'] ?? ''),
+        'purity' => (string)($product['purity'] ?? '925'),
+        'hsn_code' => (string)($product['hsn_code'] ?? ''),
+        'qty' => qtyf($qty),
+        'gram_per_qty' => qtyf($gramPerQty),
+        'gross_weight' => qtyf($gross),
+        'less_weight' => qtyf(max(0, $gross - $net)),
+        'net_weight' => qtyf($net),
+        'rate_per_gram' => moneyf($item['rate'] ?? 0),
+        'making_charge' => '0.00',
+        'stone_charge' => '0.00',
+        'item_amount' => moneyf($taxable),
+        'discount_amount' => '0.00',
+        'taxable_amount' => moneyf($taxable),
+        'gst_percent' => moneyf($taxPercent),
+        'gst_amount' => moneyf($taxAmount),
+        'total_amount' => moneyf($lineTotal),
+    ];
+}
+$itemLoadStmt->close();
+
+if (!$formItems) {
+    $formItems[] = [
+        'product_id' => '', 'item_name' => '', 'purity' => '925', 'hsn_code' => '',
+        'qty' => '1.000', 'gram_per_qty' => '0.000', 'gross_weight' => '0.000',
+        'less_weight' => '0.000', 'net_weight' => '0.000', 'rate_per_gram' => '0.00',
+        'making_charge' => '0.00', 'stone_charge' => '0.00', 'item_amount' => '0.00',
+        'discount_amount' => '0.00', 'taxable_amount' => '0.00', 'gst_percent' => '3.00',
+        'gst_amount' => '0.00', 'total_amount' => '0.00'
+    ];
+}
 
 /* -------------------------------------------------------
    UPDATE PURCHASE
@@ -860,19 +470,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $discountAmount = trim((string)($_POST['discount_amount'] ?? '0'));
     $roundOff = trim((string)($_POST['round_off'] ?? '0'));
     $paidAmount = trim((string)($_POST['paid_amount'] ?? '0'));
+    $confirmPurchase = (int)($_POST['confirm_purchase'] ?? 0);
 
     $postedItems = $_POST['items'] ?? [];
-
-    if (
-        (!is_array($postedItems) || empty($postedItems))
-        && isset($_POST['items_json'])
-        && trim((string)$_POST['items_json']) !== ''
-    ) {
-        $decodedItems = json_decode((string)$_POST['items_json'], true);
-        if (is_array($decodedItems)) {
-            $postedItems = $decodedItems;
-        }
-    }
     $cleanItems = [];
     $formItems = [];
 
@@ -889,33 +489,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } else {
         foreach ($postedItems as $item) {
             $row = [
-                'product_id'       => (int)($item['product_id'] ?? 0),
-                'item_name'        => trim((string)($item['item_name'] ?? '')),
-                'purity'           => trim((string)($item['purity'] ?? '925')),
-                'hsn_code'         => trim((string)($item['hsn_code'] ?? '')),
-                'qty'              => trim((string)($item['qty'] ?? '0')),
-                'gross_weight'     => trim((string)($item['gross_weight'] ?? '0')),
-                'less_weight'      => trim((string)($item['less_weight'] ?? '0')),
-                'net_weight'       => trim((string)($item['net_weight'] ?? '0')),
-                'rate_per_gram'    => trim((string)($item['rate_per_gram'] ?? '0')),
-                'making_charge'    => trim((string)($item['making_charge'] ?? '0')),
-                'stone_charge'     => trim((string)($item['stone_charge'] ?? '0')),
-                'item_amount'      => '0.00',
-                'discount_amount'  => trim((string)($item['discount_amount'] ?? '0')),
-                'taxable_amount'   => '0.00',
-                'gst_percent'      => trim((string)($item['gst_percent'] ?? '3')),
-                'gst_amount'       => '0.00',
-                'total_amount'     => '0.00',
+                'product_id' => (int)($item['product_id'] ?? 0),
+                'item_name' => trim((string)($item['item_name'] ?? '')),
+                'purity' => trim((string)($item['purity'] ?? '925')),
+                'hsn_code' => trim((string)($item['hsn_code'] ?? '')),
+                'qty' => trim((string)($item['qty'] ?? '0')),
+                'gram_per_qty' => trim((string)($item['gram_per_qty'] ?? '0')),
+                'gross_weight' => trim((string)($item['gross_weight'] ?? '0')),
+                'less_weight' => trim((string)($item['less_weight'] ?? '0')),
+                'net_weight' => trim((string)($item['net_weight'] ?? '0')),
+                'rate_per_gram' => trim((string)($item['rate_per_gram'] ?? '0')),
+                'making_charge' => trim((string)($item['making_charge'] ?? '0')),
+                'stone_charge' => trim((string)($item['stone_charge'] ?? '0')),
+                'item_amount' => '0.00',
+                'discount_amount' => trim((string)($item['discount_amount'] ?? '0')),
+                'taxable_amount' => '0.00',
+                'gst_percent' => trim((string)($item['gst_percent'] ?? '3')),
+                'gst_amount' => '0.00',
+                'total_amount' => '0.00'
             ];
 
-            $blankRow = (
-                $row['product_id'] <= 0 &&
-                $row['item_name'] === '' &&
-                (float)$row['qty'] <= 0 &&
-                (float)$row['net_weight'] <= 0
-            );
-
-            if ($blankRow) {
+            if ($row['product_id'] <= 0 && $row['item_name'] === '') {
                 continue;
             }
 
@@ -923,412 +517,301 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $prd = getProductRow($conn, $row['product_id'], $businessId, $prdHasBusinessId);
                 if ($prd) {
                     $row['item_name'] = (string)($prd['product_name'] ?? '');
-                    if ($row['purity'] === '' && isset($prd['purity'])) {
-                        $row['purity'] = (string)$prd['purity'];
-                    }
                 }
             }
 
-            if (
-                $row['item_name'] === '' ||
-                !is_numeric($row['qty']) ||
-                !is_numeric($row['gross_weight']) ||
-                !is_numeric($row['less_weight']) ||
-                !is_numeric($row['net_weight']) ||
-                !is_numeric($row['rate_per_gram']) ||
-                !is_numeric($row['making_charge']) ||
-                !is_numeric($row['stone_charge']) ||
-                !is_numeric($row['discount_amount']) ||
-                !is_numeric($row['gst_percent'])
-            ) {
-                $error = 'Invalid item values found.';
-                break;
+            foreach (['qty','gram_per_qty','less_weight','rate_per_gram','making_charge','stone_charge','discount_amount','gst_percent'] as $numericField) {
+                if (!is_numeric($row[$numericField])) {
+                    $error = 'Invalid item values found.';
+                    break 2;
+                }
             }
 
             $qty = (float)$row['qty'];
-            $grossWeight = (float)$row['gross_weight'];
-            $lessWeight = (float)$row['less_weight'];
-            $netWeight = (float)$row['net_weight'];
-            $ratePerGram = (float)$row['rate_per_gram'];
-            $makingCharge = (float)$row['making_charge'];
-            $stoneCharge = (float)$row['stone_charge'];
-            $itemDiscount = (float)$row['discount_amount'];
-            $gstPercent = (float)$row['gst_percent'];
+            $gramPerQty = (float)$row['gram_per_qty'];
+            $grossWeight = round($qty * $gramPerQty, 3);
+            $lessWeight = max(0, (float)$row['less_weight']);
+            $netWeight = max(0, round($grossWeight - $lessWeight, 3));
+            $ratePerGram = max(0, (float)$row['rate_per_gram']);
+            $makingCharge = max(0, (float)$row['making_charge']);
+            $stoneCharge = max(0, (float)$row['stone_charge']);
+            $itemDiscount = max(0, (float)$row['discount_amount']);
+            $gstPercent = max(0, (float)$row['gst_percent']);
 
-            if ($qty <= 0) {
-                $error = 'Item quantity must be greater than zero.';
-                break;
-            }
-
-            if ($grossWeight < 0 || $lessWeight < 0 || $netWeight < 0) {
-                $error = 'Weight values cannot be negative.';
+            if ($qty <= 0 || $gramPerQty < 0) {
+                $error = 'Item quantity and grams must be valid.';
                 break;
             }
 
             $itemAmount = ($netWeight * $ratePerGram) + $makingCharge + $stoneCharge;
-            $taxableAmount = $itemAmount - $itemDiscount;
-
-            if ($taxableAmount < 0) {
-                $taxableAmount = 0;
-            }
-
+            $taxableAmount = max(0, $itemAmount - $itemDiscount);
             $gstAmount = ($taxableAmount * $gstPercent) / 100;
             $totalAmount = $taxableAmount + $gstAmount;
 
+            $row['gross_weight'] = qtyf($grossWeight);
+            $row['net_weight'] = qtyf($netWeight);
             $row['item_amount'] = moneyf($itemAmount);
             $row['taxable_amount'] = moneyf($taxableAmount);
             $row['gst_amount'] = moneyf($gstAmount);
             $row['total_amount'] = moneyf($totalAmount);
-
             $cleanItems[] = $row;
         }
 
-        $formItems = !empty($cleanItems) ? $cleanItems : $formItems;
+        $formItems = $cleanItems ?: $formItems;
 
-        if ($error === '' && empty($cleanItems)) {
+        if ($error === '' && !$cleanItems) {
             $error = 'Please add at least one valid item.';
+        }
+        if ($error === '' && $confirmPurchase !== 1) {
+            $error = 'Please verify the purchase preview and confirm before updating.';
         }
 
         if ($error === '') {
-            $subtotal = 0.00;
-            $taxableTotal = 0.00;
-            $gstTotal = 0.00;
-
+            $subtotal = 0.0;
+            $taxableTotal = 0.0;
+            $gstTotal = 0.0;
             foreach ($cleanItems as $row) {
                 $subtotal += (float)$row['item_amount'];
                 $taxableTotal += (float)$row['taxable_amount'];
                 $gstTotal += (float)$row['gst_amount'];
             }
 
-            $discountAmountF = (float)$discountAmount;
+            $discountAmountF = max(0, (float)$discountAmount);
             $roundOffF = (float)$roundOff;
-            $paidAmountF = (float)$paidAmount;
-
+            $paidAmountF = max(0, (float)$paidAmount);
+            $finalTaxable = max(0, $taxableTotal - $discountAmountF);
             $cgstAmount = round($gstTotal / 2, 2);
             $sgstAmount = round($gstTotal / 2, 2);
-            $igstAmount = 0.00;
-            $grandTotal = $taxableTotal + $gstTotal + $roundOffF;
-            $balanceAmount = $grandTotal - $paidAmountF;
-
-            if ($balanceAmount < 0) {
-                $balanceAmount = 0;
-            }
-
-            $paymentStatus = 'Unpaid';
-
-            if ($paidAmountF > 0 && $paidAmountF < $grandTotal) {
-                $paymentStatus = 'Partial';
-            } elseif ($paidAmountF >= $grandTotal && $grandTotal > 0) {
-                $paymentStatus = 'Paid';
-            }
+            $igstAmount = 0.0;
+            $grandTotal = max(0, $finalTaxable + $gstTotal + $roundOffF);
+            $paidAmountF = min($paidAmountF, $grandTotal);
+            $balanceAmount = max(0, $grandTotal - $paidAmountF);
+            $paymentStatus = $paidAmountF <= 0 ? 'Unpaid' : ($paidAmountF >= $grandTotal ? 'Paid' : 'Partial');
 
             $conn->begin_transaction();
-
             try {
-                /* ---------------------------------------------
-                   REVERSE OLD PURCHASE STOCK
-                --------------------------------------------- */
+                $lockStmt = $conn->prepare(
+                    "SELECT * FROM purchases
+                     WHERE id=? AND business_id=? AND branch_id=?
+                     FOR UPDATE"
+                );
+                if (!$lockStmt) throw new Exception('Unable to lock purchase: ' . $conn->error);
+                $lockStmt->bind_param('iii', $purchaseId, $businessId, $branchId);
+                $lockStmt->execute();
+                $oldPurchase = $lockStmt->get_result()->fetch_assoc();
+                $lockStmt->close();
+                if (!$oldPurchase) throw new Exception('Purchase not found.');
+
                 $oldItems = [];
+                $oldItemStmt = $conn->prepare(
+                    "SELECT * FROM purchase_items
+                     WHERE purchase_id=? AND business_id=? AND branch_id=?"
+                );
+                if (!$oldItemStmt) throw new Exception('Unable to load old items: ' . $conn->error);
+                $oldItemStmt->bind_param('iii', $purchaseId, $businessId, $branchId);
+                $oldItemStmt->execute();
+                $oldResult = $oldItemStmt->get_result();
+                while ($oldRow = $oldResult->fetch_assoc()) $oldItems[] = $oldRow;
+                $oldItemStmt->close();
 
-                $stmt = $conn->prepare("
-                    SELECT product_id, quantity, gross_weight, net_weight, line_total
-                    FROM purchase_items
-                    WHERE purchase_id = ?
-                      AND business_id = ?
-                      AND branch_id = ?
-                ");
+                // Reverse old posted stock before applying edited rows.
+                if ((string)($oldPurchase['workflow_status'] ?? '') === 'Posted') {
+                    foreach ($oldItems as $oldItem) {
+                        $oldProductId = (int)($oldItem['product_id'] ?? 0);
+                        if ($oldProductId <= 0) continue;
+                        $oldQty = (float)($oldItem['quantity'] ?? 0);
+                        $oldGross = (float)($oldItem['gross_weight'] ?? 0);
+                        $oldNet = (float)($oldItem['net_weight'] ?? 0);
+                        $oldValue = (float)($oldItem['line_total'] ?? 0);
 
-                if (!$stmt) {
-                    throw new Exception('Failed to prepare old purchase item lookup: ' . $conn->error);
-                }
-
-                $oldBranchId = (int)($purchase['branch_id'] ?? $branchId);
-                $stmt->bind_param('iii', $purchaseId, $businessId, $oldBranchId);
-
-                if (!$stmt->execute()) {
-                    throw new Exception('Failed to load old purchase items: ' . $stmt->error);
-                }
-
-                $res = $stmt->get_result();
-                while ($res && ($oldRow = $res->fetch_assoc())) {
-                    $oldItems[] = $oldRow;
-                }
-                $stmt->close();
-
-                foreach ($oldItems as $old) {
-                    $oldProductId = (int)($old['product_id'] ?? 0);
-
-                    if ($oldProductId <= 0) {
-                        continue;
+                        $reverseStmt = $conn->prepare(
+                            "UPDATE product_stock
+                             SET quantity=GREATEST(quantity-?,0),
+                                 gross_weight=GREATEST(gross_weight-?,0),
+                                 net_weight=GREATEST(net_weight-?,0),
+                                 stock_value=GREATEST(stock_value-?,0),
+                                 average_cost=CASE
+                                     WHEN GREATEST(quantity-?,0)>0
+                                     THEN GREATEST(stock_value-?,0)/GREATEST(quantity-?,0)
+                                     ELSE 0 END
+                             WHERE business_id=? AND branch_id=? AND product_id=?"
+                        );
+                        if (!$reverseStmt) throw new Exception('Unable to reverse stock: ' . $conn->error);
+                        $reverseStmt->bind_param('dddddddiii', $oldQty, $oldGross, $oldNet, $oldValue, $oldQty, $oldValue, $oldQty, $businessId, $branchId, $oldProductId);
+                        if (!$reverseStmt->execute()) throw new Exception('Unable to reverse old stock: ' . $reverseStmt->error);
+                        $reverseStmt->close();
                     }
 
-                    updateCurrentProductStock(
-                        $conn,
-                        $businessId,
-                        $oldBranchId,
-                        $oldProductId,
-                        -1 * (float)($old['quantity'] ?? 0),
-                        -1 * (float)($old['gross_weight'] ?? 0),
-                        -1 * (float)($old['net_weight'] ?? 0),
-                        -1 * (float)($old['line_total'] ?? 0)
+                    $moveDelete = $conn->prepare(
+                        "DELETE FROM stock_movements
+                         WHERE business_id=? AND branch_id=?
+                           AND reference_table='purchases' AND reference_id=?"
                     );
-                }
-
-                /* ---------------------------------------------
-                   DELETE OLD ITEMS
-                --------------------------------------------- */
-                $stmt = $conn->prepare("
-                    DELETE FROM purchase_items
-                    WHERE purchase_id = ?
-                      AND business_id = ?
-                      AND branch_id = ?
-                ");
-
-                if (!$stmt) {
-                    throw new Exception('Failed to prepare old item delete: ' . $conn->error);
-                }
-
-                $stmt->bind_param('iii', $purchaseId, $businessId, $oldBranchId);
-
-                if (!$stmt->execute()) {
-                    throw new Exception('Failed to delete old purchase items: ' . $stmt->error);
-                }
-
-                $stmt->close();
-
-                /* ---------------------------------------------
-                   DELETE OLD STOCK MOVEMENTS
-                --------------------------------------------- */
-                if (tableExists($conn, 'stock_movements')) {
-                    $stmt = $conn->prepare("
-                        DELETE FROM stock_movements
-                        WHERE reference_table = 'purchases'
-                          AND reference_id = ?
-                          AND business_id = ?
-                          AND branch_id = ?
-                    ");
-
-                    if (!$stmt) {
-                        throw new Exception('Failed to prepare old stock movement delete: ' . $conn->error);
-                    }
-
-                    $stmt->bind_param('iii', $purchaseId, $businessId, $oldBranchId);
-
-                    if (!$stmt->execute()) {
-                        throw new Exception('Failed to delete old stock movements: ' . $stmt->error);
-                    }
-
-                    $stmt->close();
-                }
-
-                /* ---------------------------------------------
-                   UPDATE PURCHASE HEADER
-                --------------------------------------------- */
-                $purParts = [];
-                $purTypes = '';
-                $purValues = [];
-
-                $purchaseColumns = [
-                    'branch_id'         => [(int)($purchase['branch_id'] ?? $branchId), 'i'],
-                    'purchase_no'       => [$purchaseNo, 's'],
-                    'purchase_date'     => [$purchaseDate, 's'],
-                    'supplier_id'       => [$supplierId, 'i'],
-                    'invoice_no'        => [$invoiceNo, 's'],
-                    'supplier_invoice_no' => [$invoiceNo, 's'],
-                    'payment_method_id' => [$paymentMethodId > 0 ? $paymentMethodId : null, 'i'],
-                    'subtotal'          => [$subtotal, 'd'],
-                    'discount_amount'   => [$discountAmountF, 'd'],
-                    'taxable_amount'    => [$taxableTotal, 'd'],
-                    'cgst_amount'       => [$cgstAmount, 'd'],
-                    'sgst_amount'       => [$sgstAmount, 'd'],
-                    'igst_amount'       => [$igstAmount, 'd'],
-                    'round_off'         => [$roundOffF, 'd'],
-                    'grand_total'       => [$grandTotal, 'd'],
-                    'paid_amount'       => [$paidAmountF, 'd'],
-                    'balance_amount'    => [$balanceAmount, 'd'],
-                    'payment_status'    => [$paymentStatus, 's'],
-                    'notes'             => [$notes, 's'],
-                ];
-
-                foreach ($purchaseColumns as $col => $cfg) {
-                    if (hasColumn($conn, 'purchases', $col)) {
-                        $purParts[] = "`$col` = ?";
-                        $purTypes .= $cfg[1];
-                        $purValues[] = $cfg[0];
+                    if ($moveDelete) {
+                        $moveDelete->bind_param('iii', $businessId, $branchId, $purchaseId);
+                        $moveDelete->execute();
+                        $moveDelete->close();
                     }
                 }
 
-                if (hasColumn($conn, 'purchases', 'updated_at')) {
-                    $purParts[] = "updated_at = NOW()";
-                }
-
-                if (empty($purParts)) {
-                    throw new Exception('No purchase columns found for update.');
-                }
-
-                $sql = "UPDATE purchases SET " . implode(', ', $purParts) . " WHERE id = ?";
-                $purTypes .= 'i';
-                $purValues[] = $purchaseId;
-
-                if ($purHasBusinessId) {
-                    $sql .= " AND business_id = ?";
-                    $purTypes .= 'i';
-                    $purValues[] = $businessId;
-                }
-
-                $sql .= " LIMIT 1";
-
-                $stmt = $conn->prepare($sql);
-
-                if (!$stmt) {
-                    throw new Exception('Failed to prepare purchase update: ' . $conn->error);
-                }
-
-                $bindValues = [];
-                $bindValues[] = $purTypes;
-
-                for ($i = 0; $i < count($purValues); $i++) {
-                    $bindValues[] = &$purValues[$i];
-                }
-
-                call_user_func_array([$stmt, 'bind_param'], $bindValues);
-
-                if (!$stmt->execute()) {
-                    throw new Exception('Failed to update purchase: ' . $stmt->error);
-                }
-
-                $stmt->close();
-
-                /* ---------------------------------------------
-                   INSERT NEW ITEMS + STOCK
-                --------------------------------------------- */
-                foreach ($cleanItems as $row) {
-                    $pitFields = [];
-                    $pitPlaceholders = [];
-                    $pitTypes = '';
-                    $pitValues = [];
-
-                    if ($pitHasBusinessId) {
-                        $pitFields[] = 'business_id';
-                        $pitPlaceholders[] = '?';
-                        $pitTypes .= 'i';
-                        $pitValues[] = $businessId;
-                    }
-
-                    if (hasColumn($conn, 'purchase_items', 'branch_id')) {
-                        $pitFields[] = 'branch_id';
-                        $pitPlaceholders[] = '?';
-                        $pitTypes .= 'i';
-                        $pitValues[] = (int)($_SESSION['branch_id'] ?? $purchase['branch_id'] ?? 0);
-                    }
-
-                    $productIdValue = $row['product_id'] > 0 ? $row['product_id'] : null;
-
-                    $itemColumns = [
-                        'purchase_id'     => [$purchaseId, 'i'],
-                        'product_id'      => [$productIdValue, 'i'],
-                        'item_name'       => [$row['item_name'], 's'],
-                        'purity'          => [$row['purity'], 's'],
-                        'hsn_code'        => [$row['hsn_code'], 's'],
-                        'qty'             => [(float)$row['qty'], 'd'],
-                        'quantity'        => [(float)$row['qty'], 'd'],
-                        'gross_weight'    => [(float)$row['gross_weight'], 'd'],
-                        'less_weight'     => [(float)$row['less_weight'], 'd'],
-                        'net_weight'      => [(float)$row['net_weight'], 'd'],
-                        'rate_per_gram'   => [(float)$row['rate_per_gram'], 'd'],
-                        'rate'            => [(float)$row['rate_per_gram'], 'd'],
-                        'making_charge'   => [(float)$row['making_charge'], 'd'],
-                        'stone_charge'    => [(float)$row['stone_charge'], 'd'],
-                        'item_amount'     => [(float)$row['item_amount'], 'd'],
-                        'discount_amount' => [(float)$row['discount_amount'], 'd'],
-                        'taxable_amount'  => [(float)$row['taxable_amount'], 'd'],
-                        'gst_percent'     => [(float)$row['gst_percent'], 'd'],
-                        'tax_percent'     => [(float)$row['gst_percent'], 'd'],
-                        'gst_amount'      => [(float)$row['gst_amount'], 'd'],
-                        'tax_amount'      => [(float)$row['gst_amount'], 'd'],
-                        'total_amount'    => [(float)$row['total_amount'], 'd'],
-                        'line_total'      => [(float)$row['total_amount'], 'd'],
-                    ];
-
-                    foreach ($itemColumns as $col => $cfg) {
-                        if (hasColumn($conn, 'purchase_items', $col)) {
-                            $pitFields[] = "`$col`";
-                            $pitPlaceholders[] = '?';
-                            $pitTypes .= $cfg[1];
-                            $pitValues[] = $cfg[0];
+                if (hasColumn($conn, 'suppliers', 'current_balance')) {
+                    $oldBalance = (float)($oldPurchase['balance_amount'] ?? 0);
+                    $oldSupplierId = (int)($oldPurchase['supplier_id'] ?? 0);
+                    if ($oldSupplierId > 0 && $oldBalance > 0) {
+                        $balanceReverse = $conn->prepare(
+                            "UPDATE suppliers
+                             SET current_balance=GREATEST(COALESCE(current_balance,0)-?,0)
+                             WHERE id=? AND business_id=?"
+                        );
+                        if ($balanceReverse) {
+                            $balanceReverse->bind_param('dii', $oldBalance, $oldSupplierId, $businessId);
+                            $balanceReverse->execute();
+                            $balanceReverse->close();
                         }
                     }
+                }
 
-                    $sql = "INSERT INTO purchase_items (" . implode(', ', $pitFields) . ") VALUES (" . implode(', ', $pitPlaceholders) . ")";
-                    $stmt = $conn->prepare($sql);
+                $supplierInvoiceNo = $invoiceNo !== '' ? $invoiceNo : null;
+                $updateStmt = $conn->prepare(
+                    "UPDATE purchases SET
+                        purchase_no=?, supplier_invoice_no=?, purchase_date=?, supplier_id=?,
+                        subtotal=?, discount_amount=?, taxable_amount=?, cgst_amount=?, sgst_amount=?,
+                        igst_amount=?, grand_total=?, paid_amount=?, balance_amount=?, payment_status=?,
+                        notes=?
+                     WHERE id=? AND business_id=? AND branch_id=?"
+                );
+                $updateStmt->bind_param(
+                    'sssidddddddddssiii',
+                    $purchaseNo, $supplierInvoiceNo, $purchaseDate, $supplierId,
+                    $subtotal, $discountAmountF, $finalTaxable, $cgstAmount, $sgstAmount,
+                    $igstAmount, $grandTotal, $paidAmountF, $balanceAmount, $paymentStatus,
+                    $notes, $purchaseId, $businessId, $branchId
+                );
+                if (!$updateStmt->execute()) throw new Exception('Unable to update purchase: ' . $updateStmt->error);
+                $updateStmt->close();
 
-                    if (!$stmt) {
-                        throw new Exception('Failed to prepare purchase item insert: ' . $conn->error);
-                    }
+                $deleteItems = $conn->prepare(
+                    "DELETE FROM purchase_items
+                     WHERE purchase_id=? AND business_id=? AND branch_id=?"
+                );
+                if (!$deleteItems) throw new Exception('Unable to delete old purchase items: ' . $conn->error);
+                $deleteItems->bind_param('iii', $purchaseId, $businessId, $branchId);
+                $deleteItems->execute();
+                $deleteItems->close();
 
-                    $bindValues = [];
-                    $bindValues[] = $pitTypes;
+                $itemStmt = $conn->prepare(
+                    "INSERT INTO purchase_items
+                    (business_id,branch_id,purchase_id,product_id,item_name,quantity,gross_weight,net_weight,rate,tax_percent,tax_amount,line_total)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
+                );
+                if (!$itemStmt) throw new Exception('Unable to prepare purchase item insert: ' . $conn->error);
 
-                    for ($i = 0; $i < count($pitValues); $i++) {
-                        $bindValues[] = &$pitValues[$i];
-                    }
+                foreach ($cleanItems as $row) {
+                    $productIdValue = (int)$row['product_id'] > 0 ? (int)$row['product_id'] : null;
+                    $quantityValue = (float)$row['qty'];
+                    $grossWeightValue = (float)$row['gross_weight'];
+                    $netWeightValue = (float)$row['net_weight'];
+                    $rateValue = (float)$row['rate_per_gram'];
+                    $taxPercentValue = (float)$row['gst_percent'];
+                    $taxAmountValue = (float)$row['gst_amount'];
+                    $lineTotalValue = (float)$row['total_amount'];
+                    $itemNameValue = (string)$row['item_name'];
 
-                    call_user_func_array([$stmt, 'bind_param'], $bindValues);
+                    $itemStmt->bind_param('iiiisddddddd', $businessId, $branchId, $purchaseId, $productIdValue, $itemNameValue, $quantityValue, $grossWeightValue, $netWeightValue, $rateValue, $taxPercentValue, $taxAmountValue, $lineTotalValue);
+                    if (!$itemStmt->execute()) throw new Exception('Unable to save purchase item: ' . $itemStmt->error);
 
-                    if (!$stmt->execute()) {
-                        throw new Exception('Failed to save purchase item: ' . $stmt->error);
-                    }
+                    if ($productIdValue === null) continue;
 
-                    $stmt->close();
+                    $stockLock = $conn->prepare(
+                        "SELECT * FROM product_stock
+                         WHERE business_id=? AND branch_id=? AND product_id=?
+                         LIMIT 1 FOR UPDATE"
+                    );
+                    if (!$stockLock) throw new Exception('Unable to read product stock: ' . $conn->error);
+                    $stockLock->bind_param('iii', $businessId, $branchId, $productIdValue);
+                    $stockLock->execute();
+                    $stockRow = $stockLock->get_result()->fetch_assoc();
+                    $stockLock->close();
 
-                    $productId = (int)$row['product_id'];
-                    $qty = (float)$row['qty'];
-                    $netWeight = (float)$row['net_weight'];
-
-                    if ($productId > 0) {
-                        $currentBranchId = (int)($purchase['branch_id'] ?? $branchId);
-                        $lineValue = (float)$row['total_amount'];
-
-                        updateCurrentProductStock(
-                            $conn,
-                            $businessId,
-                            $currentBranchId,
-                            $productId,
-                            $qty,
-                            (float)$row['gross_weight'],
-                            $netWeight,
-                            $lineValue
+                    if ($stockRow) {
+                        $newQty = (float)$stockRow['quantity'] + $quantityValue;
+                        $newGross = (float)$stockRow['gross_weight'] + $grossWeightValue;
+                        $newNet = (float)$stockRow['net_weight'] + $netWeightValue;
+                        $newValue = (float)$stockRow['stock_value'] + $lineTotalValue;
+                        $newAverage = $newQty > 0 ? $newValue / $newQty : 0;
+                        $stockId = (int)$stockRow['id'];
+                        $stockUpdate = $conn->prepare(
+                            "UPDATE product_stock SET quantity=?,gross_weight=?,net_weight=?,average_cost=?,stock_value=? WHERE id=?"
                         );
-
-                        insertPurchaseStockMovement(
-                            $conn,
-                            $businessId,
-                            $currentBranchId,
-                            $productId,
-                            $purchaseId,
-                            $qty,
-                            $netWeight,
-                            (float)$row['rate_per_gram'],
-                            $lineValue,
-                            $userId,
-                            'Purchase updated: ' . $purchaseNo
+                        if (!$stockUpdate) throw new Exception('Unable to prepare stock update: ' . $conn->error);
+                        $stockUpdate->bind_param('dddddi', $newQty, $newGross, $newNet, $newAverage, $newValue, $stockId);
+                        if (!$stockUpdate->execute()) throw new Exception('Unable to update stock: ' . $stockUpdate->error);
+                        $stockUpdate->close();
+                    } else {
+                        $averageCost = $quantityValue > 0 ? $lineTotalValue / $quantityValue : 0;
+                        $stockInsert = $conn->prepare(
+                            "INSERT INTO product_stock
+                            (business_id,branch_id,product_id,quantity,gross_weight,net_weight,average_cost,stock_value)
+                            VALUES (?,?,?,?,?,?,?,?)"
                         );
+                        if (!$stockInsert) throw new Exception('Unable to prepare stock insert: ' . $conn->error);
+                        $stockInsert->bind_param('iiiddddd', $businessId, $branchId, $productIdValue, $quantityValue, $grossWeightValue, $netWeightValue, $averageCost, $lineTotalValue);
+                        if (!$stockInsert->execute()) throw new Exception('Unable to create stock: ' . $stockInsert->error);
+                        $stockInsert->close();
+                    }
+
+                    if (tableExists($conn, 'stock_movements')) {
+                        $remarks = 'Edited purchase ' . $purchaseNo;
+                        $movementStmt = $conn->prepare(
+                            "INSERT INTO stock_movements
+                            (business_id,branch_id,product_id,movement_date,movement_type,reference_table,reference_id,quantity_in,weight_in,rate,value_amount,remarks,created_by)
+                            VALUES (?,?,?,NOW(),'Purchase','purchases',?,?,?,?,?,?,?)"
+                        );
+                        if ($movementStmt) {
+                            $movementStmt->bind_param('iiiiddddsi', $businessId, $branchId, $productIdValue, $purchaseId, $quantityValue, $netWeightValue, $rateValue, $lineTotalValue, $remarks, $userId);
+                            $movementStmt->execute();
+                            $movementStmt->close();
+                        }
+                    }
+                }
+                $itemStmt->close();
+
+                if (hasColumn($conn, 'suppliers', 'current_balance') && $supplierId > 0 && $balanceAmount > 0) {
+                    $balanceAdd = $conn->prepare(
+                        "UPDATE suppliers
+                         SET current_balance=COALESCE(current_balance,0)+?
+                         WHERE id=? AND business_id=?"
+                    );
+                    if ($balanceAdd) {
+                        $balanceAdd->bind_param('dii', $balanceAmount, $supplierId, $businessId);
+                        $balanceAdd->execute();
+                        $balanceAdd->close();
                     }
                 }
 
-                addAuditLog(
-                    $conn,
-                    $businessId,
-                    $userId,
-                    'Purchases',
-                    'Update',
-                    $purchaseId,
-                    'Updated purchase ' . $purchaseNo
-                );
+                if (tableExists($conn, 'audit_logs')) {
+                    $description = 'Updated purchase ' . $purchaseNo;
+                    $oldJson = json_encode($oldPurchase, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+                    $newJson = json_encode([
+                        'purchase_no'=>$purchaseNo,'supplier_id'=>$supplierId,'grand_total'=>$grandTotal,
+                        'paid_amount'=>$paidAmountF,'balance_amount'=>$balanceAmount,'payment_status'=>$paymentStatus
+                    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+                    $ip = (string)($_SERVER['REMOTE_ADDR'] ?? '');
+                    $agent = (string)($_SERVER['HTTP_USER_AGENT'] ?? '');
+                    $auditStmt = $conn->prepare(
+                        "INSERT INTO audit_logs
+                        (business_id,branch_id,user_id,module_code,action_type,reference_table,reference_id,description,old_values_json,new_values_json,ip_address,user_agent)
+                        VALUES (?,?,?,'purchases','Update','purchases',?,?,?,?,?,?,?)"
+                    );
+                    if ($auditStmt) {
+                        $auditStmt->bind_param('iiiisssss', $businessId, $branchId, $userId, $purchaseId, $description, $oldJson, $newJson, $ip, $agent);
+                        $auditStmt->execute();
+                        $auditStmt->close();
+                    }
+                }
 
                 $conn->commit();
-
-                header('Location: purchase-view.php?id=' . $purchaseId . '&msg=updated');
+                header('Location: purchases.php?msg=updated');
                 exit;
             } catch (Throwable $e) {
                 $conn->rollback();
@@ -1337,8 +820,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 }
+?>
 
-
+<?php
 $theme = [
     'primary_color' => '#d89416',
     'primary_dark_color' => '#b86a0b',
@@ -1374,320 +858,826 @@ if (tableExists($conn, 'business_theme_settings')) {
 }
 
 $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
+$currencySymbol = (string)($_SESSION['currency_symbol'] ?? '₹');
 ?>
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title><?php echo h($businessName); ?> - Edit Purchase</title>
-<?php include('includes/links.php'); ?>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title><?php echo h($businessName); ?> - Edit Purchase</title>
+    <?php include('includes/links.php'); ?>
 
-<style>
-:root{
-    --primary:<?php echo h($theme['primary_color']); ?>;
-    --primary-dark:<?php echo h($theme['primary_dark_color']); ?>;
-    --primary-soft:<?php echo h($theme['primary_soft_color']); ?>;
-    --sidebar-gradient-1:<?php echo h($theme['sidebar_gradient_1']); ?>;
-    --sidebar-gradient-2:<?php echo h($theme['sidebar_gradient_2']); ?>;
-    --sidebar-gradient-3:<?php echo h($theme['sidebar_gradient_3']); ?>;
-    --page-bg:<?php echo h($theme['page_background']); ?>;
-    --card-bg:<?php echo h($theme['card_background']); ?>;
-    --text-color:<?php echo h($theme['text_color']); ?>;
-    --muted-color:<?php echo h($theme['muted_text_color']); ?>;
-    --border-color:<?php echo h($theme['border_color']); ?>;
-    --sidebar-width:<?php echo (int)$theme['sidebar_width_px']; ?>px;
-    --radius:<?php echo (int)$theme['border_radius_px']; ?>px;
-}
-body{background:var(--page-bg);color:var(--text-color);font-family:<?php echo json_encode((string)$theme['font_family']); ?>,sans-serif;}
-.sidebar{background:linear-gradient(180deg,var(--sidebar-gradient-1),var(--sidebar-gradient-2),var(--sidebar-gradient-3))!important;}
-.card{background:var(--card-bg);border:1px solid var(--border-color);border-radius:var(--radius);box-shadow:none;margin-bottom:12px;}
-.card-body{padding:14px;}
-.card-title,h4,h5{font-family:<?php echo json_encode((string)$theme['heading_font_family']); ?>,serif;font-weight:800;}
-.form-label{font-size:10px;font-weight:700;margin-bottom:5px;}
-.form-control,.form-select{min-height:38px;border-radius:9px;border-color:var(--border-color);background:var(--card-bg);color:var(--text-color);font-size:11px;box-shadow:none;}
-.form-control:focus,.form-select:focus{border-color:var(--primary);box-shadow:0 0 0 .2rem color-mix(in srgb,var(--primary) 13%,transparent);}
-.btn{border-radius:9px;font-size:11px;font-weight:700;}
-.btn-primary{background:linear-gradient(135deg,var(--primary),var(--primary-dark));border-color:transparent;}
-.btn-primary:hover{border-color:transparent;filter:brightness(1.03);}
-.btn-info{background:var(--primary-soft);border-color:color-mix(in srgb,var(--primary) 25%,var(--border-color));color:var(--primary-dark);}
-.table{font-size:10px;color:var(--text-color);}
-.table th{padding:9px 8px;background:color-mix(in srgb,var(--muted-color) 6%,var(--card-bg));color:var(--muted-color);border-color:var(--border-color);font-size:9px;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap;}
-.table td{padding:9px 8px;background:var(--card-bg)!important;color:var(--text-color);border-color:var(--border-color);vertical-align:middle;}
-.table-responsive{border-radius:var(--radius);}
-.alert{border:0;border-radius:10px;font-size:11px;}
-.badge{font-size:9px;border-radius:999px;padding:5px 8px;}
-.purchase-page-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px;background:var(--card-bg);border:1px solid var(--border-color);border-radius:var(--radius);padding:12px 14px;}
-.purchase-page-title{font-family:<?php echo json_encode((string)$theme['heading_font_family']); ?>,serif;font-size:18px;font-weight:800;margin:0;}
-.purchase-page-subtitle{font-size:10px;color:var(--muted-color);margin-top:2px;}
-#itemsTable{min-width:1600px;}
-#itemsTable input,#itemsTable select{min-width:78px;height:34px;font-size:10px;padding:5px 7px;}
-.info-table th,.purchase-summary-table th{width:180px;background:color-mix(in srgb,var(--muted-color) 6%,var(--card-bg));}
-body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark"] body{--page-bg:#0f151b;--card-bg:#182129;--text-color:#f3f6f8;--muted-color:#9aa7b3;--border-color:#2c3944;}
-@media(max-width:767.98px){.content-wrap{padding-left:10px;padding-right:10px}.purchase-page-head{align-items:flex-start;flex-direction:column}.purchase-page-head .d-flex{width:100%;flex-wrap:wrap}.purchase-page-head .btn{flex:1}}
-@media print{
-    .sidebar,.app-nav,.no-print,.footer{display:none!important}
-    .app-main{margin-left:0!important}
-    .content-wrap{padding:0!important}
-    .card{border:1px solid #ddd!important}
-}
-</style>
+    <style>
+        :root {
+            --primary: <?php echo h($theme['primary_color']); ?>;
+            --primary-dark: <?php echo h($theme['primary_dark_color']); ?>;
+            --primary-soft: <?php echo h($theme['primary_soft_color']); ?>;
+            --sidebar-gradient-1: <?php echo h($theme['sidebar_gradient_1']); ?>;
+            --sidebar-gradient-2: <?php echo h($theme['sidebar_gradient_2']); ?>;
+            --sidebar-gradient-3: <?php echo h($theme['sidebar_gradient_3']); ?>;
+            --page-bg: <?php echo h($theme['page_background']); ?>;
+            --card-bg: <?php echo h($theme['card_background']); ?>;
+            --text-color: <?php echo h($theme['text_color']); ?>;
+            --muted-color: <?php echo h($theme['muted_text_color']); ?>;
+            --border-color: <?php echo h($theme['border_color']); ?>;
+            --sidebar-width: <?php echo (int)$theme['sidebar_width_px']; ?>px;
+            --radius: <?php echo (int)$theme['border_radius_px']; ?>px;
+        }
 
-<style>
-    #itemsTable {
-        min-width: 2100px;
-    }
+        body {
+            background: var(--page-bg);
+            color: var(--text-color);
+            font-family: <?php echo json_encode((string)$theme['font_family']); ?>, sans-serif;
+        }
 
-    #itemsTable th,
-    #itemsTable td {
-        vertical-align: middle;
-        white-space: nowrap;
-    }
+        .sidebar {
+            background: linear-gradient(
+                180deg,
+                var(--sidebar-gradient-1),
+                var(--sidebar-gradient-2),
+                var(--sidebar-gradient-3)
+            ) !important;
+        }
 
-    #itemsTable input,
-    #itemsTable select {
-        min-width: 75px;
-        height: 40px;
-        font-size: 14px;
-    }
+        .purchase-layout {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 320px;
+            gap: 12px;
+            align-items: start;
+        }
 
-    .purchase-summary-table th {
-        width: 45%;
-        background: #f8f9fa;
-    }
+        .section-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius);
+            overflow: hidden;
+            margin-bottom: 12px;
+        }
 
-    .purchase-summary-table input {
-        min-width: 160px;
-    }
-</style>
+        .section-head {
+            padding: 12px 14px;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .section-title {
+            margin: 0;
+            font-family: <?php echo json_encode((string)$theme['heading_font_family']); ?>, serif;
+            font-size: 15px;
+            font-weight: 800;
+        }
+
+        .section-subtitle {
+            margin-top: 2px;
+            color: var(--muted-color);
+            font-size: 9px;
+        }
+
+        .section-body {
+            padding: 14px;
+        }
+
+        .form-label {
+            margin-bottom: 5px;
+            font-size: 10px;
+            font-weight: 700;
+        }
+
+        .form-control,
+        .form-select {
+            min-height: 38px;
+            border-color: var(--border-color);
+            border-radius: 9px;
+            background: var(--card-bg);
+            color: var(--text-color);
+            font-size: 11px;
+            box-shadow: none;
+        }
+
+        .form-control:focus,
+        .form-select:focus {
+            border-color: var(--primary);
+            box-shadow: 0 0 0 .2rem color-mix(in srgb, var(--primary) 13%, transparent);
+        }
+
+        .btn-theme {
+            border: 0;
+            border-radius: 9px;
+            background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+            color: #fff;
+            padding: 9px 14px;
+            font-size: 11px;
+            font-weight: 700;
+        }
+
+        .btn-theme:hover {
+            color: #fff;
+            filter: brightness(1.03);
+        }
+
+        .btn-soft {
+            border: 1px solid color-mix(in srgb, var(--primary) 26%, var(--border-color));
+            border-radius: 9px;
+            background: var(--primary-soft);
+            color: var(--primary-dark);
+            padding: 8px 12px;
+            font-size: 11px;
+            font-weight: 700;
+        }
+
+        .purchase-items-wrap {
+            width: 100%;
+            overflow-x: auto;
+        }
+
+        #itemsTable {
+            min-width: 2180px;
+            margin: 0;
+            font-size: 10px;
+        }
+
+        #itemsTable th {
+            padding: 9px 7px;
+            border-color: var(--border-color);
+            background: color-mix(in srgb, var(--muted-color) 6%, var(--card-bg));
+            color: var(--muted-color);
+            font-size: 9px;
+            letter-spacing: .04em;
+            text-transform: uppercase;
+            white-space: nowrap;
+        }
+
+        #itemsTable td {
+            padding: 6px;
+            border-color: var(--border-color);
+            background: var(--card-bg) !important;
+            vertical-align: middle;
+        }
+
+        #itemsTable .form-control,
+        #itemsTable .form-select {
+            min-width: 82px;
+            min-height: 34px;
+            height: 34px;
+            padding: 5px 7px;
+            font-size: 10px;
+        }
+
+        #itemsTable .product-select {
+            min-width: 210px;
+        }
+
+        #itemsTable .item-name {
+            min-width: 180px;
+        }
+
+        .remove-row {
+            width: 30px;
+            height: 30px;
+            border: 1px solid #f1caca;
+            border-radius: 8px;
+            background: #fff0f0;
+            color: #b42318;
+            display: inline-flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .summary-card {
+            position: sticky;
+            top: 82px;
+        }
+
+        .summary-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px;
+            padding: 9px 0;
+            border-bottom: 1px dashed var(--border-color);
+            font-size: 11px;
+        }
+
+        .summary-row:last-child {
+            border-bottom: 0;
+        }
+
+        .summary-label {
+            color: var(--muted-color);
+        }
+
+        .summary-value {
+            font-weight: 800;
+            text-align: right;
+        }
+
+        .summary-input {
+            width: 116px;
+        }
+
+        .grand-total-row {
+            margin-top: 7px;
+            padding-top: 12px;
+            border-top: 1px solid var(--border-color);
+            border-bottom: 0;
+        }
+
+        .grand-total-row .summary-label {
+            color: var(--text-color);
+            font-weight: 800;
+        }
+
+        .grand-total-row .summary-value {
+            color: var(--primary-dark);
+            font-size: 20px;
+        }
+
+        .balance-box {
+            margin-top: 10px;
+            padding: 11px;
+            border-radius: 10px;
+            background: var(--primary-soft);
+        }
+
+        .status-pill {
+            display: inline-flex;
+            padding: 5px 9px;
+            border-radius: 999px;
+            background: #fdecec;
+            color: #bd2d2d;
+            font-size: 9px;
+            font-weight: 800;
+        }
+
+        .status-pill.partial {
+            background: #fff4dc;
+            color: #9a6200;
+        }
+
+        .status-pill.paid {
+            background: #eaf8f0;
+            color: #168449;
+        }
+
+        .modern-alert {
+            margin-bottom: 10px;
+            border: 0;
+            border-radius: 10px;
+            font-size: 11px;
+        }
+
+        .toast-stack {
+            position: fixed;
+            top: 84px;
+            right: 18px;
+            z-index: 25000;
+            display: grid;
+            gap: 10px;
+            width: min(390px, calc(100vw - 28px));
+            pointer-events: none;
+        }
+
+        .app-toast {
+            display: grid;
+            grid-template-columns: 22px minmax(0, 1fr) 24px;
+            align-items: center;
+            gap: 10px;
+            padding: 12px 13px;
+            border-radius: 11px;
+            color: #fff;
+            box-shadow: 0 16px 36px rgba(0,0,0,.24);
+            opacity: 0;
+            transform: translateX(18px);
+            transition: opacity .22s ease, transform .22s ease;
+            pointer-events: auto;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        .app-toast.show {
+            opacity: 1;
+            transform: translateX(0);
+        }
+
+        .app-toast.success { background: #168449; }
+        .app-toast.error { background: #c0392b; }
+        .app-toast.warning { background: #a96b00; }
+        .app-toast.info { background: #2367a8; }
+
+        .app-toast-message {
+            line-height: 1.4;
+            overflow-wrap: anywhere;
+        }
+
+        .app-toast-close {
+            width: 24px;
+            height: 24px;
+            border: 0;
+            border-radius: 7px;
+            background: rgba(255,255,255,.15);
+            color: #fff;
+            display: grid;
+            place-items: center;
+            cursor: pointer;
+        }
+
+
+        .preview-modal-content{max-height:92vh}
+        .preview-summary-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;margin-bottom:12px}
+        .preview-box{border:1px solid var(--border-color);border-radius:9px;padding:10px;background:var(--card-bg)}
+        .preview-label{color:var(--muted-color);font-size:8px;font-weight:800;text-transform:uppercase}
+        .preview-value{margin-top:3px;font-size:11px;font-weight:800}
+        .preview-table{font-size:10px;margin-bottom:0}.preview-table th{font-size:8px;color:var(--muted-color);text-transform:uppercase;white-space:nowrap}
+        .preview-table th,.preview-table td{padding:8px;border-color:var(--border-color);vertical-align:middle}
+        .preview-total-panel{max-width:420px;margin-left:auto;margin-top:12px}.preview-total-row{display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px dashed var(--border-color);font-size:11px}
+        .preview-total-row.final{font-size:15px;font-weight:900;color:var(--primary-dark)}
+        @media (max-width: 767.98px) {
+            .toast-stack {
+                top: 72px;
+                left: 12px;
+                right: 12px;
+                width: auto;
+            }
+        }
+
+        body.dark-mode,
+        body[data-theme="dark"],
+        html.dark-mode body,
+        html[data-theme="dark"] body {
+            --page-bg: #0f151b;
+            --card-bg: #182129;
+            --text-color: #f3f6f8;
+            --muted-color: #9aa7b3;
+            --border-color: #2c3944;
+        }
+
+        @media (max-width: 1199.98px) {
+            .purchase-layout {
+                grid-template-columns: 1fr;
+            }
+
+            .summary-card {
+                position: static;
+            }
+        }
+
+        @media (max-width: 767.98px) {
+            .content-wrap {
+                padding-left: 10px;
+                padding-right: 10px;
+            }
+
+            .section-body {
+                padding: 11px;
+            }
+
+            .section-head {
+                align-items: flex-start;
+            }
+        }
+    </style>
 </head>
+
 <body>
 <?php include('includes/sidebar.php'); ?>
+
 <main class="app-main">
-<?php include('includes/nav.php'); ?>
-<div class="content-wrap">
+    <?php include('includes/nav.php'); ?>
 
+    <div class="content-wrap">
+        <div class="toast-stack" id="toastStack" aria-live="polite" aria-atomic="true"></div>
 
-                <?php if ($success !== ''): ?>
-                    <div class="alert alert-success alert-dismissible fade show" role="alert">
-                        <?php echo h($success); ?>
-                        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-                    </div>
-                <?php endif; ?>
+        <div
+            id="serverToastData"
+            data-success="<?php echo h($success); ?>"
+            data-error="<?php echo h($error); ?>"
+            hidden
+        ></div>
 
-                <?php if ($error !== ''): ?>
-                    <div class="alert alert-danger alert-dismissible fade show" role="alert">
-                        <?php echo h($error); ?>
-                        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-                    </div>
-                <?php endif; ?>
+        <form method="post" id="purchaseForm" autocomplete="off">
+            <input type="hidden" name="purchase_id" value="<?php echo (int)$purchaseId; ?>">
+            <input type="hidden" name="confirm_purchase" id="confirm_purchase" value="0">
+            <div class="purchase-layout">
+                <div>
+                    <section class="section-card">
+                        <div class="section-head">
+                            <div>
+                                <h2 class="section-title">Edit Purchase Details</h2>
+                                <div class="section-subtitle">Update purchase number, supplier and invoice information.</div>
+                            </div>
 
-                <form method="post" id="purchaseForm">
-                    <input type="hidden" name="purchase_id" value="<?php echo (int)$purchaseId; ?>">
-                    <input type="hidden" name="items_json" id="itemsJson" value="">
+                            <a href="purchases.php" class="btn btn-light btn-sm">
+                                <i class="fa-solid fa-arrow-left me-1"></i>Back
+                            </a>
+                        </div>
 
-                    <div class="row">
-                        <div class="col-xl-12">
-                            <div class="card">
-                                <div class="card-body">
-                                    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
-                                        <div>
-                                            <h4 class="card-title mb-1">Edit Purchase</h4>
-                                            <p class="text-muted mb-0">Update purchase entry and item details</p>
-                                        </div>
-                                        <div class="d-flex gap-2">
-                                            <a href="purchase-view.php?id=<?php echo (int)$purchaseId; ?>" class="btn btn-info">
-                                                View
-                                            </a>
-                                            <a href="purchases.php" class="btn btn-secondary">
-                                                Back to Purchases
-                                            </a>
-                                        </div>
-                                    </div>
+                        <div class="section-body">
+                            <div class="row g-3">
+                                <div class="col-lg-3 col-md-6">
+                                    <label class="form-label">Purchase No</label>
+                                    <input
+                                        type="text"
+                                        name="purchase_no"
+                                        class="form-control"
+                                        value="<?php echo h($purchaseNo); ?>"
+                                        required
+                                    >
+                                </div>
 
-                                    <div class="row">
-                                        <div class="col-md-3 mb-3">
-                                            <label class="form-label">Purchase No</label>
-                                            <input type="text" name="purchase_no" class="form-control" value="<?php echo h($purchaseNo); ?>" required>
-                                        </div>
+                                <div class="col-lg-3 col-md-6">
+                                    <label class="form-label">Purchase Date</label>
+                                    <input
+                                        type="date"
+                                        name="purchase_date"
+                                        class="form-control"
+                                        value="<?php echo h($purchaseDate); ?>"
+                                        required
+                                    >
+                                </div>
 
-                                        <div class="col-md-3 mb-3">
-                                            <label class="form-label">Purchase Date</label>
-                                            <input type="date" name="purchase_date" class="form-control" value="<?php echo h($purchaseDate); ?>" required>
-                                        </div>
+                                <div class="col-lg-3 col-md-6">
+                                    <label class="form-label">Supplier <span class="text-danger">*</span></label>
+                                    <select name="supplier_id" class="form-select" required>
+                                        <option value="">Select Supplier</option>
 
-                                        <div class="col-md-3 mb-3">
-                                            <label class="form-label">Supplier <span class="text-danger">*</span></label>
-                                            <select name="supplier_id" class="form-select" required>
-                                                <option value="">Select Supplier</option>
-                                                <?php foreach ($suppliers as $sup): ?>
-                                                    <option value="<?php echo (int)$sup['id']; ?>" <?php echo $supplierId === (int)$sup['id'] ? 'selected' : ''; ?>>
-                                                        <?php
-                                                        echo h($sup['supplier_name']);
-                                                        if (!empty($sup['supplier_code'])) {
-                                                            echo ' (' . h($sup['supplier_code']) . ')';
-                                                        }
-                                                        ?>
-                                                    </option>
-                                                <?php endforeach; ?>
-                                            </select>
-                                        </div>
+                                        <?php foreach ($suppliers as $sup): ?>
+                                            <option
+                                                value="<?php echo (int)$sup['id']; ?>"
+                                                <?php echo $supplierId === (int)$sup['id'] ? 'selected' : ''; ?>
+                                            >
+                                                <?php
+                                                echo h($sup['supplier_name']);
+                                                if (!empty($sup['supplier_code'])) {
+                                                    echo ' (' . h($sup['supplier_code']) . ')';
+                                                }
+                                                ?>
+                                            </option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                </div>
 
-                                        <div class="col-md-3 mb-3">
-                                            <label class="form-label">Invoice No</label>
-                                            <input type="text" name="invoice_no" class="form-control" value="<?php echo h($invoiceNo); ?>">
-                                        </div>
-                                    </div>
-
-                                    <div class="table-responsive" style="overflow-x:auto;">
-                                        <table class="table table-bordered align-middle mb-0" id="itemsTable">
-                                            <thead class="table-light">
-                                                <tr>
-                                                    <th style="min-width:220px;">Product</th>
-                                                    <th style="min-width:220px;">Item Name</th>
-                                                    <th style="min-width:100px;">Purity</th>
-                                                    <th style="min-width:100px;">HSN</th>
-                                                    <th style="min-width:90px;">Qty</th>
-                                                    <th style="min-width:110px;">Gross Wt</th>
-                                                    <th style="min-width:110px;">Less Wt</th>
-                                                    <th style="min-width:110px;">Net Wt</th>
-                                                    <th style="min-width:120px;">Rate/Gm</th>
-                                                    <th style="min-width:120px;">Making</th>
-                                                    <th style="min-width:120px;">Stone</th>
-                                                    <th style="min-width:120px;">Discount</th>
-                                                    <th style="min-width:100px;">GST %</th>
-                                                    <th style="min-width:130px;">Taxable</th>
-                                                    <th style="min-width:130px;">GST Amt</th>
-                                                    <th style="min-width:130px;">Total</th>
-                                                    <th style="min-width:90px;">Action</th>
-                                                </tr>
-                                            </thead>
-
-                                            <tbody id="itemRows">
-                                                <?php foreach ($formItems as $index => $item): ?>
-                                                    <tr>
-                                                        <td>
-                                                            <select name="items[<?php echo $index; ?>][product_id]" class="form-select product-select">
-                                                                <option value="">Select</option>
-                                                                <?php foreach ($products as $prd): ?>
-                                                                    <option
-                                                                        value="<?php echo (int)$prd['id']; ?>"
-                                                                        data-name="<?php echo h($prd['product_name']); ?>"
-                                                                        data-purity="<?php echo h($prd['purity'] ?? '925'); ?>"
-                                                                        data-rate="<?php echo h($prd['purchase_rate'] ?? '0'); ?>"
-                                                                        data-weight="<?php echo h($prd['net_weight'] ?? '0'); ?>"
-                                                                        <?php echo (int)($item['product_id'] ?? 0) === (int)$prd['id'] ? 'selected' : ''; ?>
-                                                                    >
-                                                                        <?php echo h($prd['product_name'] . ' (' . $prd['product_code'] . ')'); ?>
-                                                                    </option>
-                                                                <?php endforeach; ?>
-                                                            </select>
-                                                        </td>
-
-                                                        <td><input type="text" name="items[<?php echo $index; ?>][item_name]" class="form-control item-name" value="<?php echo h($item['item_name']); ?>"></td>
-                                                        <td><input type="text" name="items[<?php echo $index; ?>][purity]" class="form-control purity" value="<?php echo h($item['purity']); ?>"></td>
-                                                        <td><input type="text" name="items[<?php echo $index; ?>][hsn_code]" class="form-control hsn-code" value="<?php echo h($item['hsn_code']); ?>"></td>
-                                                        <td><input type="number" step="0.001" min="0" name="items[<?php echo $index; ?>][qty]" class="form-control qty" value="<?php echo h($item['qty']); ?>"></td>
-                                                        <td><input type="number" step="0.001" min="0" name="items[<?php echo $index; ?>][gross_weight]" class="form-control gross-weight" value="<?php echo h($item['gross_weight']); ?>"></td>
-                                                        <td><input type="number" step="0.001" min="0" name="items[<?php echo $index; ?>][less_weight]" class="form-control less-weight" value="<?php echo h($item['less_weight']); ?>"></td>
-                                                        <td><input type="number" step="0.001" min="0" name="items[<?php echo $index; ?>][net_weight]" class="form-control net-weight" value="<?php echo h($item['net_weight']); ?>"></td>
-                                                        <td><input type="number" step="0.01" min="0" name="items[<?php echo $index; ?>][rate_per_gram]" class="form-control rate-per-gram" value="<?php echo h($item['rate_per_gram']); ?>"></td>
-                                                        <td><input type="number" step="0.01" min="0" name="items[<?php echo $index; ?>][making_charge]" class="form-control making-charge" value="<?php echo h($item['making_charge']); ?>"></td>
-                                                        <td><input type="number" step="0.01" min="0" name="items[<?php echo $index; ?>][stone_charge]" class="form-control stone-charge" value="<?php echo h($item['stone_charge']); ?>"></td>
-                                                        <td><input type="number" step="0.01" min="0" name="items[<?php echo $index; ?>][discount_amount]" class="form-control item-discount" value="<?php echo h($item['discount_amount']); ?>"></td>
-                                                        <td><input type="number" step="0.01" min="0" name="items[<?php echo $index; ?>][gst_percent]" class="form-control gst-percent" value="<?php echo h($item['gst_percent']); ?>"></td>
-
-                                                        <td>
-                                                            <input type="number" step="0.01" min="0" name="items[<?php echo $index; ?>][taxable_amount]" class="form-control taxable-amount" value="<?php echo h($item['taxable_amount']); ?>" readonly>
-                                                            <input type="hidden" name="items[<?php echo $index; ?>][item_amount]" class="item-amount" value="<?php echo h($item['item_amount']); ?>">
-                                                        </td>
-
-                                                        <td><input type="number" step="0.01" min="0" name="items[<?php echo $index; ?>][gst_amount]" class="form-control gst-amount" value="<?php echo h($item['gst_amount']); ?>" readonly></td>
-                                                        <td><input type="number" step="0.01" min="0" name="items[<?php echo $index; ?>][total_amount]" class="form-control total-amount" value="<?php echo h($item['total_amount']); ?>" readonly></td>
-                                                        <td><button type="button" class="btn btn-danger btn-sm remove-row">X</button></td>
-                                                    </tr>
-                                                <?php endforeach; ?>
-                                            </tbody>
-                                        </table>
-                                    </div>
-
-                                    <button type="button" class="btn btn-info btn-sm mt-3 mb-4" id="addRowBtn">Add Item</button>
-
-                                    <div class="row">
-                                        <div class="col-md-4 mb-3">
-                                            <label class="form-label">Payment Method</label>
-                                            <select name="payment_method_id" class="form-select">
-                                                <option value="">Select</option>
-                                                <?php foreach ($paymentMethods as $pm): ?>
-                                                    <option value="<?php echo (int)$pm['id']; ?>" <?php echo $paymentMethodId === (int)$pm['id'] ? 'selected' : ''; ?>>
-                                                        <?php echo h($pm['method_name']); ?>
-                                                    </option>
-                                                <?php endforeach; ?>
-                                            </select>
-                                        </div>
-
-                                        <div class="col-md-8 mb-3">
-                                            <label class="form-label">Notes</label>
-                                            <input type="text" name="notes" class="form-control" value="<?php echo h($notes); ?>">
-                                        </div>
-                                    </div>
-
-                                    <div class="row justify-content-end">
-                                        <div class="col-md-4">
-                                            <table class="table table-bordered purchase-summary-table">
-                                                <tr>
-                                                    <th>Subtotal</th>
-                                                    <td><input type="number" step="0.01" class="form-control" id="subtotal" readonly></td>
-                                                </tr>
-                                                <tr>
-                                                    <th>Discount</th>
-                                                    <td><input type="number" step="0.01" min="0" name="discount_amount" id="discount_amount" class="form-control" value="<?php echo h($discountAmount); ?>"></td>
-                                                </tr>
-                                                <tr>
-                                                    <th>Taxable</th>
-                                                    <td><input type="number" step="0.01" class="form-control" id="taxable_total" readonly></td>
-                                                </tr>
-                                                <tr>
-                                                    <th>GST Total</th>
-                                                    <td><input type="number" step="0.01" class="form-control" id="gst_total" readonly></td>
-                                                </tr>
-                                                <tr>
-                                                    <th>Round Off</th>
-                                                    <td><input type="number" step="0.01" name="round_off" id="round_off" class="form-control" value="<?php echo h($roundOff); ?>"></td>
-                                                </tr>
-                                                <tr>
-                                                    <th>Grand Total</th>
-                                                    <td><input type="number" step="0.01" class="form-control" id="grand_total" readonly></td>
-                                                </tr>
-                                                <tr>
-                                                    <th>Paid Amount</th>
-                                                    <td><input type="number" step="0.01" min="0" name="paid_amount" id="paid_amount" class="form-control" value="<?php echo h($paidAmount); ?>"></td>
-                                                </tr>
-                                                <tr>
-                                                    <th>Balance</th>
-                                                    <td><input type="number" step="0.01" class="form-control" id="balance_amount" readonly></td>
-                                                </tr>
-                                            </table>
-                                        </div>
-                                    </div>
-
-                                    <div class="d-flex gap-2">
-                                        <button type="submit" class="btn btn-primary">Update Purchase</button>
-                                        <a href="purchase-view.php?id=<?php echo (int)$purchaseId; ?>" class="btn btn-info">View Purchase</a>
-                                        <a href="purchases.php" class="btn btn-secondary">Back to Purchases</a>
-                                    </div>
+                                <div class="col-lg-3 col-md-6">
+                                    <label class="form-label">Invoice No</label>
+                                    <input
+                                        type="text"
+                                        name="invoice_no"
+                                        class="form-control"
+                                        value="<?php echo h($invoiceNo); ?>"
+                                    >
                                 </div>
                             </div>
                         </div>
-                    </div>
-                </form>
-<?php include('includes/footer.php'); ?>
-</div>
+                    </section>
+
+                    <section class="section-card">
+                        <div class="section-head">
+                            <div>
+                                <h2 class="section-title">Purchase Items</h2>
+                                <div class="section-subtitle">Add products, weights, charges, discount and GST.</div>
+                            </div>
+
+                            <button type="button" class="btn-soft" id="addRowBtn">
+                                <i class="fa-solid fa-plus me-1"></i>Add Item
+                            </button>
+                        </div>
+
+                        <div class="purchase-items-wrap">
+                            <table class="table align-middle" id="itemsTable">
+                                <thead>
+                                    <tr>
+                                        <th>Product</th>
+                                        <th>Item Name</th>
+                                        <th>Purity</th>
+                                        <th>HSN</th>
+                                        <th>Qty</th>
+                                        <th>Gram / Qty</th>
+                                        <th>Total Gross</th>
+                                        <th>Less Wt</th>
+                                        <th>Net Wt</th>
+                                        <th>Rate/Gm</th>
+                                        <th>Making</th>
+                                        <th>Stone</th>
+                                        <th>Discount</th>
+                                        <th>GST %</th>
+                                        <th>Taxable</th>
+                                        <th>GST Amt</th>
+                                        <th>Total</th>
+                                        <th></th>
+                                    </tr>
+                                </thead>
+
+                                <tbody id="itemRows">
+                                <?php foreach ($formItems as $index => $item): ?>
+                                    <tr>
+                                        <td>
+                                            <select
+                                                name="items[<?php echo $index; ?>][product_id]"
+                                                class="form-select product-select"
+                                            >
+                                                <option value="">Select Product</option>
+
+                                                <?php foreach ($products as $prd): ?>
+                                                    <option
+                                                        value="<?php echo (int)$prd['id']; ?>"
+                                                        data-name="<?php echo h($prd['product_name']); ?>"
+                                                        data-purity="<?php echo h($prd['purity'] ?? '925'); ?>"
+                                                        data-rate="<?php echo h($prd['purchase_rate'] ?? '0'); ?>"
+                                                        data-gross-weight="<?php echo h($prd['gross_weight'] ?? $prd['net_weight'] ?? '0'); ?>"
+                                                        data-stone-weight="<?php echo h($prd['stone_weight'] ?? '0'); ?>"
+                                                        data-net-weight="<?php echo h($prd['net_weight'] ?? '0'); ?>"
+                                                        data-hsn="<?php echo h($prd['hsn_code'] ?? ''); ?>"
+                                                        data-tax="<?php echo h($prd['tax_percent'] ?? '3'); ?>"
+                                                        <?php echo (int)($item['product_id'] ?? 0) === (int)$prd['id'] ? 'selected' : ''; ?>
+                                                    >
+                                                        <?php echo h($prd['product_name'] . ' (' . $prd['product_code'] . ')'); ?>
+                                                    </option>
+                                                <?php endforeach; ?>
+                                            </select>
+                                        </td>
+
+                                        <td>
+                                            <input
+                                                type="text"
+                                                name="items[<?php echo $index; ?>][item_name]"
+                                                class="form-control item-name"
+                                                value="<?php echo h($item['item_name']); ?>"
+                                            >
+                                        </td>
+
+                                        <td><input type="text" name="items[<?php echo $index; ?>][purity]" class="form-control purity" value="<?php echo h($item['purity']); ?>"></td>
+                                        <td><input type="text" name="items[<?php echo $index; ?>][hsn_code]" class="form-control hsn-code" value="<?php echo h($item['hsn_code']); ?>"></td>
+                                        <td><input type="number" step="0.001" min="0" name="items[<?php echo $index; ?>][qty]" class="form-control qty" value="<?php echo h($item['qty']); ?>"></td>
+                                        <td><input type="number" step="0.001" min="0" name="items[<?php echo $index; ?>][gram_per_qty]" class="form-control gram-per-qty" value="<?php echo h($item['gram_per_qty'] ?? '0.000'); ?>"></td>
+                                        <td><input type="number" step="0.001" min="0" name="items[<?php echo $index; ?>][gross_weight]" class="form-control gross-weight" value="<?php echo h($item['gross_weight']); ?>" readonly></td>
+                                        <td><input type="number" step="0.001" min="0" name="items[<?php echo $index; ?>][less_weight]" class="form-control less-weight" value="<?php echo h($item['less_weight']); ?>"></td>
+                                        <td><input type="number" step="0.001" min="0" name="items[<?php echo $index; ?>][net_weight]" class="form-control net-weight" value="<?php echo h($item['net_weight']); ?>"></td>
+                                        <td><input type="number" step="0.01" min="0" name="items[<?php echo $index; ?>][rate_per_gram]" class="form-control rate-per-gram" value="<?php echo h($item['rate_per_gram']); ?>"></td>
+                                        <td><input type="number" step="0.01" min="0" name="items[<?php echo $index; ?>][making_charge]" class="form-control making-charge" value="<?php echo h($item['making_charge']); ?>"></td>
+                                        <td><input type="number" step="0.01" min="0" name="items[<?php echo $index; ?>][stone_charge]" class="form-control stone-charge" value="<?php echo h($item['stone_charge']); ?>"></td>
+                                        <td><input type="number" step="0.01" min="0" name="items[<?php echo $index; ?>][discount_amount]" class="form-control item-discount" value="<?php echo h($item['discount_amount']); ?>"></td>
+                                        <td><input type="number" step="0.01" min="0" name="items[<?php echo $index; ?>][gst_percent]" class="form-control gst-percent" value="<?php echo h($item['gst_percent']); ?>"></td>
+
+                                        <td>
+                                            <input
+                                                type="number"
+                                                step="0.01"
+                                                min="0"
+                                                name="items[<?php echo $index; ?>][taxable_amount]"
+                                                class="form-control taxable-amount"
+                                                value="<?php echo h($item['taxable_amount']); ?>"
+                                                readonly
+                                            >
+                                            <input
+                                                type="hidden"
+                                                name="items[<?php echo $index; ?>][item_amount]"
+                                                class="item-amount"
+                                                value="<?php echo h($item['item_amount']); ?>"
+                                            >
+                                        </td>
+
+                                        <td><input type="number" step="0.01" min="0" name="items[<?php echo $index; ?>][gst_amount]" class="form-control gst-amount" value="<?php echo h($item['gst_amount']); ?>" readonly></td>
+                                        <td><input type="number" step="0.01" min="0" name="items[<?php echo $index; ?>][total_amount]" class="form-control total-amount" value="<?php echo h($item['total_amount']); ?>" readonly></td>
+
+                                        <td>
+                                            <button type="button" class="remove-row" title="Remove item">
+                                                <i class="fa-solid fa-trash"></i>
+                                            </button>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    </section>
+
+                    <section class="section-card">
+                        <div class="section-head">
+                            <div>
+                                <h2 class="section-title">Payment & Notes</h2>
+                                <div class="section-subtitle">Select payment mode and enter purchase notes.</div>
+                            </div>
+                        </div>
+
+                        <div class="section-body">
+                            <div class="row g-3">
+                                <div class="col-md-4">
+                                    <label class="form-label">Payment Method</label>
+                                    <select name="payment_method_id" class="form-select">
+                                        <option value="">Select Payment Method</option>
+
+                                        <?php foreach ($paymentMethods as $pm): ?>
+                                            <option
+                                                value="<?php echo (int)$pm['id']; ?>"
+                                                <?php echo $paymentMethodId === (int)$pm['id'] ? 'selected' : ''; ?>
+                                            >
+                                                <?php echo h($pm['method_name']); ?>
+                                            </option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                </div>
+
+                                <div class="col-md-8">
+                                    <label class="form-label">Notes</label>
+                                    <input
+                                        type="text"
+                                        name="notes"
+                                        class="form-control"
+                                        value="<?php echo h($notes); ?>"
+                                        placeholder="Optional purchase notes"
+                                    >
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+                </div>
+
+                <aside>
+                    <section class="section-card summary-card">
+                        <div class="section-head">
+                            <div>
+                                <h2 class="section-title">Purchase Summary</h2>
+                                <div class="section-subtitle">Calculated from the item rows.</div>
+                            </div>
+                        </div>
+
+                        <div class="section-body">
+                            <div class="summary-row">
+                                <span class="summary-label">Subtotal</span>
+                                <span class="summary-value">
+                                    <?php echo h($currencySymbol); ?>
+                                    <span id="subtotalText">0.00</span>
+                                </span>
+                            </div>
+
+                            <div class="summary-row">
+                                <span class="summary-label">Discount</span>
+                                <input
+                                    type="number"
+                                    step="0.01"
+                                    min="0"
+                                    name="discount_amount"
+                                    id="discount_amount"
+                                    class="form-control text-end summary-input"
+                                    value="<?php echo h($discountAmount); ?>"
+                                >
+                            </div>
+
+                            <div class="summary-row">
+                                <span class="summary-label">Taxable</span>
+                                <span class="summary-value">
+                                    <?php echo h($currencySymbol); ?>
+                                    <span id="taxableText">0.00</span>
+                                </span>
+                            </div>
+
+                            <div class="summary-row">
+                                <span class="summary-label">GST Total</span>
+                                <span class="summary-value">
+                                    <?php echo h($currencySymbol); ?>
+                                    <span id="gstText">0.00</span>
+                                </span>
+                            </div>
+
+                            <div class="summary-row">
+                                <span class="summary-label">Round Off</span>
+                                <input
+                                    type="number"
+                                    step="0.01"
+                                    name="round_off"
+                                    id="round_off"
+                                    class="form-control text-end summary-input"
+                                    value="<?php echo h($roundOff); ?>"
+                                >
+                            </div>
+
+                            <div class="summary-row grand-total-row">
+                                <span class="summary-label">Grand Total</span>
+                                <span class="summary-value">
+                                    <?php echo h($currencySymbol); ?>
+                                    <span id="grandTotalText">0.00</span>
+                                </span>
+                            </div>
+
+                            <div class="summary-row">
+                                <span class="summary-label">Paid Amount</span>
+                                <input
+                                    type="number"
+                                    step="0.01"
+                                    min="0"
+                                    name="paid_amount"
+                                    id="paid_amount"
+                                    class="form-control text-end summary-input"
+                                    value="<?php echo h($paidAmount); ?>"
+                                >
+                            </div>
+
+                            <div class="balance-box">
+                                <div class="d-flex justify-content-between align-items-center mb-2">
+                                    <span class="summary-label">Balance</span>
+                                    <span class="summary-value">
+                                        <?php echo h($currencySymbol); ?>
+                                        <span id="balanceText">0.00</span>
+                                    </span>
+                                </div>
+
+                                <span class="status-pill" id="paymentStatus">Unpaid</span>
+                            </div>
+
+                            <input type="hidden" id="subtotal">
+                            <input type="hidden" id="taxable_total">
+                            <input type="hidden" id="gst_total">
+                            <input type="hidden" id="grand_total">
+                            <input type="hidden" id="balance_amount">
+
+                            <div class="d-grid gap-2 mt-3">
+                                <button type="submit" class="btn btn-theme" id="previewPurchaseBtn">
+                                    <i class="fa-solid fa-eye me-2"></i>Preview Changes
+                                </button>
+
+                                <a href="purchases.php" class="btn btn-light btn-sm">Cancel</a>
+                            </div>
+                        </div>
+                    </section>
+                </aside>
+            </div>
+        </form>
+
+        <?php include('includes/footer.php'); ?>
+    </div>
 </main>
+
+
+<div class="modal fade" id="purchasePreviewModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content preview-modal-content">
+            <div class="modal-header">
+                <div><h5 class="modal-title mb-0">Verify Purchase Changes</h5><div class="small text-muted">Check supplier, quantities, grams, totals and payment details.</div></div>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body" id="purchasePreviewBody"></div>
+            <div class="modal-footer">
+                <button type="button" class="btn-soft" data-bs-dismiss="modal"><i class="fa-solid fa-pen me-1"></i>Edit Purchase</button>
+                <button type="button" class="btn-theme" id="confirmSavePurchase"><i class="fa-solid fa-circle-check me-1"></i>Confirm & Update Purchase</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<?php include('includes/script.php'); ?>
+<script src="assets/js/script.js"></script>
 
 <script>
 (function () {
-    'use strict';
+    const toastStack = document.getElementById('toastStack');
+
+    function showToast(type, message, duration = 3600) {
+        const cleanMessage = String(message || '').trim();
+        if (!cleanMessage || !toastStack) return;
+
+        const icons = {
+            success: 'fa-circle-check',
+            error: 'fa-circle-exclamation',
+            warning: 'fa-triangle-exclamation',
+            info: 'fa-circle-info'
+        };
+
+        const toast = document.createElement('div');
+        toast.className = 'app-toast ' + (type || 'info');
+        toast.innerHTML = `
+            <i class="fa-solid ${icons[type] || icons.info}"></i>
+            <div class="app-toast-message"></div>
+            <button type="button" class="app-toast-close" aria-label="Close notification">
+                <i class="fa-solid fa-xmark"></i>
+            </button>
+        `;
+
+        toast.querySelector('.app-toast-message').textContent = cleanMessage;
+        toastStack.appendChild(toast);
+
+        const removeToast = () => {
+            toast.classList.remove('show');
+            setTimeout(() => toast.remove(), 220);
+        };
+
+        toast.querySelector('.app-toast-close').addEventListener('click', removeToast);
+        requestAnimationFrame(() => toast.classList.add('show'));
+        setTimeout(removeToast, duration);
+    }
+
+    const serverToastData = document.getElementById('serverToastData');
+    if (serverToastData) {
+        const successMessage = serverToastData.dataset.success || '';
+        const errorMessage = serverToastData.dataset.error || '';
+
+        if (successMessage) showToast('success', successMessage);
+        if (errorMessage) showToast('error', errorMessage, 4800);
+    }
+
+    window.showPurchaseToast = showToast;
 
     const products = <?php
         $productJs = [];
@@ -1698,217 +1688,333 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
                 'product_code' => (string)$p['product_code'],
                 'purity' => (string)($p['purity'] ?? '925'),
                 'purchase_rate' => (float)($p['purchase_rate'] ?? 0),
-                'net_weight' => (float)($p['net_weight'] ?? 0)
+                'gross_weight' => (float)($p['gross_weight'] ?? $p['net_weight'] ?? 0),
+                'stone_weight' => (float)($p['stone_weight'] ?? 0),
+                'net_weight' => (float)($p['net_weight'] ?? 0),
+                'hsn_code' => (string)($p['hsn_code'] ?? ''),
+                'tax_percent' => (float)($p['tax_percent'] ?? 3)
             ];
         }
         echo json_encode($productJs, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     ?>;
 
-    const form = document.getElementById('purchaseForm');
-    const tbody = document.getElementById('itemRows');
-    const itemsJson = document.getElementById('itemsJson');
-    let rowIndex = tbody ? tbody.querySelectorAll('tr').length : 0;
+    let rowIndex = document.querySelectorAll('#itemRows tr').length;
 
-    function escapeHtml(value) {
+    function escapeHtml(text) {
         const div = document.createElement('div');
-        div.textContent = value == null ? '' : String(value);
+        div.innerText = text == null ? '' : text;
         return div.innerHTML;
     }
 
-    function num(value) {
-        const parsed = parseFloat(value);
-        return Number.isFinite(parsed) ? parsed : 0;
-    }
+    function optionHtml(selectedId = '') {
+        let html = '<option value="">Select Product</option>';
 
-    function productOptions(selectedId = '') {
-        let html = '<option value="">Select</option>';
-        products.forEach(function (product) {
-            const selected = String(selectedId) === String(product.id) ? ' selected' : '';
-            html += '<option value="' + product.id + '"' +
-                ' data-name="' + escapeHtml(product.product_name) + '"' +
-                ' data-purity="' + escapeHtml(product.purity) + '"' +
-                ' data-rate="' + product.purchase_rate + '"' +
-                ' data-weight="' + product.net_weight + '"' +
-                selected + '>' +
-                escapeHtml(product.product_name + ' (' + product.product_code + ')') +
-                '</option>';
+        products.forEach(function (p) {
+            const selected = String(selectedId) === String(p.id) ? 'selected' : '';
+
+            html += `<option
+                value="${p.id}"
+                data-name="${escapeHtml(p.product_name)}"
+                data-purity="${escapeHtml(p.purity)}"
+                data-rate="${p.purchase_rate}"
+                data-gross-weight="${p.gross_weight}"
+                data-stone-weight="${p.stone_weight}"
+                data-net-weight="${p.net_weight}"
+                data-hsn="${escapeHtml(p.hsn_code)}"
+                data-tax="${p.tax_percent}"
+                ${selected}
+            >${escapeHtml(p.product_name)} (${escapeHtml(p.product_code)})</option>`;
         });
+
         return html;
     }
 
-    function calculateRow(row) {
-        const gross = num(row.querySelector('.gross-weight')?.value);
-        const less = num(row.querySelector('.less-weight')?.value);
-        const net = Math.max(0, gross - less);
-        const rate = num(row.querySelector('.rate-per-gram')?.value);
-        const making = num(row.querySelector('.making-charge')?.value);
-        const stone = num(row.querySelector('.stone-charge')?.value);
-        const discount = num(row.querySelector('.item-discount')?.value);
-        const gstPercent = num(row.querySelector('.gst-percent')?.value);
+    function addRow(item = {}) {
+        const tr = document.createElement('tr');
 
-        const netInput = row.querySelector('.net-weight');
-        if (netInput) netInput.value = net.toFixed(3);
+        tr.innerHTML = `
+            <td>
+                <select name="items[${rowIndex}][product_id]" class="form-select product-select">
+                    ${optionHtml(item.product_id || '')}
+                </select>
+            </td>
 
-        const itemAmount = (net * rate) + making + stone;
-        const taxable = Math.max(0, itemAmount - discount);
-        const gst = taxable * gstPercent / 100;
-        const total = taxable + gst;
+            <td><input type="text" name="items[${rowIndex}][item_name]" class="form-control item-name" value="${escapeHtml(item.item_name || '')}"></td>
+            <td><input type="text" name="items[${rowIndex}][purity]" class="form-control purity" value="${escapeHtml(item.purity || '925')}"></td>
+            <td><input type="text" name="items[${rowIndex}][hsn_code]" class="form-control hsn-code" value="${escapeHtml(item.hsn_code || '')}"></td>
+            <td><input type="number" step="0.001" min="0" name="items[${rowIndex}][qty]" class="form-control qty" value="${item.qty || '1.000'}"></td>
+            <td><input type="number" step="0.001" min="0" name="items[${rowIndex}][gram_per_qty]" class="form-control gram-per-qty" value="${item.gram_per_qty || '0.000'}"></td>
+            <td><input type="number" step="0.001" min="0" name="items[${rowIndex}][gross_weight]" class="form-control gross-weight" value="${item.gross_weight || '0.000'}" readonly></td>
+            <td><input type="number" step="0.001" min="0" name="items[${rowIndex}][less_weight]" class="form-control less-weight" value="${item.less_weight || '0.000'}"></td>
+            <td><input type="number" step="0.001" min="0" name="items[${rowIndex}][net_weight]" class="form-control net-weight" value="${item.net_weight || '0.000'}"></td>
+            <td><input type="number" step="0.01" min="0" name="items[${rowIndex}][rate_per_gram]" class="form-control rate-per-gram" value="${item.rate_per_gram || '0.00'}"></td>
+            <td><input type="number" step="0.01" min="0" name="items[${rowIndex}][making_charge]" class="form-control making-charge" value="${item.making_charge || '0.00'}"></td>
+            <td><input type="number" step="0.01" min="0" name="items[${rowIndex}][stone_charge]" class="form-control stone-charge" value="${item.stone_charge || '0.00'}"></td>
+            <td><input type="number" step="0.01" min="0" name="items[${rowIndex}][discount_amount]" class="form-control item-discount" value="${item.discount_amount || '0.00'}"></td>
+            <td><input type="number" step="0.01" min="0" name="items[${rowIndex}][gst_percent]" class="form-control gst-percent" value="${item.gst_percent || '3.00'}"></td>
 
-        row.querySelector('.item-amount').value = itemAmount.toFixed(2);
-        row.querySelector('.taxable-amount').value = taxable.toFixed(2);
-        row.querySelector('.gst-amount').value = gst.toFixed(2);
-        row.querySelector('.total-amount').value = total.toFixed(2);
+            <td>
+                <input type="number" step="0.01" min="0" name="items[${rowIndex}][taxable_amount]" class="form-control taxable-amount" value="${item.taxable_amount || '0.00'}" readonly>
+                <input type="hidden" name="items[${rowIndex}][item_amount]" class="item-amount" value="${item.item_amount || '0.00'}">
+            </td>
 
-        calculateTotals();
+            <td><input type="number" step="0.01" min="0" name="items[${rowIndex}][gst_amount]" class="form-control gst-amount" value="${item.gst_amount || '0.00'}" readonly></td>
+            <td><input type="number" step="0.01" min="0" name="items[${rowIndex}][total_amount]" class="form-control total-amount" value="${item.total_amount || '0.00'}" readonly></td>
+
+            <td>
+                <button type="button" class="remove-row" title="Remove item">
+                    <i class="fa-solid fa-trash"></i>
+                </button>
+            </td>
+        `;
+
+        document.getElementById('itemRows').appendChild(tr);
+        rowIndex++;
+        bindRow(tr);
+        calculateAll();
     }
 
-    function calculateTotals() {
-        let subtotal = 0;
-        let taxable = 0;
-        let gst = 0;
+    function calculateRow(tr) {
+        const qty = parseFloat(tr.querySelector('.qty').value || 0);
+        const gramPerQty = parseFloat(tr.querySelector('.gram-per-qty').value || 0);
+        const gross = Math.max(0, qty * gramPerQty);
+        const less = parseFloat(tr.querySelector('.less-weight').value || 0);
 
-        tbody.querySelectorAll('tr').forEach(function (row) {
-            subtotal += num(row.querySelector('.item-amount')?.value);
-            taxable += num(row.querySelector('.taxable-amount')?.value);
-            gst += num(row.querySelector('.gst-amount')?.value);
+        let net = gross - less;
+        if (net < 0) net = 0;
+
+        tr.querySelector('.gross-weight').value = gross.toFixed(3);
+        tr.querySelector('.net-weight').value = net.toFixed(3);
+
+        const netWeight = parseFloat(tr.querySelector('.net-weight').value || 0);
+        const rate = parseFloat(tr.querySelector('.rate-per-gram').value || 0);
+        const making = parseFloat(tr.querySelector('.making-charge').value || 0);
+        const stone = parseFloat(tr.querySelector('.stone-charge').value || 0);
+        const discount = parseFloat(tr.querySelector('.item-discount').value || 0);
+        const gstPercent = parseFloat(tr.querySelector('.gst-percent').value || 0);
+
+        const itemAmount = (netWeight * rate) + making + stone;
+
+        let taxable = itemAmount - discount;
+        if (taxable < 0) {
+            taxable = 0;
+        }
+
+        const gstAmount = taxable * gstPercent / 100;
+        const total = taxable + gstAmount;
+
+        tr.querySelector('.item-amount').value = itemAmount.toFixed(2);
+        tr.querySelector('.taxable-amount').value = taxable.toFixed(2);
+        tr.querySelector('.gst-amount').value = gstAmount.toFixed(2);
+        tr.querySelector('.total-amount').value = total.toFixed(2);
+
+        calculateAll();
+    }
+
+    function calculateAll() {
+        let subtotal = 0;
+        let taxableTotal = 0;
+        let gstTotal = 0;
+
+        document.querySelectorAll('#itemRows tr').forEach(function (tr) {
+            subtotal += parseFloat(tr.querySelector('.item-amount').value || 0);
+            taxableTotal += parseFloat(tr.querySelector('.taxable-amount').value || 0);
+            gstTotal += parseFloat(tr.querySelector('.gst-amount').value || 0);
         });
 
-        const billDiscount = num(document.getElementById('discount_amount')?.value);
-        const roundOff = num(document.getElementById('round_off')?.value);
-        const paid = num(document.getElementById('paid_amount')?.value);
-        const finalTaxable = Math.max(0, taxable - billDiscount);
-        const grandTotal = finalTaxable + gst + roundOff;
-        const balance = Math.max(0, grandTotal - paid);
+        const discountAmount = parseFloat(document.getElementById('discount_amount').value || 0);
+        const roundOff = parseFloat(document.getElementById('round_off').value || 0);
+        const paidAmount = parseFloat(document.getElementById('paid_amount').value || 0);
 
-        const values = {
-            subtotal: subtotal,
-            taxable_total: finalTaxable,
-            gst_total: gst,
-            grand_total: grandTotal,
-            balance_amount: balance
+        let finalTaxable = taxableTotal - discountAmount;
+        if (finalTaxable < 0) {
+            finalTaxable = 0;
+        }
+
+        const grandTotal = finalTaxable + gstTotal + roundOff;
+
+        let balance = grandTotal - paidAmount;
+        if (balance < 0) {
+            balance = 0;
+        }
+
+        document.getElementById('subtotal').value = subtotal.toFixed(2);
+        document.getElementById('taxable_total').value = finalTaxable.toFixed(2);
+        document.getElementById('gst_total').value = gstTotal.toFixed(2);
+        document.getElementById('grand_total').value = grandTotal.toFixed(2);
+        document.getElementById('balance_amount').value = balance.toFixed(2);
+
+        document.getElementById('subtotalText').textContent = subtotal.toFixed(2);
+        document.getElementById('taxableText').textContent = finalTaxable.toFixed(2);
+        document.getElementById('gstText').textContent = gstTotal.toFixed(2);
+        document.getElementById('grandTotalText').textContent = grandTotal.toFixed(2);
+        document.getElementById('balanceText').textContent = balance.toFixed(2);
+
+        const status = document.getElementById('paymentStatus');
+        status.className = 'status-pill';
+
+        if (grandTotal > 0 && paidAmount >= grandTotal) {
+            status.textContent = 'Paid';
+            status.classList.add('paid');
+        } else if (paidAmount > 0) {
+            status.textContent = 'Partial';
+            status.classList.add('partial');
+        } else {
+            status.textContent = 'Unpaid';
+        }
+    }
+
+    function applySelectedProduct(tr, force = false) {
+        const productSelect = tr.querySelector('.product-select');
+        if (!productSelect) return;
+
+        const option = productSelect.options[productSelect.selectedIndex];
+        if (!option || !option.value) return;
+
+        const name = option.getAttribute('data-name') || '';
+        const purity = option.getAttribute('data-purity') || '925';
+        const rate = parseFloat(option.getAttribute('data-rate') || 0);
+        const grossPerQty = parseFloat(option.getAttribute('data-gross-weight') || 0);
+        const stonePerQty = parseFloat(option.getAttribute('data-stone-weight') || 0);
+        const hsn = option.getAttribute('data-hsn') || '';
+        const tax = parseFloat(option.getAttribute('data-tax') || 3);
+        const qty = parseFloat(tr.querySelector('.qty').value || 1);
+
+        const setWhenEmpty = (selector, value) => {
+            const input = tr.querySelector(selector);
+            if (!input) return;
+            if (force || String(input.value || '').trim() === '' || parseFloat(input.value || 0) <= 0) {
+                input.value = value;
+            }
         };
 
-        Object.keys(values).forEach(function (id) {
-            const element = document.getElementById(id);
-            if (element) element.value = values[id].toFixed(2);
-        });
+        const nameInput = tr.querySelector('.item-name');
+        if (nameInput && (force || !nameInput.value.trim())) nameInput.value = name;
+
+        const purityInput = tr.querySelector('.purity');
+        if (purityInput && (force || !purityInput.value.trim() || purityInput.value === '925')) purityInput.value = purity;
+
+        const hsnInput = tr.querySelector('.hsn-code');
+        if (hsnInput && (force || !hsnInput.value.trim())) hsnInput.value = hsn;
+
+        setWhenEmpty('.gram-per-qty', grossPerQty.toFixed(3));
+        setWhenEmpty('.less-weight', (stonePerQty * qty).toFixed(3));
+        setWhenEmpty('.rate-per-gram', rate.toFixed(2));
+        setWhenEmpty('.gst-percent', tax.toFixed(2));
+
+        calculateRow(tr);
     }
 
-    function bindRow(row) {
-        const select = row.querySelector('.product-select');
-        if (select) {
-            select.addEventListener('change', function () {
-                const option = this.options[this.selectedIndex];
-                if (!option || !option.value) return;
+    function bindRow(tr) {
+        const productSelect = tr.querySelector('.product-select');
 
-                row.querySelector('.item-name').value = option.dataset.name || '';
-                row.querySelector('.purity').value = option.dataset.purity || '925';
-                row.querySelector('.rate-per-gram').value = num(option.dataset.rate).toFixed(2);
-
-                const weight = num(option.dataset.weight);
-                if (num(row.querySelector('.gross-weight').value) <= 0) {
-                    row.querySelector('.gross-weight').value = weight.toFixed(3);
-                }
-
-                calculateRow(row);
+        if (productSelect) {
+            productSelect.addEventListener('change', function () {
+                applySelectedProduct(tr, true);
             });
+
+            // Populate product master values when the row is already selected
+            // by PHP, browser autocomplete, or restored form data.
+            if (productSelect.value) {
+                applySelectedProduct(tr, false);
+            }
         }
 
-        row.querySelectorAll('input').forEach(function (input) {
+        tr.querySelectorAll('input').forEach(function (input) {
             input.addEventListener('input', function () {
-                calculateRow(row);
+                calculateRow(tr);
             });
         });
 
-        const remove = row.querySelector('.remove-row');
-        if (remove) {
-            remove.addEventListener('click', function () {
-                if (tbody.querySelectorAll('tr').length <= 1) {
-                    return;
+        const removeButton = tr.querySelector('.remove-row');
+
+        if (removeButton) {
+            removeButton.addEventListener('click', function () {
+                const rows = document.querySelectorAll('#itemRows tr');
+
+                if (rows.length > 1) {
+                    tr.remove();
+                    calculateAll();
                 }
-                row.remove();
-                calculateTotals();
             });
         }
     }
 
-    function addRow() {
-        const row = document.createElement('tr');
-        row.innerHTML = `
-            <td><select name="items[${rowIndex}][product_id]" class="form-select product-select">${productOptions()}</select></td>
-            <td><input type="text" name="items[${rowIndex}][item_name]" class="form-control item-name"></td>
-            <td><input type="text" name="items[${rowIndex}][purity]" class="form-control purity" value="925"></td>
-            <td><input type="text" name="items[${rowIndex}][hsn_code]" class="form-control hsn-code"></td>
-            <td><input type="number" step="0.001" min="0" name="items[${rowIndex}][qty]" class="form-control qty" value="1.000"></td>
-            <td><input type="number" step="0.001" min="0" name="items[${rowIndex}][gross_weight]" class="form-control gross-weight" value="0.000"></td>
-            <td><input type="number" step="0.001" min="0" name="items[${rowIndex}][less_weight]" class="form-control less-weight" value="0.000"></td>
-            <td><input type="number" step="0.001" min="0" name="items[${rowIndex}][net_weight]" class="form-control net-weight" value="0.000"></td>
-            <td><input type="number" step="0.01" min="0" name="items[${rowIndex}][rate_per_gram]" class="form-control rate-per-gram" value="0.00"></td>
-            <td><input type="number" step="0.01" min="0" name="items[${rowIndex}][making_charge]" class="form-control making-charge" value="0.00"></td>
-            <td><input type="number" step="0.01" min="0" name="items[${rowIndex}][stone_charge]" class="form-control stone-charge" value="0.00"></td>
-            <td><input type="number" step="0.01" min="0" name="items[${rowIndex}][discount_amount]" class="form-control item-discount" value="0.00"></td>
-            <td><input type="number" step="0.01" min="0" name="items[${rowIndex}][gst_percent]" class="form-control gst-percent" value="3.00"></td>
-            <td>
-                <input type="number" step="0.01" name="items[${rowIndex}][taxable_amount]" class="form-control taxable-amount" value="0.00" readonly>
-                <input type="hidden" name="items[${rowIndex}][item_amount]" class="item-amount" value="0.00">
-            </td>
-            <td><input type="number" step="0.01" name="items[${rowIndex}][gst_amount]" class="form-control gst-amount" value="0.00" readonly></td>
-            <td><input type="number" step="0.01" name="items[${rowIndex}][total_amount]" class="form-control total-amount" value="0.00" readonly></td>
-            <td><button type="button" class="btn btn-danger btn-sm remove-row">X</button></td>
-        `;
-        tbody.appendChild(row);
-        rowIndex++;
-        bindRow(row);
-        calculateRow(row);
-    }
-
-    function serializeItems() {
-        const items = [];
-
-        tbody.querySelectorAll('tr').forEach(function (row) {
-            items.push({
-                product_id: row.querySelector('.product-select')?.value || '',
-                item_name: row.querySelector('.item-name')?.value || '',
-                purity: row.querySelector('.purity')?.value || '',
-                hsn_code: row.querySelector('.hsn-code')?.value || '',
-                qty: row.querySelector('.qty')?.value || '0',
-                gross_weight: row.querySelector('.gross-weight')?.value || '0',
-                less_weight: row.querySelector('.less-weight')?.value || '0',
-                net_weight: row.querySelector('.net-weight')?.value || '0',
-                rate_per_gram: row.querySelector('.rate-per-gram')?.value || '0',
-                making_charge: row.querySelector('.making-charge')?.value || '0',
-                stone_charge: row.querySelector('.stone-charge')?.value || '0',
-                discount_amount: row.querySelector('.item-discount')?.value || '0',
-                gst_percent: row.querySelector('.gst-percent')?.value || '0',
-                taxable_amount: row.querySelector('.taxable-amount')?.value || '0',
-                gst_amount: row.querySelector('.gst-amount')?.value || '0',
-                total_amount: row.querySelector('.total-amount')?.value || '0'
-            });
-        });
-
-        itemsJson.value = JSON.stringify(items);
-    }
-
-    tbody.querySelectorAll('tr').forEach(function (row) {
-        bindRow(row);
-        calculateRow(row);
+    document.querySelectorAll('#itemRows tr').forEach(function (tr) {
+        bindRow(tr);
     });
 
-    document.getElementById('addRowBtn')?.addEventListener('click', addRow);
+    // Browsers can restore a selected product after the first script pass.
+    // Re-check once after page rendering so its weight is always displayed.
+    setTimeout(function () {
+        document.querySelectorAll('#itemRows tr').forEach(function (tr) {
+            const select = tr.querySelector('.product-select');
+            if (select && select.value) applySelectedProduct(tr, false);
+        });
+    }, 120);
+
+    document.getElementById('addRowBtn').addEventListener('click', function () {
+        addRow();
+    });
 
     ['discount_amount', 'round_off', 'paid_amount'].forEach(function (id) {
-        document.getElementById(id)?.addEventListener('input', calculateTotals);
+        const element = document.getElementById(id);
+
+        if (element) {
+            element.addEventListener('input', calculateAll);
+        }
     });
 
-    form?.addEventListener('submit', function () {
-        serializeItems();
-    });
 
-    calculateTotals();
+    const purchaseForm=document.getElementById('purchaseForm');
+    const previewModal=bootstrap.Modal.getOrCreateInstance(document.getElementById('purchasePreviewModal'));
+    const confirmInput=document.getElementById('confirm_purchase');
+    let confirmedForSave=false;
+
+    function textValue(selector){const el=document.querySelector(selector);if(!el)return'';if(el.tagName==='SELECT'){const o=el.options[el.selectedIndex];return o?o.text.trim():'';}return String(el.value||'').trim();}
+
+    function buildPurchasePreview(){
+        calculateAll();
+        const rows=[];
+        document.querySelectorAll('#itemRows tr').forEach(function(tr){
+            const ps=tr.querySelector('.product-select');
+            const productText=ps&&ps.selectedIndex>=0?ps.options[ps.selectedIndex].text.trim():'';
+            const itemName=tr.querySelector('.item-name').value.trim();
+            if(!itemName&&!ps.value)return;
+            const qty=parseFloat(tr.querySelector('.qty').value||0);
+            const gpq=parseFloat(tr.querySelector('.gram-per-qty').value||0);
+            const gross=parseFloat(tr.querySelector('.gross-weight').value||0);
+            const less=parseFloat(tr.querySelector('.less-weight').value||0);
+            const net=parseFloat(tr.querySelector('.net-weight').value||0);
+            const rate=parseFloat(tr.querySelector('.rate-per-gram').value||0);
+            const gst=parseFloat(tr.querySelector('.gst-percent').value||0);
+            const total=parseFloat(tr.querySelector('.total-amount').value||0);
+            rows.push(`<tr><td><strong>${escapeHtml(itemName||productText)}</strong><div class="small text-muted">${escapeHtml(productText)}</div></td><td class="text-end">${qty.toFixed(3)}</td><td class="text-end">${gpq.toFixed(3)} g</td><td class="text-end">${gross.toFixed(3)} g</td><td class="text-end">${less.toFixed(3)} g</td><td class="text-end">${net.toFixed(3)} g</td><td class="text-end"><?php echo h($currencySymbol); ?>${rate.toFixed(2)}</td><td class="text-end">${gst.toFixed(2)}%</td><td class="text-end"><strong><?php echo h($currencySymbol); ?>${total.toFixed(2)}</strong></td></tr>`);
+        });
+        if(!rows.length){showToast('error','Add at least one valid purchase item.');return false;}
+        document.getElementById('purchasePreviewBody').innerHTML=`
+            <div class="preview-summary-grid">
+                <div class="preview-box"><div class="preview-label">Purchase No</div><div class="preview-value">${escapeHtml(textValue('[name="purchase_no"]'))}</div></div>
+                <div class="preview-box"><div class="preview-label">Purchase Date</div><div class="preview-value">${escapeHtml(textValue('[name="purchase_date"]'))}</div></div>
+                <div class="preview-box"><div class="preview-label">Supplier</div><div class="preview-value">${escapeHtml(textValue('[name="supplier_id"]'))}</div></div>
+                <div class="preview-box"><div class="preview-label">Supplier Invoice</div><div class="preview-value">${escapeHtml(textValue('[name="invoice_no"]')||'—')}</div></div>
+            </div>
+            <div class="table-responsive"><table class="table preview-table"><thead><tr><th>Product</th><th class="text-end">Qty</th><th class="text-end">Gram/Qty</th><th class="text-end">Gross</th><th class="text-end">Less</th><th class="text-end">Net</th><th class="text-end">Rate/Gm</th><th class="text-end">GST</th><th class="text-end">Total</th></tr></thead><tbody>${rows.join('')}</tbody></table></div>
+            <div class="preview-total-panel">
+                <div class="preview-total-row"><span>Subtotal</span><strong><?php echo h($currencySymbol); ?>${document.getElementById('subtotalText').textContent}</strong></div>
+                <div class="preview-total-row"><span>Discount</span><strong><?php echo h($currencySymbol); ?>${parseFloat(document.getElementById('discount_amount').value||0).toFixed(2)}</strong></div>
+                <div class="preview-total-row"><span>GST</span><strong><?php echo h($currencySymbol); ?>${document.getElementById('gstText').textContent}</strong></div>
+                <div class="preview-total-row"><span>Paid</span><strong><?php echo h($currencySymbol); ?>${parseFloat(document.getElementById('paid_amount').value||0).toFixed(2)}</strong></div>
+                <div class="preview-total-row final"><span>Grand Total</span><strong><?php echo h($currencySymbol); ?>${document.getElementById('grandTotalText').textContent}</strong></div>
+                <div class="preview-total-row final"><span>Balance</span><strong><?php echo h($currencySymbol); ?>${document.getElementById('balanceText').textContent}</strong></div>
+            </div>`;
+        return true;
+    }
+
+    purchaseForm.addEventListener('submit',function(e){if(confirmedForSave)return;e.preventDefault();if(!purchaseForm.reportValidity())return;if(!buildPurchasePreview())return;confirmInput.value='0';previewModal.show();});
+    document.getElementById('confirmSavePurchase').addEventListener('click',function(){confirmedForSave=true;confirmInput.value='1';this.disabled=true;this.innerHTML='<i class="fa-solid fa-spinner fa-spin me-1"></i>Updating Purchase...';purchaseForm.submit();});
+    calculateAll();
 })();
 </script>
-
-<?php include('includes/script.php'); ?>
-<script src="assets/js/script.js"></script>
 </body>
 </html>

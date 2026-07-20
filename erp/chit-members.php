@@ -69,6 +69,7 @@ $sql = "SELECT cm.*,c.customer_code,c.customer_name,c.mobile,c.email,
             COALESCE(SUM(cc.discount_amount),0) total_discount,
             COALESCE(SUM(cc.penalty_amount),0) total_penalty,
             COALESCE(SUM(cc.net_amount),0) total_received,
+            COALESCE(SUM(cc.gold_weight_grams),0) total_gold_grams,
             MAX(cc.collection_date) last_payment_date,
             CASE WHEN EXISTS (
                 SELECT 1 FROM chit_prizes cp
@@ -403,10 +404,22 @@ $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
                     <div class="val"><?= $canValue ? '₹' . number_format((float) $group['installment_amount'], 2) : '••••' ?>
                     </div>
                 </div>
-                <div class="cardx">
-                    <div class="lbl">Status</div>
-                    <div class="val"><?= h($group['status']) ?></div>
-                </div>
+                <?php if (($group['chit_type'] ?? '') === 'Gold'): ?>
+                    <div class="cardx">
+                        <div class="lbl">Total Gold Saved</div>
+                        <div class="val">
+                            <?= number_format(array_sum(array_map(
+                                static fn(array $row): float => (float)($row['total_gold_grams'] ?? 0),
+                                $members
+                            )), 6) ?> g
+                        </div>
+                    </div>
+                <?php else: ?>
+                    <div class="cardx">
+                        <div class="lbl">Status</div>
+                        <div class="val"><?= h($group['status']) ?></div>
+                    </div>
+                <?php endif; ?>
             </div>
             <div class="panel">
                 <div class="toolbar">
@@ -424,6 +437,7 @@ $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
                                 <th>Contact</th>
                                 <th>Joined</th>
                                 <th>Paid</th>
+                                <?php if (($group['chit_type'] ?? '') === 'Gold'): ?><th>Gold Saved</th><?php endif; ?>
                                 <th>Progress</th>
                                 <th>Status</th>
                                 <th class="text-end">Action</th>
@@ -446,6 +460,12 @@ $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
                                         <div class="sub">
                                             <?= $canValue ? '₹' . number_format((float) $m['total_received'], 2) : '••••' ?></div>
                                     </td>
+                                    <?php if (($group['chit_type'] ?? '') === 'Gold'): ?>
+                                        <td data-label="Gold Saved">
+                                            <strong><?= number_format((float)($m['total_gold_grams'] ?? 0), 6) ?> g</strong>
+                                            <div class="sub">Saved from collections</div>
+                                        </td>
+                                    <?php endif; ?>
                                     <td data-label="Progress">
                                         <div class="progress">
                                             <div class="progress-bar" style="width:<?= number_format($pct, 1, '.', '') ?>%">
@@ -472,7 +492,7 @@ $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
                                 </tr>
                             <?php endforeach; ?><?php if (!$members): ?>
                                 <tr>
-                                    <td colspan="8" class="text-center text-muted py-4">No members have joined this chit
+                                    <td colspan="<?= (($group['chit_type'] ?? '') === 'Gold') ? 9 : 8 ?>" class="text-center text-muted py-4">No members have joined this chit
                                         group.</td>
                                 </tr><?php endif; ?>
                         </tbody>

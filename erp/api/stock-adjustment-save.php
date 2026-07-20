@@ -1,80 +1,249 @@
 <?php
-if (session_status() === PHP_SESSION_NONE) session_start();
-date_default_timezone_set((string)($_SESSION['timezone'] ?? 'Asia/Kolkata'));
-foreach ([__DIR__.'/config/config.php',__DIR__.'/config.php',__DIR__.'/includes/config.php',__DIR__.'/super-admin/includes/config.php'] as $f) { if (is_file($f)) { require_once $f; break; } }
-if (!isset($conn) || !($conn instanceof mysqli)) die('Database configuration is not available.');
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+header('Content-Type: application/json; charset=utf-8');
+
+foreach ([
+    dirname(__DIR__) . '/config/config.php',
+    dirname(__DIR__) . '/config.php',
+    dirname(__DIR__) . '/includes/config.php',
+    dirname(__DIR__) . '/super-admin/includes/config.php'
+] as $file) {
+    if (is_file($file)) {
+        require_once $file;
+        break;
+    }
+}
+
+function responseJson(bool $success, string $message, array $extra = [], int $code = 200): void
+{
+    http_response_code($code);
+    echo json_encode(array_merge(['success' => $success, 'message' => $message], $extra), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+if (!isset($conn) || !($conn instanceof mysqli)) {
+    responseJson(false, 'Database configuration is not available.', [], 500);
+}
+
 mysqli_report(MYSQLI_REPORT_OFF);
 $conn->set_charset('utf8mb4');
-if (empty($_SESSION['user_id'])) { header('Location: login.php'); exit; }
 
-function e($v): string { return htmlspecialchars((string)($v ?? ''), ENT_QUOTES, 'UTF-8'); }
-function tableExists(mysqli $conn,string $table): bool { $t=$conn->real_escape_string($table); $r=$conn->query("SHOW TABLES LIKE '{$t}'"); return $r && $r->num_rows>0; }
-function hasColumn(mysqli $conn,string $table,string $column): bool { $t=$conn->real_escape_string($table); $c=$conn->real_escape_string($column); $r=$conn->query("SHOW COLUMNS FROM `{$t}` LIKE '{$c}'"); return $r && $r->num_rows>0; }
-function bindExecute(mysqli_stmt $stmt,string $types,array $params): bool { if($types!==''){ $bind=[$types]; foreach($params as $k=>$v)$bind[]=&$params[$k]; call_user_func_array([$stmt,'bind_param'],$bind); } return $stmt->execute(); }
-function stockMovementPermission(mysqli $conn,string $action): bool {
-    if (($_SESSION['user_type'] ?? '') === 'Platform Admin') return true;
-    $map=['open'=>'can_open','view'=>'can_view','value'=>'can_view_value']; $field=$map[$action]??''; if($field==='')return false;
-    foreach(['perm.inventory.stock_movements','perm.inventory.stock','perm.inventory'] as $code){ if(isset($_SESSION['permissions'][$code]) && array_key_exists($field,$_SESSION['permissions'][$code])) return (int)$_SESSION['permissions'][$code][$field]===1; }
-    $bid=(int)($_SESSION['business_id']??0); $rid=(int)($_SESSION['role_id']??0); if($bid<=0||$rid<=0||!tableExists($conn,'permissions')||!tableExists($conn,'role_permissions'))return false;
-    $sql="SELECT rp.`{$field}` FROM role_permissions rp INNER JOIN permissions p ON p.id=rp.permission_id WHERE rp.business_id=? AND rp.role_id=? AND p.is_active=1 AND p.permission_code IN ('perm.inventory.stock_movements','perm.inventory.stock','perm.inventory') ORDER BY FIELD(p.permission_code,'perm.inventory.stock_movements','perm.inventory.stock','perm.inventory') LIMIT 1";
-    $s=$conn->prepare($sql); if(!$s)return false; $s->bind_param('ii',$bid,$rid); $s->execute(); $r=$s->get_result()->fetch_assoc(); $s->close(); return (int)($r[$field]??0)===1;
+if (empty($_SESSION['user_id'])) {
+    responseJson(false, 'Session expired.', [], 401);
 }
-if(!stockMovementPermission($conn,'open')){http_response_code(403);die('Access denied.');}
-$canView=stockMovementPermission($conn,'view')||stockMovementPermission($conn,'open');
-$canValue=stockMovementPermission($conn,'value')||$canView;
-$businessId=(int)($_SESSION['business_id']??0); $branchId=(int)($_SESSION['branch_id']??$_SESSION['default_branch_id']??0);
-if($businessId<=0)die('A valid business must be selected.');
-if(!tableExists($conn,'stock_movements')||!tableExists($conn,'products'))die('Required stock tables are missing.');
 
-$products=[]; $s=$conn->prepare('SELECT id,product_name,product_code FROM products WHERE business_id=? ORDER BY product_name'); if($s){$s->bind_param('i',$businessId);$s->execute();$r=$s->get_result();while($x=$r->fetch_assoc())$products[]=$x;$s->close();}
-$branches=[]; if(tableExists($conn,'branches')){$s=$conn->prepare('SELECT id,branch_name FROM branches WHERE business_id=? ORDER BY branch_name');if($s){$s->bind_param('i',$businessId);$s->execute();$r=$s->get_result();while($x=$r->fetch_assoc())$branches[]=$x;$s->close();}}
-$types=[]; $r=$conn->query("SELECT DISTINCT movement_type FROM stock_movements WHERE business_id=".(int)$businessId." ORDER BY movement_type"); if($r)while($x=$r->fetch_assoc())$types[]=$x['movement_type'];
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    responseJson(false, 'Invalid request method.', [], 405);
+}
 
-$search=trim((string)($_GET['search']??'')); $productId=max(0,(int)($_GET['product_id']??0)); $movementType=trim((string)($_GET['movement_type']??'')); $direction=trim((string)($_GET['direction']??'all')); $selectedBranch=max(0,(int)($_GET['branch_id']??$branchId)); $dateFrom=trim((string)($_GET['date_from']??'')); $dateTo=trim((string)($_GET['date_to']??'')); $perPage=(int)($_GET['per_page']??20); if(!in_array($perPage,[10,20,50,100],true))$perPage=20; $page=max(1,(int)($_GET['page']??1));
-$where=' WHERE sm.business_id=?'; $paramTypes='i'; $params=[$businessId];
-if($selectedBranch>0){$where.=' AND sm.branch_id=?';$paramTypes.='i';$params[]=$selectedBranch;}
-if($productId>0){$where.=' AND sm.product_id=?';$paramTypes.='i';$params[]=$productId;}
-if($movementType!==''){$where.=' AND sm.movement_type=?';$paramTypes.='s';$params[]=$movementType;}
-if($direction==='in')$where.=' AND (sm.quantity_in>0 OR sm.weight_in>0)'; elseif($direction==='out')$where.=' AND (sm.quantity_out>0 OR sm.weight_out>0)';
-if(preg_match('/^\d{4}-\d{2}-\d{2}$/',$dateFrom)){$where.=' AND DATE(sm.movement_date)>=?';$paramTypes.='s';$params[]=$dateFrom;}
-if(preg_match('/^\d{4}-\d{2}-\d{2}$/',$dateTo)){$where.=' AND DATE(sm.movement_date)<=?';$paramTypes.='s';$params[]=$dateTo;}
-if($search!==''){$where.=" AND (p.product_name LIKE ? OR p.product_code LIKE ? OR COALESCE(p.barcode,'') LIKE ? OR sm.movement_type LIKE ? OR COALESCE(sm.reference_table,'') LIKE ? OR CAST(COALESCE(sm.reference_id,0) AS CHAR) LIKE ? OR COALESCE(sm.remarks,'') LIKE ?)";$like='%'.$search.'%';$paramTypes.='sssssss';for($i=0;$i<7;$i++)$params[]=$like;}
+if (!hash_equals((string)($_SESSION['stock_adjustment_csrf'] ?? ''), (string)($_POST['csrf_token'] ?? ''))) {
+    responseJson(false, 'Invalid security token.', [], 419);
+}
 
-$countSql='SELECT COUNT(*) total FROM stock_movements sm INNER JOIN products p ON p.id=sm.product_id AND p.business_id=sm.business_id'.$where;
-$s=$conn->prepare($countSql); if(!$s)die('Unable to prepare movement count: '.e($conn->error)); bindExecute($s,$paramTypes,$params); $total=(int)($s->get_result()->fetch_assoc()['total']??0);$s->close();
-$totalPages=max(1,(int)ceil($total/$perPage));if($page>$totalPages)$page=$totalPages;$offset=($page-1)*$perPage;
+$businessId = (int)($_SESSION['business_id'] ?? 0);
+$branchId = (int)($_SESSION['branch_id'] ?? ($_SESSION['default_branch_id'] ?? 0));
+$userId = (int)($_SESSION['user_id'] ?? 0);
 
-$unitJoin=tableExists($conn,'units')?' LEFT JOIN units un ON un.id=p.unit_id AND un.business_id=p.business_id ':'';
-$unitSelect=tableExists($conn,'units')?"COALESCE(un.unit_name,'Unit') unit_name":"'Unit' unit_name";
-$branchJoin=tableExists($conn,'branches')?' LEFT JOIN branches b ON b.id=sm.branch_id AND b.business_id=sm.business_id ':'';
-$branchSelect=tableExists($conn,'branches')?"COALESCE(b.branch_name,'') branch_name":"'' branch_name";
-$userNameCol=''; if(tableExists($conn,'users')){foreach(['full_name','name','user_name','username'] as $c){if(hasColumn($conn,'users',$c)){$userNameCol=$c;break;}}}
-$userJoin=$userNameCol!==''?' LEFT JOIN users u ON u.id=sm.created_by AND u.business_id=sm.business_id ':'';
-$userSelect=$userNameCol!==''?"COALESCE(u.`{$userNameCol}`,'') created_by_name":"'' created_by_name";
-$sql="SELECT sm.*,p.product_name,p.product_code,p.barcode,p.purity,{$unitSelect},{$branchSelect},{$userSelect} FROM stock_movements sm INNER JOIN products p ON p.id=sm.product_id AND p.business_id=sm.business_id {$unitJoin}{$branchJoin}{$userJoin}{$where} ORDER BY sm.movement_date DESC,sm.id DESC LIMIT ? OFFSET ?";
-$listParams=$params;$listParams[]=$perPage;$listParams[]=$offset;$s=$conn->prepare($sql);if(!$s)die('Unable to prepare movement list: '.e($conn->error));bindExecute($s,$paramTypes.'ii',$listParams);$rows=[];$r=$s->get_result();while($r&&$x=$r->fetch_assoc())$rows[]=$x;$s->close();
+if ($businessId <= 0 || $branchId <= 0) {
+    responseJson(false, 'Business or branch session is missing.', [], 403);
+}
 
-$statSql="SELECT COALESCE(SUM(sm.quantity_in),0) qty_in,COALESCE(SUM(sm.quantity_out),0) qty_out,COALESCE(SUM(sm.weight_in),0) weight_in,COALESCE(SUM(sm.weight_out),0) weight_out,COALESCE(SUM(sm.value_amount),0) movement_value,COUNT(DISTINCT sm.product_id) products FROM stock_movements sm INNER JOIN products p ON p.id=sm.product_id AND p.business_id=sm.business_id {$where}";
-$s=$conn->prepare($statSql);$stats=['qty_in'=>0,'qty_out'=>0,'weight_in'=>0,'weight_out'=>0,'movement_value'=>0,'products'=>0];if($s){bindExecute($s,$paramTypes,$params);$stats=array_merge($stats,$s->get_result()->fetch_assoc()?:[]);$s->close();}
+$productId = (int)($_POST['product_id'] ?? 0);
+$mode = trim((string)($_POST['adjustment_mode'] ?? 'add'));
+$qty = round((float)($_POST['adjustment_qty'] ?? 0), 3);
+$weight = round((float)($_POST['adjustment_weight'] ?? 0), 3);
+$reasonType = trim((string)($_POST['reason_type'] ?? 'Adjustment'));
+$remarks = trim((string)($_POST['remarks'] ?? ''));
+$movementDateInput = trim((string)($_POST['movement_date'] ?? ''));
 
-function pageUrl(array $replace=[]): string { $q=$_GET; foreach($replace as $k=>$v){if($v===null||$v==='')unset($q[$k]);else$q[$k]=$v;} return 'stock-movements.php'.($q?'?'.http_build_query($q):''); }
-function sourceLink(string $table,$id): string { $id=(int)$id; if($id<=0)return ''; $map=['sales'=>'sale-view.php?id=','purchases'=>'purchase-view.php?id=','sales_returns'=>'sales-return-view.php?id=','purchase_returns'=>'purchase-return-view.php?id=','stock_adjustment'=>'stock-adjustment.php?movement_id=','branch_transfers'=>'branch-transfer-view.php?id=']; return isset($map[$table])?$map[$table].$id:''; }
-function movementClass(string $type): string { return (str_contains(strtolower($type),'out')||in_array($type,['Sale','Purchase Return','Transfer Out','Karigar Issue'],true))?'out':'in'; }
+if (!in_array($mode, ['add', 'subtract', 'set'], true)) {
+    responseJson(false, 'Invalid adjustment mode.', [], 422);
+}
+if ($productId <= 0) {
+    responseJson(false, 'Select a product.', [], 422);
+}
+if ($qty < 0 || $weight < 0) {
+    responseJson(false, 'Quantity and weight cannot be negative.', [], 422);
+}
+if ($mode !== 'set' && $qty <= 0 && $weight <= 0) {
+    responseJson(false, 'Enter quantity or weight.', [], 422);
+}
+if ($reasonType === '') {
+    responseJson(false, 'Select a reason type.', [], 422);
+}
+if ($remarks === '') {
+    responseJson(false, 'Enter a clear reason or remarks.', [], 422);
+}
 
-$theme=['primary_color'=>'#d89416','primary_dark_color'=>'#b86a0b','primary_soft_color'=>'#fff6e5','page_background'=>'#f4f3f0','card_background'=>'#fff','text_color'=>'#171717','muted_text_color'=>'#7d8794','border_color'=>'#e8e8e8','font_family'=>'Inter','heading_font_family'=>'Playfair Display','border_radius_px'=>12,'sidebar_width_px'=>230,'sidebar_gradient_1'=>'#171c21','sidebar_gradient_2'=>'#20272d','sidebar_gradient_3'=>'#101419'];
-if(tableExists($conn,'business_theme_settings')){$s=$conn->prepare('SELECT * FROM business_theme_settings WHERE business_id=? LIMIT 1');if($s){$s->bind_param('i',$businessId);$s->execute();$tr=$s->get_result()->fetch_assoc()?:[];$s->close();foreach($theme as $k=>$v)if(isset($tr[$k])&&$tr[$k]!=='')$theme[$k]=$tr[$k];}}
-$pageTitle='Stock Movements';$businessName=(string)($_SESSION['business_name']??'Jewellery ERP');$currency=(string)($_SESSION['currency_symbol']??'₹');
-?>
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title><?=e($businessName)?> - Stock Movements</title><?php include('includes/links.php'); ?><style>
-:root{--primary:<?=e($theme['primary_color'])?>;--primary-dark:<?=e($theme['primary_dark_color'])?>;--primary-soft:<?=e($theme['primary_soft_color'])?>;--page-bg:<?=e($theme['page_background'])?>;--card-bg:<?=e($theme['card_background'])?>;--text:<?=e($theme['text_color'])?>;--muted:<?=e($theme['muted_text_color'])?>;--line:<?=e($theme['border_color'])?>;--radius:<?=(int)$theme['border_radius_px']?>px;--sidebar-width:<?=(int)$theme['sidebar_width_px']?>px}body{background:var(--page-bg);color:var(--text);font-family:<?=json_encode($theme['font_family'])?>,sans-serif}.sidebar{background:linear-gradient(180deg,<?=e($theme['sidebar_gradient_1'])?>,<?=e($theme['sidebar_gradient_2'])?>,<?=e($theme['sidebar_gradient_3'])?>)!important}.heading{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:10px}.heading h1{font:800 24px <?=json_encode($theme['heading_font_family'])?>,serif;margin:0}.heading p{font-size:10px;color:var(--muted);margin:2px 0 0}.stat-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;margin-bottom:10px}.stat{background:var(--card-bg);border:1px solid var(--line);border-radius:var(--radius);padding:12px 14px;display:flex;gap:11px;align-items:center;min-height:78px}.stat i{width:39px;height:39px;display:grid;place-items:center;border-radius:10px;background:var(--primary-soft);color:var(--primary-dark)}.stat small{display:block;color:var(--muted);font-size:9px}.stat b{display:block;font-size:18px;margin-top:3px}.toolbar,.card{background:var(--card-bg);border:1px solid var(--line);border-radius:var(--radius)}.toolbar{padding:10px;margin-bottom:10px}.filters{display:grid;grid-template-columns:minmax(210px,1.3fr) repeat(4,minmax(125px,.7fr)) repeat(2,minmax(135px,.7fr)) 95px auto auto;gap:7px;align-items:center}.form-control,.form-select{height:38px;font-size:10px;border-radius:9px;border-color:var(--line);background:var(--card-bg);color:var(--text)}.btn-theme,.btn-soft{height:38px;border-radius:9px;font-size:10px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;gap:6px;white-space:nowrap;padding:0 12px}.btn-theme{border:0;background:linear-gradient(135deg,var(--primary),var(--primary-dark));color:#fff}.btn-soft{border:1px solid var(--line);background:var(--card-bg);color:var(--text)}.card{overflow:hidden}.table{font-size:10px;margin:0}.table th{font-size:8px;text-transform:uppercase;color:var(--muted);background:color-mix(in srgb,var(--muted) 6%,transparent);padding:9px 10px;white-space:nowrap}.table td{padding:9px 10px;vertical-align:middle;color:var(--text);background:var(--card-bg)!important;border-color:var(--line)}.product{font-weight:800}.sub{font-size:8px;color:var(--muted);margin-top:2px}.badge-move{padding:4px 7px;border-radius:999px;font-size:8px;font-weight:800;display:inline-flex}.badge-in{background:#e9f8ef;color:#168449}.badge-out{background:#fdecec;color:#bd2d2d}.value-in{color:#168449;font-weight:800}.value-out{color:#bd2d2d;font-weight:800}.ref-link{color:var(--primary-dark);font-weight:700;text-decoration:none}.remarks{max-width:280px;white-space:normal}.pager{padding:10px 12px;border-top:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:10px}.pager-summary{font-size:9px;color:var(--muted)}.pagination{margin:0;gap:3px}.page-link{min-width:30px;height:30px;display:grid;place-items:center;border-radius:8px!important;font-size:9px;color:var(--text);background:var(--card-bg);border-color:var(--line)}.page-item.active .page-link{background:linear-gradient(135deg,var(--primary),var(--primary-dark));border-color:var(--primary);color:#fff}.empty{padding:45px;text-align:center;color:var(--muted)}body.dark-mode,body[data-theme=dark]{--page-bg:#0f151b;--card-bg:#182129;--text:#f3f6f8;--muted:#9aa7b3;--line:#2c3944}
-@media(max-width:1350px){.filters{grid-template-columns:repeat(4,minmax(120px,1fr))}.filters .search{grid-column:span 2}}
-@media(max-width:991px){.stat-grid{grid-template-columns:repeat(2,1fr)}.filters{grid-template-columns:1fr 1fr}.filters .search{grid-column:1/-1}.card{background:transparent;border:0;overflow:visible}.table-responsive{overflow:visible}.table thead{display:none}.table,.table tbody{display:block}.table tbody{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.table tr{display:grid;grid-template-columns:1fr 1fr;background:var(--card-bg);border:1px solid var(--line);border-radius:var(--radius);padding:12px}.table td{display:flex;justify-content:space-between;gap:10px;padding:7px 0;border:0;border-bottom:1px dashed var(--line);text-align:right!important}.table td:before{content:attr(data-label);font-size:8px;text-transform:uppercase;color:var(--muted);font-weight:700;text-align:left}.table td.product-cell{grid-column:1/-1;display:block;text-align:left!important}.table td.product-cell:before{display:none}.remarks{max-width:none}.pager{background:var(--card-bg);border:1px solid var(--line);border-radius:var(--radius);margin-top:10px}}
-@media(max-width:767px){.stat-grid{grid-template-columns:1fr 1fr}.filters{grid-template-columns:1fr}.filters .search{grid-column:auto}.table tbody{grid-template-columns:1fr}.table tr{grid-template-columns:1fr}.table td{grid-column:1/-1}.heading{align-items:flex-start;flex-direction:column}.pager{flex-direction:column;align-items:flex-start}}
-@media print{.sidebar,.topbar,.toolbar,.heading .actions,.pager,footer{display:none!important}.app-main{margin:0!important}.content-wrap{padding:0!important}.card{border:0}.table th,.table td{font-size:8px}}
-</style></head><body><?php include('includes/sidebar.php'); ?><main class="app-main"><?php include('includes/nav.php'); ?><div class="content-wrap">
-<div class="heading"><div><h1>Stock Movements</h1><p>Complete inward, outward, adjustment, purchase, sales and transfer movement history.</p></div><div class="actions d-flex gap-2"><a href="stock-adjustment.php" class="btn-theme text-decoration-none"><i class="fa-solid fa-sliders"></i>Adjust Stock</a><button type="button" onclick="window.print()" class="btn-soft"><i class="fa-solid fa-print"></i>Print</button></div></div>
-<?php if(!$canView): ?><div class="card"><div class="empty">You do not have permission to view stock movements.</div></div><?php else: ?>
-<div class="stat-grid"><div class="stat"><i class="fa-solid fa-arrow-down"></i><div><small>Quantity In</small><b><?=number_format((float)$stats['qty_in'],3)?></b></div></div><div class="stat"><i class="fa-solid fa-arrow-up"></i><div><small>Quantity Out</small><b><?=number_format((float)$stats['qty_out'],3)?></b></div></div><div class="stat"><i class="fa-solid fa-weight-hanging"></i><div><small>Net Weight Movement</small><b><?=number_format((float)$stats['weight_in']-(float)$stats['weight_out'],3)?></b></div></div><div class="stat"><i class="fa-solid fa-indian-rupee-sign"></i><div><small>Movement Value</small><b><?=$canValue?e($currency).number_format((float)$stats['movement_value'],2):'••••'?></b></div></div></div>
-<form method="get" class="toolbar"><div class="filters"><input class="form-control search" type="search" name="search" value="<?=e($search)?>" placeholder="Search product, code, barcode, type, reference or remarks..."><select class="form-select" name="product_id"><option value="0">All products</option><?php foreach($products as $p): ?><option value="<?=(int)$p['id']?>" <?=$productId===(int)$p['id']?'selected':''?>><?=e($p['product_name'].' - '.$p['product_code'])?></option><?php endforeach; ?></select><select class="form-select" name="movement_type"><option value="">All movement types</option><?php foreach($types as $t): ?><option value="<?=e($t)?>" <?=$movementType===$t?'selected':''?>><?=e($t)?></option><?php endforeach; ?></select><select class="form-select" name="direction"><option value="all" <?=$direction==='all'?'selected':''?>>All directions</option><option value="in" <?=$direction==='in'?'selected':''?>>Stock In</option><option value="out" <?=$direction==='out'?'selected':''?>>Stock Out</option></select><select class="form-select" name="branch_id"><option value="0">All branches</option><?php foreach($branches as $b): ?><option value="<?=(int)$b['id']?>" <?=$selectedBranch===(int)$b['id']?'selected':''?>><?=e($b['branch_name'])?></option><?php endforeach; ?></select><input class="form-control" type="date" name="date_from" value="<?=e($dateFrom)?>" title="From date"><input class="form-control" type="date" name="date_to" value="<?=e($dateTo)?>" title="To date"><select class="form-select" name="per_page"><?php foreach([10,20,50,100] as $n): ?><option value="<?=$n?>" <?=$perPage===$n?'selected':''?>><?=$n?> rows</option><?php endforeach; ?></select><button class="btn-theme" type="submit"><i class="fa-solid fa-filter"></i>Apply</button><a class="btn-soft text-decoration-none" href="stock-movements.php"><i class="fa-solid fa-rotate-left"></i>Reset</a></div></form>
-<div class="card"><div class="table-responsive"><table class="table align-middle"><thead><tr><th>Date & Time</th><th>Product</th><th>Movement</th><th>Qty In</th><th>Qty Out</th><th>Weight In</th><th>Weight Out</th><th>Rate</th><th>Value</th><th>Reference</th><th>User / Branch</th><th>Remarks</th></tr></thead><tbody><?php foreach($rows as $row): $cls=movementClass((string)$row['movement_type']); $link=sourceLink((string)($row['reference_table']??''),(int)($row['reference_id']??0)); ?><tr><td data-label="Date & Time"><?=e(date('d-m-Y h:i A',strtotime($row['movement_date'])))?><div class="sub">#SM-<?=(int)$row['id']?></div></td><td class="product-cell" data-label="Product"><div class="product"><?=e($row['product_name'])?></div><div class="sub"><?=e($row['product_code'])?><?=!empty($row['barcode'])?' · '.e($row['barcode']):''?><?=!empty($row['purity'])?' · '.e($row['purity']).'%':''?></div></td><td data-label="Movement"><span class="badge-move badge-<?=$cls?>"><?=e($row['movement_type'])?></span></td><td data-label="Qty In" class="value-in"><?=number_format((float)$row['quantity_in'],3)?> <?=e($row['unit_name'])?></td><td data-label="Qty Out" class="value-out"><?=number_format((float)$row['quantity_out'],3)?> <?=e($row['unit_name'])?></td><td data-label="Weight In" class="value-in"><?=number_format((float)$row['weight_in'],3)?> g</td><td data-label="Weight Out" class="value-out"><?=number_format((float)$row['weight_out'],3)?> g</td><td data-label="Rate"><?=$canValue?e($currency).number_format((float)$row['rate'],2):'••••'?></td><td data-label="Value"><?=$canValue?e($currency).number_format((float)$row['value_amount'],2):'••••'?></td><td data-label="Reference"><?php if($link): ?><a class="ref-link" href="<?=e($link)?>"><?=e($row['reference_table'])?> #<?=(int)$row['reference_id']?></a><?php elseif(!empty($row['reference_table'])): ?><div><?=e($row['reference_table'])?></div><div class="sub"><?=!empty($row['reference_id'])?'#'.(int)$row['reference_id']:'No reference ID'?></div><?php else: ?>—<?php endif; ?></td><td data-label="User / Branch"><div><?=e($row['created_by_name']?:('User #'.(int)$row['created_by']))?></div><div class="sub"><?=e($row['branch_name']?:('Branch #'.(int)$row['branch_id']))?></div></td><td data-label="Remarks" class="remarks"><?=e($row['remarks']?:'—')?></td></tr><?php endforeach; ?></tbody></table></div><?php if(!$rows): ?><div class="empty"><i class="fa-regular fa-folder-open fa-2x mb-2"></i><div>No stock movements found.</div></div><?php endif; ?><div class="pager"><div class="pager-summary"><?=$total?'Showing '.($offset+1).'–'.min($offset+$perPage,$total).' of '.$total.' movements':'Showing 0 movements'?></div><ul class="pagination pagination-sm"><?php if($page>1): ?><li class="page-item"><a class="page-link" href="<?=e(pageUrl(['page'=>$page-1]))?>"><i class="fa-solid fa-angle-left"></i></a></li><?php endif; ?><?php for($i=max(1,$page-2);$i<=min($totalPages,$page+2);$i++): ?><li class="page-item <?=$i===$page?'active':''?>"><a class="page-link" href="<?=e(pageUrl(['page'=>$i]))?>"><?=$i?></a></li><?php endfor; ?><?php if($page<$totalPages): ?><li class="page-item"><a class="page-link" href="<?=e(pageUrl(['page'=>$page+1]))?>"><i class="fa-solid fa-angle-right"></i></a></li><?php endif; ?></ul></div></div>
-<?php endif; ?><?php include('includes/footer.php'); ?></div></main><?php include('includes/script.php'); ?><script src="assets/js/script.js"></script></body></html>
+$movementTimestamp = date('Y-m-d H:i:s');
+if ($movementDateInput !== '') {
+    $parsed = strtotime($movementDateInput);
+    if ($parsed === false) {
+        responseJson(false, 'Invalid movement date and time.', [], 422);
+    }
+    $movementTimestamp = date('Y-m-d H:i:s', $parsed);
+}
+
+$conn->begin_transaction();
+
+try {
+    $productStmt = $conn->prepare('SELECT id, product_name, purchase_rate, track_stock FROM products WHERE id=? AND business_id=? AND is_active=1 LIMIT 1 FOR UPDATE');
+    if (!$productStmt) {
+        throw new RuntimeException('Unable to prepare product query: ' . $conn->error);
+    }
+    $productStmt->bind_param('ii', $productId, $businessId);
+    if (!$productStmt->execute()) {
+        throw new RuntimeException('Unable to validate product: ' . $productStmt->error);
+    }
+    $product = $productStmt->get_result()->fetch_assoc();
+    $productStmt->close();
+
+    if (!$product) {
+        throw new RuntimeException('Product not found or inactive.');
+    }
+    if ((int)($product['track_stock'] ?? 1) !== 1) {
+        throw new RuntimeException('Stock tracking is disabled for this product.');
+    }
+
+    $ensureStmt = $conn->prepare('INSERT INTO product_stock (business_id,branch_id,product_id,quantity,gross_weight,net_weight,average_cost,stock_value) VALUES (?,?,?,0,0,0,0,0) ON DUPLICATE KEY UPDATE product_id=VALUES(product_id)');
+    if (!$ensureStmt) {
+        throw new RuntimeException('Unable to prepare stock-row creation: ' . $conn->error);
+    }
+    $ensureStmt->bind_param('iii', $businessId, $branchId, $productId);
+    if (!$ensureStmt->execute()) {
+        throw new RuntimeException('Unable to create stock row: ' . $ensureStmt->error);
+    }
+    $ensureStmt->close();
+
+    $stockStmt = $conn->prepare('SELECT id,quantity,gross_weight,net_weight,average_cost,stock_value FROM product_stock WHERE business_id=? AND branch_id=? AND product_id=? LIMIT 1 FOR UPDATE');
+    if (!$stockStmt) {
+        throw new RuntimeException('Unable to prepare current stock query: ' . $conn->error);
+    }
+    $stockStmt->bind_param('iii', $businessId, $branchId, $productId);
+    if (!$stockStmt->execute()) {
+        throw new RuntimeException('Unable to read current stock: ' . $stockStmt->error);
+    }
+    $old = $stockStmt->get_result()->fetch_assoc();
+    $stockStmt->close();
+
+    if (!$old) {
+        throw new RuntimeException('Unable to initialise product stock.');
+    }
+
+    $oldQty = round((float)$old['quantity'], 3);
+    $oldGrossWeight = round((float)$old['gross_weight'], 3);
+    $oldNetWeight = round((float)$old['net_weight'], 3);
+    $oldAverageCost = round((float)$old['average_cost'], 2);
+
+    $qtyIn = $qtyOut = $weightIn = $weightOut = 0.0;
+
+    if ($mode === 'add') {
+        $newQty = $oldQty + $qty;
+        $newNetWeight = $oldNetWeight + $weight;
+        $newGrossWeight = $oldGrossWeight + $weight;
+        $qtyIn = $qty;
+        $weightIn = $weight;
+        $movementType = 'Adjustment In';
+        $modeLabel = 'Add Stock';
+    } elseif ($mode === 'subtract') {
+        if ($qty > $oldQty) {
+            throw new RuntimeException('Only ' . number_format($oldQty, 3) . ' quantity is available.');
+        }
+        if ($weight > $oldNetWeight) {
+            throw new RuntimeException('Only ' . number_format($oldNetWeight, 3) . ' net weight is available.');
+        }
+        $newQty = $oldQty - $qty;
+        $newNetWeight = $oldNetWeight - $weight;
+        $grossReduction = ($oldNetWeight > 0 && $weight > 0) ? ($oldGrossWeight * ($weight / $oldNetWeight)) : $weight;
+        $newGrossWeight = max(0, $oldGrossWeight - $grossReduction);
+        $qtyOut = $qty;
+        $weightOut = $weight;
+        $movementType = 'Adjustment Out';
+        $modeLabel = 'Subtract Stock';
+    } else {
+        $newQty = $qty;
+        $newNetWeight = $weight;
+        $newGrossWeight = $weight;
+        $qtyDiff = $newQty - $oldQty;
+        $weightDiff = $newNetWeight - $oldNetWeight;
+        if ($qtyDiff >= 0) $qtyIn = $qtyDiff; else $qtyOut = abs($qtyDiff);
+        if ($weightDiff >= 0) $weightIn = $weightDiff; else $weightOut = abs($weightDiff);
+        $movementType = ($qtyDiff >= 0 && $weightDiff >= 0) ? 'Adjustment In' : 'Adjustment Out';
+        $modeLabel = 'Set Exact Stock';
+    }
+
+    $newQty = round(max(0, $newQty), 3);
+    $newGrossWeight = round(max(0, $newGrossWeight), 3);
+    $newNetWeight = round(max(0, $newNetWeight), 3);
+
+    $purchaseRate = round((float)($product['purchase_rate'] ?? 0), 2);
+    $newAverageCost = $oldAverageCost > 0 ? $oldAverageCost : $purchaseRate;
+    $valuationBase = $newNetWeight > 0 ? $newNetWeight : $newQty;
+    $newStockValue = round($valuationBase * $newAverageCost, 2);
+
+    $updateStmt = $conn->prepare('UPDATE product_stock SET quantity=?,gross_weight=?,net_weight=?,average_cost=?,stock_value=?,updated_at=CURRENT_TIMESTAMP WHERE business_id=? AND branch_id=? AND product_id=?');
+    if (!$updateStmt) {
+        throw new RuntimeException('Unable to prepare stock update: ' . $conn->error);
+    }
+    $updateStmt->bind_param('dddddiii', $newQty, $newGrossWeight, $newNetWeight, $newAverageCost, $newStockValue, $businessId, $branchId, $productId);
+    if (!$updateStmt->execute()) {
+        throw new RuntimeException('Unable to update product stock: ' . $updateStmt->error);
+    }
+    $updateStmt->close();
+
+    $detailRemarks = implode(' | ', [
+        'Stock Adjustment',
+        'Mode: ' . $modeLabel,
+        'Previous Qty: ' . number_format($oldQty, 3, '.', ''),
+        'Change Qty: ' . number_format($newQty - $oldQty, 3, '.', ''),
+        'New Qty: ' . number_format($newQty, 3, '.', ''),
+        'Previous Weight: ' . number_format($oldNetWeight, 3, '.', ''),
+        'Change Weight: ' . number_format($newNetWeight - $oldNetWeight, 3, '.', ''),
+        'New Weight: ' . number_format($newNetWeight, 3, '.', ''),
+        'Reason Type: ' . $reasonType,
+        'Reason: ' . $remarks
+    ]);
+
+    $rate = $newAverageCost;
+    $movementBase = ($weightIn + $weightOut) > 0 ? ($weightIn + $weightOut) : ($qtyIn + $qtyOut);
+    $movementValue = round($movementBase * $rate, 2);
+    $referenceTable = 'stock_adjustment';
+
+    $movementStmt = $conn->prepare('INSERT INTO stock_movements (business_id,branch_id,product_id,movement_date,movement_type,reference_table,reference_id,quantity_in,quantity_out,weight_in,weight_out,rate,value_amount,remarks,created_by) VALUES (?,?,?,?,?,?,NULL,?,?,?,?,?,?,?,?)');
+    if (!$movementStmt) {
+        throw new RuntimeException('Unable to prepare movement insert: ' . $conn->error);
+    }
+    $movementStmt->bind_param('iiisssddddddsi', $businessId, $branchId, $productId, $movementTimestamp, $movementType, $referenceTable, $qtyIn, $qtyOut, $weightIn, $weightOut, $rate, $movementValue, $detailRemarks, $userId);
+    if (!$movementStmt->execute()) {
+        throw new RuntimeException('Unable to save stock movement: ' . $movementStmt->error);
+    }
+    $movementId = (int)$movementStmt->insert_id;
+    $movementStmt->close();
+
+    $referenceStmt = $conn->prepare('UPDATE stock_movements SET reference_id=? WHERE id=? AND business_id=?');
+    if ($referenceStmt) {
+        $referenceStmt->bind_param('iii', $movementId, $movementId, $businessId);
+        $referenceStmt->execute();
+        $referenceStmt->close();
+    }
+
+    $conn->commit();
+
+    responseJson(true, 'Stock adjustment saved successfully.', [
+        'product_id' => $productId,
+        'movement_id' => $movementId,
+        'current_stock' => [
+            'quantity' => $newQty,
+            'gross_weight' => $newGrossWeight,
+            'net_weight' => $newNetWeight,
+            'average_cost' => $newAverageCost,
+            'stock_value' => $newStockValue
+        ]
+    ]);
+} catch (Throwable $e) {
+    $conn->rollback();
+    responseJson(false, $e->getMessage(), [], 500);
+}

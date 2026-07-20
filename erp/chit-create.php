@@ -447,20 +447,25 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
     }
 
     const members=document.querySelector('[name="total_members"]');
+    const months=document.querySelector('[name="total_months"]');
     const installment=document.getElementById('installment_amount');
     const chitValue=document.getElementById('chit_value');
 
     function calculateChitValue(){
-        const count=Number(members.value||0);
+        const totalMonths=Number(months.value||0);
         const amount=Number(installment.value||0);
 
-        if(count>0&&amount>=0&&!chitValue.dataset.manual){
-            chitValue.value=(count*amount).toFixed(2);
+        // Chit value = monthly installment × total months.
+        // Total members controls how many subscribers can join the group,
+        // but it must not be used to calculate the chit value.
+        if(totalMonths>0&&amount>=0&&!chitValue.dataset.manual){
+            chitValue.value=(totalMonths*amount).toFixed(2);
         }
     }
 
-    members.addEventListener('input',calculateChitValue);
+    months.addEventListener('input',calculateChitValue);
     installment.addEventListener('input',calculateChitValue);
+    members.addEventListener('input',calculateChitValue);
     chitValue.addEventListener('input',()=>chitValue.dataset.manual='1');
 
     const groupNoInput=document.getElementById('group_no');

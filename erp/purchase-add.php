@@ -295,8 +295,20 @@ if (tableExists($conn, 'products')) {
     if (hasColumn($conn, 'products', 'purchase_rate')) {
         $sql .= ", purchase_rate";
     }
+    if (hasColumn($conn, 'products', 'gross_weight')) {
+        $sql .= ", gross_weight";
+    }
+    if (hasColumn($conn, 'products', 'stone_weight')) {
+        $sql .= ", stone_weight";
+    }
     if (hasColumn($conn, 'products', 'net_weight')) {
         $sql .= ", net_weight";
+    }
+    if (hasColumn($conn, 'products', 'hsn_code')) {
+        $sql .= ", hsn_code";
+    }
+    if (hasColumn($conn, 'products', 'tax_percent')) {
+        $sql .= ", tax_percent";
     }
     if (hasColumn($conn, 'products', 'category_id')) {
         $sql .= ", category_id";
@@ -363,6 +375,7 @@ $formItems = [
         'purity' => '925',
         'hsn_code' => '',
         'qty' => '1.000',
+        'gram_per_qty' => '0.000',
         'gross_weight' => '0.000',
         'less_weight' => '0.000',
         'net_weight' => '0.000',
@@ -391,6 +404,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $discountAmount = trim((string)($_POST['discount_amount'] ?? '0'));
     $roundOff = trim((string)($_POST['round_off'] ?? '0'));
     $paidAmount = trim((string)($_POST['paid_amount'] ?? '0'));
+    $confirmPurchase = (int)($_POST['confirm_purchase'] ?? 0);
 
     if ($purchaseNo === '') {
         $purchaseNo = generatePurchaseNo($conn, $businessId, $purHasBusinessId);
@@ -416,6 +430,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'purity'           => trim((string)($item['purity'] ?? '925')),
                 'hsn_code'         => trim((string)($item['hsn_code'] ?? '')),
                 'qty'              => trim((string)($item['qty'] ?? '0')),
+                'gram_per_qty'     => trim((string)($item['gram_per_qty'] ?? '0')),
                 'gross_weight'     => trim((string)($item['gross_weight'] ?? '0')),
                 'less_weight'      => trim((string)($item['less_weight'] ?? '0')),
                 'net_weight'       => trim((string)($item['net_weight'] ?? '0')),
@@ -454,6 +469,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (
                 $row['item_name'] === '' ||
                 !is_numeric($row['qty']) ||
+                !is_numeric($row['gram_per_qty']) ||
                 !is_numeric($row['gross_weight']) ||
                 !is_numeric($row['less_weight']) ||
                 !is_numeric($row['net_weight']) ||
@@ -468,9 +484,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
 
             $qty = (float)$row['qty'];
-            $grossWeight = (float)$row['gross_weight'];
+            $gramPerQty = (float)$row['gram_per_qty'];
+            $grossWeight = round($qty * $gramPerQty, 3);
             $lessWeight = (float)$row['less_weight'];
-            $netWeight = (float)$row['net_weight'];
+            $netWeight = max(0, round($grossWeight - $lessWeight, 3));
+
+            $row['gross_weight'] = qtyf($grossWeight);
+            $row['net_weight'] = qtyf($netWeight);
             $ratePerGram = (float)$row['rate_per_gram'];
             $makingCharge = (float)$row['making_charge'];
             $stoneCharge = (float)$row['stone_charge'];
@@ -503,6 +523,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         if ($error === '' && empty($cleanItems)) {
             $error = 'Please add at least one valid item.';
+        }
+
+        if ($error === '' && $confirmPurchase !== 1) {
+            $error = 'Please verify the purchase preview and confirm before saving.';
         }
 
         if ($error === '') {
@@ -979,7 +1003,7 @@ $currencySymbol = (string)($_SESSION['currency_symbol'] ?? '₹');
         }
 
         #itemsTable {
-            min-width: 2070px;
+            min-width: 2180px;
             margin: 0;
             font-size: 10px;
         }
@@ -1169,6 +1193,16 @@ $currencySymbol = (string)($_SESSION['currency_symbol'] ?? '₹');
             cursor: pointer;
         }
 
+
+        .preview-modal-content{max-height:92vh}
+        .preview-summary-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;margin-bottom:12px}
+        .preview-box{border:1px solid var(--border-color);border-radius:9px;padding:10px;background:var(--card-bg)}
+        .preview-label{color:var(--muted-color);font-size:8px;font-weight:800;text-transform:uppercase}
+        .preview-value{margin-top:3px;font-size:11px;font-weight:800}
+        .preview-table{font-size:10px;margin-bottom:0}.preview-table th{font-size:8px;color:var(--muted-color);text-transform:uppercase;white-space:nowrap}
+        .preview-table th,.preview-table td{padding:8px;border-color:var(--border-color);vertical-align:middle}
+        .preview-total-panel{max-width:420px;margin-left:auto;margin-top:12px}.preview-total-row{display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px dashed var(--border-color);font-size:11px}
+        .preview-total-row.final{font-size:15px;font-weight:900;color:var(--primary-dark)}
         @media (max-width: 767.98px) {
             .toast-stack {
                 top: 72px;
@@ -1233,6 +1267,7 @@ $currencySymbol = (string)($_SESSION['currency_symbol'] ?? '₹');
         ></div>
 
         <form method="post" id="purchaseForm" autocomplete="off">
+            <input type="hidden" name="confirm_purchase" id="confirm_purchase" value="0">
             <div class="purchase-layout">
                 <div>
                     <section class="section-card">
@@ -1326,7 +1361,8 @@ $currencySymbol = (string)($_SESSION['currency_symbol'] ?? '₹');
                                         <th>Purity</th>
                                         <th>HSN</th>
                                         <th>Qty</th>
-                                        <th>Gross Wt</th>
+                                        <th>Gram / Qty</th>
+                                        <th>Total Gross</th>
                                         <th>Less Wt</th>
                                         <th>Net Wt</th>
                                         <th>Rate/Gm</th>
@@ -1357,7 +1393,11 @@ $currencySymbol = (string)($_SESSION['currency_symbol'] ?? '₹');
                                                         data-name="<?php echo h($prd['product_name']); ?>"
                                                         data-purity="<?php echo h($prd['purity'] ?? '925'); ?>"
                                                         data-rate="<?php echo h($prd['purchase_rate'] ?? '0'); ?>"
-                                                        data-weight="<?php echo h($prd['net_weight'] ?? '0'); ?>"
+                                                        data-gross-weight="<?php echo h($prd['gross_weight'] ?? $prd['net_weight'] ?? '0'); ?>"
+                                                        data-stone-weight="<?php echo h($prd['stone_weight'] ?? '0'); ?>"
+                                                        data-net-weight="<?php echo h($prd['net_weight'] ?? '0'); ?>"
+                                                        data-hsn="<?php echo h($prd['hsn_code'] ?? ''); ?>"
+                                                        data-tax="<?php echo h($prd['tax_percent'] ?? '3'); ?>"
                                                         <?php echo (int)($item['product_id'] ?? 0) === (int)$prd['id'] ? 'selected' : ''; ?>
                                                     >
                                                         <?php echo h($prd['product_name'] . ' (' . $prd['product_code'] . ')'); ?>
@@ -1378,7 +1418,8 @@ $currencySymbol = (string)($_SESSION['currency_symbol'] ?? '₹');
                                         <td><input type="text" name="items[<?php echo $index; ?>][purity]" class="form-control purity" value="<?php echo h($item['purity']); ?>"></td>
                                         <td><input type="text" name="items[<?php echo $index; ?>][hsn_code]" class="form-control hsn-code" value="<?php echo h($item['hsn_code']); ?>"></td>
                                         <td><input type="number" step="0.001" min="0" name="items[<?php echo $index; ?>][qty]" class="form-control qty" value="<?php echo h($item['qty']); ?>"></td>
-                                        <td><input type="number" step="0.001" min="0" name="items[<?php echo $index; ?>][gross_weight]" class="form-control gross-weight" value="<?php echo h($item['gross_weight']); ?>"></td>
+                                        <td><input type="number" step="0.001" min="0" name="items[<?php echo $index; ?>][gram_per_qty]" class="form-control gram-per-qty" value="<?php echo h($item['gram_per_qty'] ?? '0.000'); ?>"></td>
+                                        <td><input type="number" step="0.001" min="0" name="items[<?php echo $index; ?>][gross_weight]" class="form-control gross-weight" value="<?php echo h($item['gross_weight']); ?>" readonly></td>
                                         <td><input type="number" step="0.001" min="0" name="items[<?php echo $index; ?>][less_weight]" class="form-control less-weight" value="<?php echo h($item['less_weight']); ?>"></td>
                                         <td><input type="number" step="0.001" min="0" name="items[<?php echo $index; ?>][net_weight]" class="form-control net-weight" value="<?php echo h($item['net_weight']); ?>"></td>
                                         <td><input type="number" step="0.01" min="0" name="items[<?php echo $index; ?>][rate_per_gram]" class="form-control rate-per-gram" value="<?php echo h($item['rate_per_gram']); ?>"></td>
@@ -1560,8 +1601,8 @@ $currencySymbol = (string)($_SESSION['currency_symbol'] ?? '₹');
                             <input type="hidden" id="balance_amount">
 
                             <div class="d-grid gap-2 mt-3">
-                                <button type="submit" class="btn btn-theme">
-                                    <i class="fa-solid fa-floppy-disk me-2"></i>Save Purchase
+                                <button type="submit" class="btn btn-theme" id="previewPurchaseBtn">
+                                    <i class="fa-solid fa-eye me-2"></i>Preview & Verify
                                 </button>
 
                                 <a href="purchases.php" class="btn btn-light btn-sm">Cancel</a>
@@ -1575,6 +1616,23 @@ $currencySymbol = (string)($_SESSION['currency_symbol'] ?? '₹');
         <?php include('includes/footer.php'); ?>
     </div>
 </main>
+
+
+<div class="modal fade" id="purchasePreviewModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content preview-modal-content">
+            <div class="modal-header">
+                <div><h5 class="modal-title mb-0">Verify Purchase Before Saving</h5><div class="small text-muted">Check supplier, quantities, grams, totals and payment details.</div></div>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body" id="purchasePreviewBody"></div>
+            <div class="modal-footer">
+                <button type="button" class="btn-soft" data-bs-dismiss="modal"><i class="fa-solid fa-pen me-1"></i>Edit Purchase</button>
+                <button type="button" class="btn-theme" id="confirmSavePurchase"><i class="fa-solid fa-circle-check me-1"></i>Confirm & Save Purchase</button>
+            </div>
+        </div>
+    </div>
+</div>
 
 <?php include('includes/script.php'); ?>
 <script src="assets/js/script.js"></script>
@@ -1637,7 +1695,11 @@ $currencySymbol = (string)($_SESSION['currency_symbol'] ?? '₹');
                 'product_code' => (string)$p['product_code'],
                 'purity' => (string)($p['purity'] ?? '925'),
                 'purchase_rate' => (float)($p['purchase_rate'] ?? 0),
-                'net_weight' => (float)($p['net_weight'] ?? 0)
+                'gross_weight' => (float)($p['gross_weight'] ?? $p['net_weight'] ?? 0),
+                'stone_weight' => (float)($p['stone_weight'] ?? 0),
+                'net_weight' => (float)($p['net_weight'] ?? 0),
+                'hsn_code' => (string)($p['hsn_code'] ?? ''),
+                'tax_percent' => (float)($p['tax_percent'] ?? 3)
             ];
         }
         echo json_encode($productJs, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
@@ -1662,7 +1724,11 @@ $currencySymbol = (string)($_SESSION['currency_symbol'] ?? '₹');
                 data-name="${escapeHtml(p.product_name)}"
                 data-purity="${escapeHtml(p.purity)}"
                 data-rate="${p.purchase_rate}"
-                data-weight="${p.net_weight}"
+                data-gross-weight="${p.gross_weight}"
+                data-stone-weight="${p.stone_weight}"
+                data-net-weight="${p.net_weight}"
+                data-hsn="${escapeHtml(p.hsn_code)}"
+                data-tax="${p.tax_percent}"
                 ${selected}
             >${escapeHtml(p.product_name)} (${escapeHtml(p.product_code)})</option>`;
         });
@@ -1684,7 +1750,8 @@ $currencySymbol = (string)($_SESSION['currency_symbol'] ?? '₹');
             <td><input type="text" name="items[${rowIndex}][purity]" class="form-control purity" value="${escapeHtml(item.purity || '925')}"></td>
             <td><input type="text" name="items[${rowIndex}][hsn_code]" class="form-control hsn-code" value="${escapeHtml(item.hsn_code || '')}"></td>
             <td><input type="number" step="0.001" min="0" name="items[${rowIndex}][qty]" class="form-control qty" value="${item.qty || '1.000'}"></td>
-            <td><input type="number" step="0.001" min="0" name="items[${rowIndex}][gross_weight]" class="form-control gross-weight" value="${item.gross_weight || '0.000'}"></td>
+            <td><input type="number" step="0.001" min="0" name="items[${rowIndex}][gram_per_qty]" class="form-control gram-per-qty" value="${item.gram_per_qty || '0.000'}"></td>
+            <td><input type="number" step="0.001" min="0" name="items[${rowIndex}][gross_weight]" class="form-control gross-weight" value="${item.gross_weight || '0.000'}" readonly></td>
             <td><input type="number" step="0.001" min="0" name="items[${rowIndex}][less_weight]" class="form-control less-weight" value="${item.less_weight || '0.000'}"></td>
             <td><input type="number" step="0.001" min="0" name="items[${rowIndex}][net_weight]" class="form-control net-weight" value="${item.net_weight || '0.000'}"></td>
             <td><input type="number" step="0.01" min="0" name="items[${rowIndex}][rate_per_gram]" class="form-control rate-per-gram" value="${item.rate_per_gram || '0.00'}"></td>
@@ -1715,14 +1782,15 @@ $currencySymbol = (string)($_SESSION['currency_symbol'] ?? '₹');
     }
 
     function calculateRow(tr) {
-        const gross = parseFloat(tr.querySelector('.gross-weight').value || 0);
+        const qty = parseFloat(tr.querySelector('.qty').value || 0);
+        const gramPerQty = parseFloat(tr.querySelector('.gram-per-qty').value || 0);
+        const gross = Math.max(0, qty * gramPerQty);
         const less = parseFloat(tr.querySelector('.less-weight').value || 0);
 
         let net = gross - less;
-        if (net < 0) {
-            net = 0;
-        }
+        if (net < 0) net = 0;
 
+        tr.querySelector('.gross-weight').value = gross.toFixed(3);
         tr.querySelector('.net-weight').value = net.toFixed(3);
 
         const netWeight = parseFloat(tr.querySelector('.net-weight').value || 0);
@@ -1803,39 +1871,60 @@ $currencySymbol = (string)($_SESSION['currency_symbol'] ?? '₹');
         }
     }
 
+    function applySelectedProduct(tr, force = false) {
+        const productSelect = tr.querySelector('.product-select');
+        if (!productSelect) return;
+
+        const option = productSelect.options[productSelect.selectedIndex];
+        if (!option || !option.value) return;
+
+        const name = option.getAttribute('data-name') || '';
+        const purity = option.getAttribute('data-purity') || '925';
+        const rate = parseFloat(option.getAttribute('data-rate') || 0);
+        const grossPerQty = parseFloat(option.getAttribute('data-gross-weight') || 0);
+        const stonePerQty = parseFloat(option.getAttribute('data-stone-weight') || 0);
+        const hsn = option.getAttribute('data-hsn') || '';
+        const tax = parseFloat(option.getAttribute('data-tax') || 3);
+        const qty = parseFloat(tr.querySelector('.qty').value || 1);
+
+        const setWhenEmpty = (selector, value) => {
+            const input = tr.querySelector(selector);
+            if (!input) return;
+            if (force || String(input.value || '').trim() === '' || parseFloat(input.value || 0) <= 0) {
+                input.value = value;
+            }
+        };
+
+        const nameInput = tr.querySelector('.item-name');
+        if (nameInput && (force || !nameInput.value.trim())) nameInput.value = name;
+
+        const purityInput = tr.querySelector('.purity');
+        if (purityInput && (force || !purityInput.value.trim() || purityInput.value === '925')) purityInput.value = purity;
+
+        const hsnInput = tr.querySelector('.hsn-code');
+        if (hsnInput && (force || !hsnInput.value.trim())) hsnInput.value = hsn;
+
+        setWhenEmpty('.gram-per-qty', grossPerQty.toFixed(3));
+        setWhenEmpty('.less-weight', (stonePerQty * qty).toFixed(3));
+        setWhenEmpty('.rate-per-gram', rate.toFixed(2));
+        setWhenEmpty('.gst-percent', tax.toFixed(2));
+
+        calculateRow(tr);
+    }
+
     function bindRow(tr) {
         const productSelect = tr.querySelector('.product-select');
 
         if (productSelect) {
             productSelect.addEventListener('change', function () {
-                const option = this.options[this.selectedIndex];
-
-                if (!option || !option.value) {
-                    return;
-                }
-
-                const name = option.getAttribute('data-name') || '';
-                const purity = option.getAttribute('data-purity') || '925';
-                const rate = parseFloat(option.getAttribute('data-rate') || 0);
-                const weight = parseFloat(option.getAttribute('data-weight') || 0);
-
-                tr.querySelector('.item-name').value = name;
-                tr.querySelector('.purity').value = purity;
-                tr.querySelector('.rate-per-gram').value = rate.toFixed(2);
-
-                const grossInput = tr.querySelector('.gross-weight');
-                const netInput = tr.querySelector('.net-weight');
-
-                if (parseFloat(grossInput.value || 0) <= 0) {
-                    grossInput.value = weight.toFixed(3);
-                }
-
-                if (parseFloat(netInput.value || 0) <= 0) {
-                    netInput.value = weight.toFixed(3);
-                }
-
-                calculateRow(tr);
+                applySelectedProduct(tr, true);
             });
+
+            // Populate product master values when the row is already selected
+            // by PHP, browser autocomplete, or restored form data.
+            if (productSelect.value) {
+                applySelectedProduct(tr, false);
+            }
         }
 
         tr.querySelectorAll('input').forEach(function (input) {
@@ -1862,6 +1951,15 @@ $currencySymbol = (string)($_SESSION['currency_symbol'] ?? '₹');
         bindRow(tr);
     });
 
+    // Browsers can restore a selected product after the first script pass.
+    // Re-check once after page rendering so its weight is always displayed.
+    setTimeout(function () {
+        document.querySelectorAll('#itemRows tr').forEach(function (tr) {
+            const select = tr.querySelector('.product-select');
+            if (select && select.value) applySelectedProduct(tr, false);
+        });
+    }, 120);
+
     document.getElementById('addRowBtn').addEventListener('click', function () {
         addRow();
     });
@@ -1874,6 +1972,54 @@ $currencySymbol = (string)($_SESSION['currency_symbol'] ?? '₹');
         }
     });
 
+
+    const purchaseForm=document.getElementById('purchaseForm');
+    const previewModal=bootstrap.Modal.getOrCreateInstance(document.getElementById('purchasePreviewModal'));
+    const confirmInput=document.getElementById('confirm_purchase');
+    let confirmedForSave=false;
+
+    function textValue(selector){const el=document.querySelector(selector);if(!el)return'';if(el.tagName==='SELECT'){const o=el.options[el.selectedIndex];return o?o.text.trim():'';}return String(el.value||'').trim();}
+
+    function buildPurchasePreview(){
+        calculateAll();
+        const rows=[];
+        document.querySelectorAll('#itemRows tr').forEach(function(tr){
+            const ps=tr.querySelector('.product-select');
+            const productText=ps&&ps.selectedIndex>=0?ps.options[ps.selectedIndex].text.trim():'';
+            const itemName=tr.querySelector('.item-name').value.trim();
+            if(!itemName&&!ps.value)return;
+            const qty=parseFloat(tr.querySelector('.qty').value||0);
+            const gpq=parseFloat(tr.querySelector('.gram-per-qty').value||0);
+            const gross=parseFloat(tr.querySelector('.gross-weight').value||0);
+            const less=parseFloat(tr.querySelector('.less-weight').value||0);
+            const net=parseFloat(tr.querySelector('.net-weight').value||0);
+            const rate=parseFloat(tr.querySelector('.rate-per-gram').value||0);
+            const gst=parseFloat(tr.querySelector('.gst-percent').value||0);
+            const total=parseFloat(tr.querySelector('.total-amount').value||0);
+            rows.push(`<tr><td><strong>${escapeHtml(itemName||productText)}</strong><div class="small text-muted">${escapeHtml(productText)}</div></td><td class="text-end">${qty.toFixed(3)}</td><td class="text-end">${gpq.toFixed(3)} g</td><td class="text-end">${gross.toFixed(3)} g</td><td class="text-end">${less.toFixed(3)} g</td><td class="text-end">${net.toFixed(3)} g</td><td class="text-end"><?php echo h($currencySymbol); ?>${rate.toFixed(2)}</td><td class="text-end">${gst.toFixed(2)}%</td><td class="text-end"><strong><?php echo h($currencySymbol); ?>${total.toFixed(2)}</strong></td></tr>`);
+        });
+        if(!rows.length){showToast('error','Add at least one valid purchase item.');return false;}
+        document.getElementById('purchasePreviewBody').innerHTML=`
+            <div class="preview-summary-grid">
+                <div class="preview-box"><div class="preview-label">Purchase No</div><div class="preview-value">${escapeHtml(textValue('[name="purchase_no"]'))}</div></div>
+                <div class="preview-box"><div class="preview-label">Purchase Date</div><div class="preview-value">${escapeHtml(textValue('[name="purchase_date"]'))}</div></div>
+                <div class="preview-box"><div class="preview-label">Supplier</div><div class="preview-value">${escapeHtml(textValue('[name="supplier_id"]'))}</div></div>
+                <div class="preview-box"><div class="preview-label">Supplier Invoice</div><div class="preview-value">${escapeHtml(textValue('[name="invoice_no"]')||'—')}</div></div>
+            </div>
+            <div class="table-responsive"><table class="table preview-table"><thead><tr><th>Product</th><th class="text-end">Qty</th><th class="text-end">Gram/Qty</th><th class="text-end">Gross</th><th class="text-end">Less</th><th class="text-end">Net</th><th class="text-end">Rate/Gm</th><th class="text-end">GST</th><th class="text-end">Total</th></tr></thead><tbody>${rows.join('')}</tbody></table></div>
+            <div class="preview-total-panel">
+                <div class="preview-total-row"><span>Subtotal</span><strong><?php echo h($currencySymbol); ?>${document.getElementById('subtotalText').textContent}</strong></div>
+                <div class="preview-total-row"><span>Discount</span><strong><?php echo h($currencySymbol); ?>${parseFloat(document.getElementById('discount_amount').value||0).toFixed(2)}</strong></div>
+                <div class="preview-total-row"><span>GST</span><strong><?php echo h($currencySymbol); ?>${document.getElementById('gstText').textContent}</strong></div>
+                <div class="preview-total-row"><span>Paid</span><strong><?php echo h($currencySymbol); ?>${parseFloat(document.getElementById('paid_amount').value||0).toFixed(2)}</strong></div>
+                <div class="preview-total-row final"><span>Grand Total</span><strong><?php echo h($currencySymbol); ?>${document.getElementById('grandTotalText').textContent}</strong></div>
+                <div class="preview-total-row final"><span>Balance</span><strong><?php echo h($currencySymbol); ?>${document.getElementById('balanceText').textContent}</strong></div>
+            </div>`;
+        return true;
+    }
+
+    purchaseForm.addEventListener('submit',function(e){if(confirmedForSave)return;e.preventDefault();if(!purchaseForm.reportValidity())return;if(!buildPurchasePreview())return;confirmInput.value='0';previewModal.show();});
+    document.getElementById('confirmSavePurchase').addEventListener('click',function(){confirmedForSave=true;confirmInput.value='1';this.disabled=true;this.innerHTML='<i class="fa-solid fa-spinner fa-spin me-1"></i>Saving Purchase...';purchaseForm.submit();});
     calculateAll();
 })();
 </script>
