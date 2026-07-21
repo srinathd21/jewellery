@@ -222,18 +222,57 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         if (!$canUpdate) {
             jsonResponse(false, 'You do not have permission to generate barcodes.', [], 403);
         }
+
         try {
             $productId = (int) ($_POST['product_id'] ?? 0);
-            $pc = $conn->prepare('SELECT id FROM products WHERE id=? AND business_id=? LIMIT 1');
-            if (!$pc)
+
+            $productStmt = $conn->prepare(
+                'SELECT id, product_name, barcode
+                 FROM products
+                 WHERE id=? AND business_id=?
+                 LIMIT 1'
+            );
+
+            if (!$productStmt) {
                 throw new RuntimeException('Unable to validate product.');
-            $pc->bind_param('ii', $productId, $businessId);
-            $pc->execute();
-            $ok = $pc->get_result()->fetch_assoc();
-            $pc->close();
-            if (!$ok)
+            }
+
+            $productStmt->bind_param('ii', $productId, $businessId);
+            $productStmt->execute();
+            $product = $productStmt->get_result()->fetch_assoc();
+            $productStmt->close();
+
+            if (!$product) {
                 throw new RuntimeException('Product not found.');
-            jsonResponse(true, 'Barcode generated.', ['barcode' => generateUniqueBarcode($conn, $businessId, $productId)]);
+            }
+
+            $existingBarcode = trim((string) ($product['barcode'] ?? ''));
+            if ($existingBarcode !== '') {
+                jsonResponse(true, 'This product already has a saved barcode.', [
+                    'barcode' => $existingBarcode,
+                    'saved' => true,
+                    'existing' => true,
+                    'product_id' => $productId,
+                ]);
+            }
+
+            $barcode = generateUniqueBarcode($conn, $businessId, $productId);
+            $updateStmt = $conn->prepare('UPDATE products SET barcode=? WHERE id=? AND business_id=?');
+            if (!$updateStmt) {
+                throw new RuntimeException('Unable to prepare barcode auto-save.');
+            }
+            $updateStmt->bind_param('sii', $barcode, $productId, $businessId);
+            if (!$updateStmt->execute()) {
+                throw new RuntimeException('Unable to save generated barcode.');
+            }
+            $updateStmt->close();
+
+            jsonResponse(true, 'Barcode generated and saved successfully.', [
+                'barcode' => $barcode,
+                'saved' => true,
+                'existing' => false,
+                'product_id' => $productId,
+            ]);
         } catch (Throwable $error) {
             jsonResponse(false, $error->getMessage(), [], 500);
         }
@@ -1074,7 +1113,7 @@ $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
                             </select></div>
                         <button type="button" class="btn-soft" id="selectVisible"><i class="fa-regular fa-square-check"></i>
                             Select Visible</button>
-                        <button type="button" class="btn-soft" id="generateSelected" <?php echo $canUpdate ? '' : 'disabled'; ?>><i class="fa-solid fa-wand-magic-sparkles"></i> Generate Selected</button>
+                        <button type="button" class="btn-soft" id="generateSelected" <?php echo $canUpdate ? '' : 'disabled'; ?>><i class="fa-solid fa-wand-magic-sparkles"></i> Generate & Auto Save</button>
                         <button type="button" class="btn-reset" id="resetFilters"><i class="fa-solid fa-rotate-left"></i>
                             Reset</button>
                     </div>
@@ -1110,13 +1149,13 @@ $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
                             <div class="selected-text"><strong id="selectedCount">0</strong> product(s) selected · Enter an
                                 existing barcode or generate a new one.</div><button type="button" class="btn-theme"
                                 id="saveBarcodes" <?php echo $canUpdate ? '' : 'disabled'; ?>><i
-                                    class="fa-solid fa-floppy-disk"></i> Save Selected Barcodes</button>
+                                    class="fa-solid fa-floppy-disk"></i> Save Manual Barcodes</button>
                         </div>
                     </section>
 
                     <aside class="preview-card" id="printArea">
                         <div class="preview-title">Barcode Label Preview</div>
-                        <div class="preview-sub">Click the preview button beside a product.</div>
+                        <div class="preview-sub">Select a product, type, scan, or generate a barcode to update this preview instantly.</div>
                         <div class="label-preview" id="labelPreview">
                             <div class="preview-empty"><i class="fa-solid fa-barcode fa-2x mb-2"></i>
                                 <div>Select a product to preview its label.</div>
@@ -1207,24 +1246,208 @@ $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
                         '<td data-label="Sticker Qty"><input type="number" class="form-control qty-input" value="1" min="1" max="500"></td>' +
                         '<td class="text-end" data-label="Preview"><button type="button" class="mini-btn preview-one ms-auto" title="Preview"><i class="fa-solid fa-eye"></i></button></td></tr>';
                 }
-                function render() { body.innerHTML = products.map(row).join(''); document.getElementById('barcodeTable').classList.toggle('d-none', products.length === 0); empty.classList.toggle('d-none', products.length > 0); checkAll.checked = false; checkAll.indeterminate = false; updateSelected(); }
+                function render() {
+                    body.innerHTML = products.map(row).join('');
+                    document.getElementById('barcodeTable').classList.toggle('d-none', products.length === 0);
+                    empty.classList.toggle('d-none', products.length > 0);
+                    checkAll.checked = false;
+                    checkAll.indeterminate = false;
+                    updateSelected();
+                    const firstRow = body.querySelector('tr[data-id]');
+                    if (firstRow) previewRow(firstRow, false);
+                }
                 function updateStats(stats) { document.getElementById('statTotal').textContent = Number(stats.total || 0).toLocaleString(); document.getElementById('statExisting').textContent = Number(stats.existing || 0).toLocaleString(); document.getElementById('statMissing').textContent = Number(stats.missing || 0).toLocaleString(); document.getElementById('statActive').textContent = Number(stats.active || 0).toLocaleString(); }
                 async function load() { setLoading(true); const data = new FormData(); data.append('action', 'list'); data.append('search', search.value.trim()); data.append('barcode_status', status.value); try { const result = await request(data); products = result.products || []; render(); updateStats(result.stats || {}); } catch (error) { showToast('error', error.message) } finally { setLoading(false) } }
-                async function generateBarcode(productId) { const data = new FormData(); data.append('action', 'generate'); data.append('product_id', String(productId)); const result = await request(data); return result.barcode; }
-                async function generateForRow(rowEl) { if (!canUpdate) return; const input = rowEl.querySelector('.barcode-value'); const button = rowEl.querySelector('.generate-one'); button.disabled = true; try { input.value = await generateBarcode(Number(rowEl.dataset.id)); rowEl.querySelector('.row-check').checked = true; updateSelected(); previewRow(rowEl); } catch (error) { showToast('error', error.message) } finally { button.disabled = false } }
-                function previewRow(rowEl) { const id = Number(rowEl.dataset.id); const product = products.find(item => Number(item.id) === id); if (!product) return; const barcode = rowEl.querySelector('.barcode-value').value.trim(); if (!barcode) { showToast('error', 'Enter or generate a barcode first.'); return; } previewData = { ...product, barcode, qty: Math.max(1, Number(rowEl.querySelector('.qty-input').value || 1)) }; preview.innerHTML = '<div class="label-product">' + escapeHtml(product.product_name) + '</div><svg id="barcodeSvg"></svg><div class="label-code">' + escapeHtml(product.product_code) + '</div>'; try { JsBarcode('#barcodeSvg', barcode, { format: 'CODE128', width: 1.65, height: 64, displayValue: true, fontSize: 13, margin: 4 }); } catch (error) { preview.innerHTML = '<div class="preview-empty">Unable to render this barcode value.</div>'; showToast('error', 'Unable to render the barcode.'); } }
+                async function generateBarcode(productId) { const data = new FormData(); data.append('action', 'generate'); data.append('product_id', String(productId)); return await request(data); }
+                async function generateForRow(rowEl) {
+                    if (!canUpdate) return;
+                    const input = rowEl.querySelector('.barcode-value');
+                    const button = rowEl.querySelector('.generate-one');
+                    const badge = rowEl.querySelector('.status-badge');
+                    button.disabled = true;
+                    button.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+                    try {
+                        const result = await generateBarcode(Number(rowEl.dataset.id));
+                        input.value = result.barcode;
+                        const product = products.find(item => Number(item.id) === Number(rowEl.dataset.id));
+                        if (product) product.barcode = result.barcode;
+                        rowEl.querySelector('.row-check').checked = true;
+                        if (badge) {
+                            badge.className = 'status-badge status-existing';
+                            badge.textContent = 'Saved';
+                        }
+                        updateSelected();
+                        previewRow(rowEl, false);
+                        showToast('success', result.message || 'Barcode generated and saved.');
+                    } catch (error) {
+                        showToast('error', error.message);
+                    } finally {
+                        button.disabled = false;
+                        button.innerHTML = '<i class="fa-solid fa-wand-magic-sparkles"></i>';
+                    }
+                }
+                function previewRow(rowEl, showError = true) {
+                    const id = Number(rowEl.dataset.id);
+                    const product = products.find(item => Number(item.id) === id);
+                    if (!product) return;
 
-                body.addEventListener('click', event => { const rowEl = event.target.closest('tr[data-id]'); if (!rowEl) return; if (event.target.closest('.generate-one')) generateForRow(rowEl); if (event.target.closest('.preview-one')) previewRow(rowEl); });
-                body.addEventListener('change', event => { if (event.target.classList.contains('row-check')) updateSelected(); });
-                body.addEventListener('input', event => { if (event.target.classList.contains('barcode-value')) { const rowEl = event.target.closest('tr'); rowEl.querySelector('.row-check').checked = true; updateSelected(); } });
+                    const barcode = rowEl.querySelector('.barcode-value').value.trim();
+                    const qty = Math.max(1, Number(rowEl.querySelector('.qty-input').value || 1));
+                    previewData = { ...product, barcode, qty };
+                    renderLivePreview(showError);
+                }
+
+                function renderLivePreview(showError = false) {
+                    if (!previewData) {
+                        preview.innerHTML = '<div class="preview-empty"><i class="fa-solid fa-barcode fa-2x mb-2"></i><div>Select a product to preview its label.</div></div>';
+                        return;
+                    }
+
+                    const c = cfg();
+                    const product = previewData;
+                    const barcode = String(product.barcode || '').trim();
+                    const labelWidth = Math.max(20, Number(c.labelWidth || 50));
+                    const labelHeight = Math.max(10, Number(c.labelHeight || 25));
+                    const fontSize = Math.max(6, Number(c.labelFontSize || 9));
+                    const barcodeHeight = Math.max(20, Number(c.barcodeHeight || 44));
+                    const lineWidth = Math.max(0.6, Number(c.barcodeLineWidth || 1.4));
+
+                    preview.style.width = '100%';
+                    preview.style.minHeight = Math.max(150, labelHeight * 4) + 'px';
+                    preview.style.aspectRatio = labelWidth + ' / ' + labelHeight;
+                    preview.style.fontSize = fontSize + 'px';
+                    preview.style.padding = '8px';
+
+                    if (!barcode) {
+                        preview.innerHTML =
+                            (c.showBusiness ? '<div style="font-weight:800">' + escapeHtml(businessName) + '</div>' : '') +
+                            (c.showProduct ? '<div class="label-product" style="font-size:' + (fontSize + 2) + 'px">' + escapeHtml(product.product_name) + '</div>' : '') +
+                            '<div class="preview-empty"><i class="fa-solid fa-barcode fa-2x mb-2"></i><div>Type, scan, or generate a barcode.</div></div>' +
+                            (c.showProductCode ? '<div class="label-code">' + escapeHtml(product.product_code) + '</div>' : '');
+
+                        if (showError) showToast('error', 'Enter, scan, or generate a barcode first.');
+                        return;
+                    }
+
+                    const detailParts = [];
+                    if (c.showProductCode) detailParts.push(escapeHtml(product.product_code));
+                    if (c.showPrice) detailParts.push(escapeHtml(currencySymbol) + Number(product.sale_rate || 0).toFixed(2));
+                    if (c.showWeight) detailParts.push(Number(product.net_weight || 0).toFixed(3) + ' g');
+
+                    preview.innerHTML =
+                        (c.showBusiness ? '<div style="font-weight:800;font-size:' + (fontSize + 1) + 'px">' + escapeHtml(businessName) + '</div>' : '') +
+                        (c.showProduct ? '<div class="label-product" style="font-size:' + (fontSize + 2) + 'px">' + escapeHtml(product.product_name) + '</div>' : '') +
+                        '<svg id="barcodeSvg" style="max-width:100%;height:auto"></svg>' +
+                        (detailParts.length ? '<div class="label-code" style="font-size:' + fontSize + 'px">' + detailParts.join(' · ') + '</div>' : '') +
+                        '<div class="product-sub mt-1" style="font-size:' + Math.max(7, fontSize - 1) + 'px">Sticker Qty: ' + product.qty + '</div>';
+
+                    if (typeof window.JsBarcode !== 'function') {
+                        preview.innerHTML = '<div class="preview-empty">Barcode library did not load. Check your internet/CDN access.</div><div class="label-code">' + escapeHtml(barcode) + '</div>';
+                        return;
+                    }
+
+                    try {
+                        window.JsBarcode('#barcodeSvg', barcode, {
+                            format: 'CODE128',
+                            width: lineWidth,
+                            height: barcodeHeight,
+                            displayValue: !!c.showBarcodeText,
+                            fontSize: fontSize,
+                            margin: 2
+                        });
+                    } catch (error) {
+                        preview.innerHTML = '<div class="preview-empty">Unable to render this barcode value.</div><div class="label-code">' + escapeHtml(barcode) + '</div>';
+                        if (showError) showToast('error', 'Unable to render the barcode.');
+                    }
+                }
+
+                body.addEventListener('click', event => {
+                    const rowEl = event.target.closest('tr[data-id]');
+                    if (!rowEl) return;
+                    if (event.target.closest('.generate-one')) { generateForRow(rowEl); return; }
+                    if (event.target.closest('.preview-one') || event.target.closest('.main-cell')) previewRow(rowEl, false);
+                });
+                body.addEventListener('change', event => {
+                    const rowEl = event.target.closest('tr[data-id]');
+                    if (event.target.classList.contains('row-check')) {
+                        updateSelected();
+                        if (event.target.checked && rowEl) previewRow(rowEl, false);
+                    }
+                    if (event.target.classList.contains('qty-input') && rowEl) previewRow(rowEl, false);
+                });
+                body.addEventListener('input', event => {
+                    const rowEl = event.target.closest('tr[data-id]');
+                    if (!rowEl) return;
+                    if (event.target.classList.contains('barcode-value')) {
+                        rowEl.querySelector('.row-check').checked = true;
+                        updateSelected();
+                        previewRow(rowEl, false);
+                    }
+                    if (event.target.classList.contains('qty-input')) previewRow(rowEl, false);
+                });
+                body.addEventListener('focusin', event => {
+                    const rowEl = event.target.closest('tr[data-id]');
+                    if (rowEl && (event.target.classList.contains('barcode-value') || event.target.classList.contains('qty-input'))) previewRow(rowEl, false);
+                });
                 checkAll.addEventListener('change', () => { body.querySelectorAll('.row-check').forEach(box => box.checked = checkAll.checked); updateSelected(); });
                 document.getElementById('selectVisible').addEventListener('click', () => { body.querySelectorAll('.row-check').forEach(box => box.checked = true); updateSelected(); });
-                document.getElementById('generateSelected').addEventListener('click', async () => { const rows = [...body.querySelectorAll('tr[data-id]')].filter(row => row.querySelector('.row-check').checked); if (!rows.length) { showToast('error', 'Select at least one product.'); return; } setLoading(true); try { for (const rowEl of rows) { rowEl.querySelector('.barcode-value').value = await generateBarcode(Number(rowEl.dataset.id)); } previewRow(rows[0]); showToast('success', rows.length + ' barcode(s) generated. Click Save Selected Barcodes.'); } catch (error) { showToast('error', error.message) } finally { setLoading(false) } });
+                document.getElementById('generateSelected').addEventListener('click', async () => {
+                    const rows = [...body.querySelectorAll('tr[data-id]')].filter(row => row.querySelector('.row-check').checked);
+                    if (!rows.length) { showToast('error', 'Select at least one product.'); return; }
+                    setLoading(true);
+                    try {
+                        for (const rowEl of rows) {
+                            const result = await generateBarcode(Number(rowEl.dataset.id));
+                            const input = rowEl.querySelector('.barcode-value');
+                            const badge = rowEl.querySelector('.status-badge');
+                            input.value = result.barcode;
+                            const product = products.find(item => Number(item.id) === Number(rowEl.dataset.id));
+                            if (product) product.barcode = result.barcode;
+                            if (badge) { badge.className = 'status-badge status-existing'; badge.textContent = 'Saved'; }
+                        }
+                        previewRow(rows[0], false);
+                        showToast('success', rows.length + ' barcode(s) generated and saved immediately.');
+                    } catch (error) { showToast('error', error.message) } finally { setLoading(false) }
+                });
                 document.getElementById('saveBarcodes').addEventListener('click', async () => { const rows = [...body.querySelectorAll('tr[data-id]')].filter(row => row.querySelector('.row-check').checked); if (!rows.length) { showToast('error', 'Select at least one product.'); return; } const items = rows.map(row => ({ product_id: Number(row.dataset.id), barcode: row.querySelector('.barcode-value').value.trim() })); if (items.some(item => !item.barcode)) { showToast('error', 'Every selected product must have a barcode.'); return; } const data = new FormData(); data.append('action', 'save'); data.append('items', JSON.stringify(items)); setLoading(true); try { const result = await request(data); showToast('success', result.message); await load(); } catch (error) { showToast('error', error.message) } finally { setLoading(false) } });
                 document.getElementById('resetFilters').addEventListener('click', () => { search.value = ''; status.value = 'missing'; load(); search.focus(); });
                 search.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(load, 350) }); status.addEventListener('change', load);
                 document.getElementById('copyBarcode').addEventListener('click', async () => { if (!previewData) { showToast('error', 'Preview a product first.'); return; } try { await navigator.clipboard.writeText(previewData.barcode); showToast('success', 'Barcode copied.') } catch (error) { showToast('error', 'Unable to copy barcode.') } });
-                const settingIds = ['labelWidth', 'labelHeight', 'labelsPerRow', 'horizontalGap', 'verticalGap', 'pageMargin', 'barcodeHeight', 'barcodeLineWidth', 'labelFontSize', 'printOrientation', 'showBusiness', 'showProduct', 'showProductCode', 'showPrice', 'showWeight', 'showBarcodeText']; function cfg() { const o = {}; settingIds.forEach(id => { const e = document.getElementById(id); o[id] = e.type === 'checkbox' ? e.checked : e.value }); return o } function loadCfg() { try { const o = JSON.parse(localStorage.getItem('barcodePrinterSettings') || '{}'); settingIds.forEach(id => { const e = document.getElementById(id); if (o[id] !== undefined) { if (e.type === 'checkbox') e.checked = !!o[id]; else e.value = o[id] } }) } catch (e) { } } document.getElementById('savePrinterSettings').addEventListener('click', () => { localStorage.setItem('barcodePrinterSettings', JSON.stringify(cfg())); showToast('success', 'Printer settings saved.') }); function selectedItems() { return [...body.querySelectorAll('tr[data-id]')].filter(r => r.querySelector('.row-check').checked).map(r => { const p = products.find(x => Number(x.id) === Number(r.dataset.id)); return p ? { ...p, barcode: r.querySelector('.barcode-value').value.trim(), qty: Math.min(500, Math.max(1, Number(r.querySelector('.qty-input').value || 1))) } : null }).filter(Boolean) } function buildPrint(items) { const c = cfg(), sheet = document.getElementById('printSheet'); sheet.innerHTML = ''; document.getElementById('dynamicPrintStyle')?.remove(); const st = document.createElement('style'); st.id = 'dynamicPrintStyle'; st.textContent = '@media print{@page{size:' + c.printOrientation + ';margin:' + Number(c.pageMargin) + 'mm}#printSheet{display:grid!important;grid-template-columns:repeat(' + Math.max(1, Number(c.labelsPerRow)) + ',' + Number(c.labelWidth) + 'mm);gap:' + Number(c.verticalGap) + 'mm ' + Number(c.horizontalGap) + 'mm;width:max-content}.print-label{width:' + Number(c.labelWidth) + 'mm;height:' + Number(c.labelHeight) + 'mm;padding:1.5mm;font-size:' + Number(c.labelFontSize) + 'px}}'; document.head.appendChild(st); items.forEach(it => { for (let n = 0; n < it.qty; n++) { const d = document.createElement('div'); d.className = 'print-label'; d.innerHTML = (c.showBusiness ? '<div><b>' + escapeHtml(businessName) + '</b></div>' : '') + (c.showProduct ? '<div class="pl-product">' + escapeHtml(it.product_name) + '</div>' : '') + '<svg></svg><div>' + (c.showProductCode ? escapeHtml(it.product_code) + ' ' : '') + (c.showPrice ? currencySymbol + Number(it.sale_rate || 0).toFixed(2) + ' ' : '') + (c.showWeight ? Number(it.net_weight || 0).toFixed(3) + 'g' : '') + '</div>'; sheet.appendChild(d); JsBarcode(d.querySelector('svg'), it.barcode, { format: 'CODE128', width: Number(c.barcodeLineWidth), height: Number(c.barcodeHeight), displayValue: !!c.showBarcodeText, fontSize: Math.max(7, Number(c.labelFontSize)), margin: 1 }) } }) } document.getElementById('printBarcode').addEventListener('click', () => { const items = selectedItems(); if (!items.length && previewData) items.push(previewData); if (!items.length) { showToast('error', 'Select at least one product.'); return } if (items.some(x => !x.barcode)) { showToast('error', 'Every selected product needs a barcode.'); return } buildPrint(items); window.print() }); loadCfg();
+                const settingIds = ['labelWidth', 'labelHeight', 'labelsPerRow', 'horizontalGap', 'verticalGap', 'pageMargin', 'barcodeHeight', 'barcodeLineWidth', 'labelFontSize', 'printOrientation', 'showBusiness', 'showProduct', 'showProductCode', 'showPrice', 'showWeight', 'showBarcodeText'];
+                function cfg() {
+                    const o = {};
+                    settingIds.forEach(id => {
+                        const el = document.getElementById(id);
+                        o[id] = el.type === 'checkbox' ? el.checked : el.value;
+                    });
+                    return o;
+                }
+                function loadCfg() {
+                    try {
+                        const o = JSON.parse(localStorage.getItem('barcodePrinterSettings') || '{}');
+                        settingIds.forEach(id => {
+                            const el = document.getElementById(id);
+                            if (o[id] !== undefined) {
+                                if (el.type === 'checkbox') el.checked = !!o[id];
+                                else el.value = o[id];
+                            }
+                        });
+                    } catch (error) {}
+                }
+                settingIds.forEach(id => {
+                    const el = document.getElementById(id);
+                    if (!el) return;
+                    const eventName = el.type === 'checkbox' || el.tagName === 'SELECT' ? 'change' : 'input';
+                    el.addEventListener(eventName, () => renderLivePreview(false));
+                });
+                document.getElementById('savePrinterSettings').addEventListener('click', () => {
+                    localStorage.setItem('barcodePrinterSettings', JSON.stringify(cfg()));
+                    renderLivePreview(false);
+                    showToast('success', 'Printer settings saved.');
+                });
+                function selectedItems() { return [...body.querySelectorAll('tr[data-id]')].filter(r => r.querySelector('.row-check').checked).map(r => { const p = products.find(x => Number(x.id) === Number(r.dataset.id)); return p ? { ...p, barcode: r.querySelector('.barcode-value').value.trim(), qty: Math.min(500, Math.max(1, Number(r.querySelector('.qty-input').value || 1))) } : null }).filter(Boolean) } function buildPrint(items) { const c = cfg(), sheet = document.getElementById('printSheet'); sheet.innerHTML = ''; document.getElementById('dynamicPrintStyle')?.remove(); const st = document.createElement('style'); st.id = 'dynamicPrintStyle'; st.textContent = '@media print{@page{size:' + c.printOrientation + ';margin:' + Number(c.pageMargin) + 'mm}#printSheet{display:grid!important;grid-template-columns:repeat(' + Math.max(1, Number(c.labelsPerRow)) + ',' + Number(c.labelWidth) + 'mm);gap:' + Number(c.verticalGap) + 'mm ' + Number(c.horizontalGap) + 'mm;width:max-content}.print-label{width:' + Number(c.labelWidth) + 'mm;height:' + Number(c.labelHeight) + 'mm;padding:1.5mm;font-size:' + Number(c.labelFontSize) + 'px}}'; document.head.appendChild(st); items.forEach(it => { for (let n = 0; n < it.qty; n++) { const d = document.createElement('div'); d.className = 'print-label'; d.innerHTML = (c.showBusiness ? '<div><b>' + escapeHtml(businessName) + '</b></div>' : '') + (c.showProduct ? '<div class="pl-product">' + escapeHtml(it.product_name) + '</div>' : '') + '<svg></svg><div>' + (c.showProductCode ? escapeHtml(it.product_code) + ' ' : '') + (c.showPrice ? currencySymbol + Number(it.sale_rate || 0).toFixed(2) + ' ' : '') + (c.showWeight ? Number(it.net_weight || 0).toFixed(3) + 'g' : '') + '</div>'; sheet.appendChild(d); JsBarcode(d.querySelector('svg'), it.barcode, { format: 'CODE128', width: Number(c.barcodeLineWidth), height: Number(c.barcodeHeight), displayValue: !!c.showBarcodeText, fontSize: Math.max(7, Number(c.labelFontSize)), margin: 1 }) } }) } document.getElementById('printBarcode').addEventListener('click', () => { const items = selectedItems(); if (!items.length && previewData) items.push(previewData); if (!items.length) { showToast('error', 'Select at least one product.'); return } if (items.some(x => !x.barcode)) { showToast('error', 'Every selected product needs a barcode.'); return } buildPrint(items); window.print() });
+                loadCfg();
+                renderLivePreview(false);
                 load();
             })();
         </script>
