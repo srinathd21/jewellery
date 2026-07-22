@@ -98,7 +98,7 @@ if (!isset($pageTitle) || trim((string)$pageTitle) === '') {
         ?? ucwords(str_replace(['-', '_'], ' ', $currentPageFile));
 }
 $profileUrl = $profileUrl ?? 'profile.php';
-$settingsUrl = $settingsUrl ?? 'settings.php';
+$settingsUrl = $settingsUrl ?? 'business-settings.php';
 $supportUrl = $supportUrl ?? 'support.php';
 $logoutUrl = $logoutUrl ?? 'logout.php';
 
