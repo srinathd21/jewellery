@@ -30,12 +30,12 @@ $conn->set_charset('utf8mb4');
 
 function h($value): string
 {
-    return htmlspecialchars((string)($value ?? ''), ENT_QUOTES, 'UTF-8');
+    return htmlspecialchars((string) ($value ?? ''), ENT_QUOTES, 'UTF-8');
 }
 
 function clientIp(): string
 {
-    return (string)($_SERVER['REMOTE_ADDR'] ?? '');
+    return (string) ($_SERVER['REMOTE_ADDR'] ?? '');
 }
 
 function redirectLoggedInUser(): void
@@ -62,11 +62,11 @@ function writeLoginAudit(mysqli $conn, array $user, ?int $branchId): void
         return;
     }
 
-    $businessId = isset($user['business_id']) ? (int)$user['business_id'] : null;
-    $userId = (int)$user['id'];
+    $businessId = isset($user['business_id']) ? (int) $user['business_id'] : null;
+    $userId = (int) $user['id'];
     $description = 'User logged in successfully';
     $ip = clientIp();
-    $agent = (string)($_SERVER['HTTP_USER_AGENT'] ?? '');
+    $agent = (string) ($_SERVER['HTTP_USER_AGENT'] ?? '');
 
     $stmt->bind_param(
         'iiiisss',
@@ -86,7 +86,7 @@ redirectLoggedInUser();
 
 $error = '';
 $success = '';
-$loginId = trim((string)($_POST['login_id'] ?? ''));
+$loginId = trim((string) ($_POST['login_id'] ?? ''));
 $remember = isset($_POST['remember']);
 
 if (empty($_SESSION['login_csrf'])) {
@@ -95,13 +95,13 @@ if (empty($_SESSION['login_csrf'])) {
 $csrfToken = $_SESSION['login_csrf'];
 
 if (!empty($_SESSION['register_success'])) {
-    $success = (string)$_SESSION['register_success'];
+    $success = (string) $_SESSION['register_success'];
     unset($_SESSION['register_success']);
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $postedToken = (string)($_POST['csrf_token'] ?? '');
-    $password = (string)($_POST['password'] ?? '');
+    $postedToken = (string) ($_POST['csrf_token'] ?? '');
+    $password = (string) ($_POST['password'] ?? '');
 
     if (!hash_equals($csrfToken, $postedToken)) {
         $error = 'Your login session expired. Please refresh and try again.';
@@ -156,12 +156,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             if (!$user) {
                 $error = 'Invalid username, email, mobile number or password.';
-            } elseif ((int)$user['is_active'] !== 1) {
+            } elseif ((int) $user['is_active'] !== 1) {
                 $error = 'Your user account is inactive. Contact your administrator.';
             } elseif ($user['user_type'] === 'Business User' && $user['business_status'] !== 'Active' && $user['business_status'] !== 'Trial') {
                 $error = 'This business account is not active. Contact the platform administrator.';
             } else {
-                $dbHash = (string)$user['password_hash'];
+                $dbHash = (string) $user['password_hash'];
                 $passwordOk = $dbHash !== '' && password_verify($password, $dbHash);
 
                 // Temporary compatibility with old demo/plain-text passwords.
@@ -172,9 +172,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (!$passwordOk) {
                     $error = 'Invalid username, email, mobile number or password.';
                 } else {
-                    $userId = (int)$user['id'];
-                    $businessId = $user['business_id'] !== null ? (int)$user['business_id'] : null;
-                    $branchId = $user['default_branch_id'] !== null ? (int)$user['default_branch_id'] : null;
+                    $userId = (int) $user['id'];
+                    $businessId = $user['business_id'] !== null ? (int) $user['business_id'] : null;
+                    $branchId = $user['default_branch_id'] !== null ? (int) $user['default_branch_id'] : null;
 
                     if ($user['user_type'] === 'Business User') {
                         $branchSql = "SELECT uba.branch_id, uba.can_switch_branch, br.branch_name, br.branch_code
@@ -198,9 +198,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         if (!$allowedBranches) {
                             $error = 'No active branch access is assigned to this user.';
                         } else {
-                            $allowedIds = array_map(static fn($row) => (int)$row['branch_id'], $allowedBranches);
+                            $allowedIds = array_map(static fn($row) => (int) $row['branch_id'], $allowedBranches);
                             if (!$branchId || !in_array($branchId, $allowedIds, true)) {
-                                $branchId = (int)$allowedBranches[0]['branch_id'];
+                                $branchId = (int) $allowedBranches[0]['branch_id'];
                                 $user['default_branch_name'] = $allowedBranches[0]['branch_name'];
                             }
                         }
@@ -215,26 +215,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $_SESSION['business_id'] = $businessId;
                         $_SESSION['branch_id'] = $branchId;
                         $_SESSION['default_branch_id'] = $branchId;
-                        $_SESSION['role_id'] = $user['role_id'] !== null ? (int)$user['role_id'] : null;
-                        $_SESSION['role_code'] = (string)($user['role_code'] ?? '');
-                        $_SESSION['role_name'] = (string)($user['role_name'] ?? '');
-                        $_SESSION['user_type'] = (string)$user['user_type'];
-                        $_SESSION['full_name'] = (string)$user['full_name'];
-                        $_SESSION['username'] = (string)$user['username'];
-                        $_SESSION['email'] = (string)($user['email'] ?? '');
-                        $_SESSION['mobile'] = (string)($user['mobile'] ?? '');
-                        $_SESSION['profile_photo_path'] = (string)($user['profile_photo_path'] ?? '');
-                        $_SESSION['business_code'] = (string)($user['business_code'] ?? '');
-                        $_SESSION['business_name'] = (string)($user['business_name'] ?? '');
-                        $_SESSION['branch_name'] = (string)($user['default_branch_name'] ?? '');
-                        $_SESSION['currency_code'] = (string)($user['currency_code'] ?? 'INR');
-                        $_SESSION['currency_symbol'] = (string)($user['currency_symbol'] ?? '₹');
-                        $_SESSION['timezone'] = (string)($user['timezone'] ?? 'Asia/Kolkata');
-                        $_SESSION['must_change_password'] = (int)$user['must_change_password'];
+                        $_SESSION['role_id'] = $user['role_id'] !== null ? (int) $user['role_id'] : null;
+                        $_SESSION['role_code'] = (string) ($user['role_code'] ?? '');
+                        $_SESSION['role_name'] = (string) ($user['role_name'] ?? '');
+                        $_SESSION['user_type'] = (string) $user['user_type'];
+                        $_SESSION['full_name'] = (string) $user['full_name'];
+                        $_SESSION['username'] = (string) $user['username'];
+                        $_SESSION['email'] = (string) ($user['email'] ?? '');
+                        $_SESSION['mobile'] = (string) ($user['mobile'] ?? '');
+                        $_SESSION['profile_photo_path'] = (string) ($user['profile_photo_path'] ?? '');
+                        $_SESSION['business_code'] = (string) ($user['business_code'] ?? '');
+                        $_SESSION['business_name'] = (string) ($user['business_name'] ?? '');
+                        $_SESSION['branch_name'] = (string) ($user['default_branch_name'] ?? '');
+                        $_SESSION['currency_code'] = (string) ($user['currency_code'] ?? 'INR');
+                        $_SESSION['currency_symbol'] = (string) ($user['currency_symbol'] ?? '₹');
+                        $_SESSION['timezone'] = (string) ($user['timezone'] ?? 'Asia/Kolkata');
+                        $_SESSION['must_change_password'] = (int) $user['must_change_password'];
                         $_SESSION['allowed_branches'] = $allowedBranches;
                         $_SESSION['can_switch_branch'] = !empty(array_filter(
                             $allowedBranches,
-                            static fn($row) => (int)$row['can_switch_branch'] === 1
+                            static fn($row) => (int) $row['can_switch_branch'] === 1
                         ));
 
                         // Load effective permissions for the common application shell.
@@ -263,12 +263,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                               ORDER BY mi.sort_order ASC, mi.id ASC";
                             $permissionStmt = $conn->prepare($permissionSql);
                             if ($permissionStmt) {
-                                $roleId = (int)$user['role_id'];
+                                $roleId = (int) $user['role_id'];
                                 $permissionStmt->bind_param('ii', $businessId, $roleId);
                                 $permissionStmt->execute();
                                 $permissionResult = $permissionStmt->get_result();
                                 while ($permissionRow = $permissionResult->fetch_assoc()) {
-                                    $_SESSION['permissions'][(string)$permissionRow['permission_code']] = $permissionRow;
+                                    $_SESSION['permissions'][(string) $permissionRow['permission_code']] = $permissionRow;
                                 }
                                 $permissionStmt->close();
                             }
@@ -307,7 +307,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 if ($loginId === '' && !empty($_COOKIE['jewellery_login_id'])) {
-    $loginId = trim((string)$_COOKIE['jewellery_login_id']);
+    $loginId = trim((string) $_COOKIE['jewellery_login_id']);
 }
 
 $theme = [
@@ -332,37 +332,77 @@ $displayBusinessName = 'Jewellery ERP';
 ?>
 <!doctype html>
 <html lang="en">
+
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="light">
     <title>Login | <?php echo h($displayBusinessName); ?></title>
 
+    <link rel="icon" type="image/png" href="assets/favicon/favicon-96x96.png" sizes="96x96" />
+    <link rel="icon" type="image/svg+xml" href="assets/favicon/favicon.svg" />
+    <link rel="shortcut icon" href="assets/favicon/favicon.ico" />
+    <link rel="apple-touch-icon" sizes="180x180" href="assets/favicon/apple-touch-icon.png" />
+    <link rel="manifest" href="assets/favicon/site.webmanifest" />
+
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Playfair+Display:wght@600;700&display=swap" rel="stylesheet">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Playfair+Display:wght@600;700&display=swap"
+        rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
 
     <style>
         :root {
-            --primary: <?php echo h($theme['primary_color']); ?>;
-            --primary-dark: <?php echo h($theme['primary_dark_color']); ?>;
-            --primary-soft: <?php echo h($theme['primary_soft_color']); ?>;
-            --sidebar-1: <?php echo h($theme['sidebar_gradient_1']); ?>;
-            --sidebar-2: <?php echo h($theme['sidebar_gradient_2']); ?>;
-            --sidebar-3: <?php echo h($theme['sidebar_gradient_3']); ?>;
-            --page-bg: <?php echo h($theme['page_background']); ?>;
-            --card-bg: <?php echo h($theme['card_background']); ?>;
-            --text: <?php echo h($theme['text_color']); ?>;
-            --muted: <?php echo h($theme['muted_text_color']); ?>;
-            --line: <?php echo h($theme['border_color']); ?>;
-            --radius: <?php echo (int)$theme['border_radius_px']; ?>px;
+            --primary:
+                <?php echo h($theme['primary_color']); ?>
+            ;
+            --primary-dark:
+                <?php echo h($theme['primary_dark_color']); ?>
+            ;
+            --primary-soft:
+                <?php echo h($theme['primary_soft_color']); ?>
+            ;
+            --sidebar-1:
+                <?php echo h($theme['sidebar_gradient_1']); ?>
+            ;
+            --sidebar-2:
+                <?php echo h($theme['sidebar_gradient_2']); ?>
+            ;
+            --sidebar-3:
+                <?php echo h($theme['sidebar_gradient_3']); ?>
+            ;
+            --page-bg:
+                <?php echo h($theme['page_background']); ?>
+            ;
+            --card-bg:
+                <?php echo h($theme['card_background']); ?>
+            ;
+            --text:
+                <?php echo h($theme['text_color']); ?>
+            ;
+            --muted:
+                <?php echo h($theme['muted_text_color']); ?>
+            ;
+            --line:
+                <?php echo h($theme['border_color']); ?>
+            ;
+            --radius:
+                <?php echo (int) $theme['border_radius_px']; ?>
+                px;
             --ease-premium: cubic-bezier(.22, 1, .36, 1);
         }
 
-        * { box-sizing: border-box; }
-        html, body { min-height: 100%; }
+        * {
+            box-sizing: border-box;
+        }
+
+        html,
+        body {
+            min-height: 100%;
+        }
+
         body {
             margin: 0;
             overflow-x: hidden;
@@ -382,7 +422,11 @@ $displayBusinessName = 'Jewellery ERP';
             transform: scale(.985);
             transition: opacity .7s var(--ease-premium), transform .8s var(--ease-premium);
         }
-        body.page-ready .login-shell { opacity: 1; transform: scale(1); }
+
+        body.page-ready .login-shell {
+            opacity: 1;
+            transform: scale(1);
+        }
 
         .brand-panel {
             position: relative;
@@ -393,18 +437,31 @@ $displayBusinessName = 'Jewellery ERP';
             padding: clamp(32px, 5vw, 72px);
             color: #fff;
             background:
-                linear-gradient(145deg, rgba(0,0,0,.08), rgba(0,0,0,.36)),
+                linear-gradient(145deg, rgba(0, 0, 0, .08), rgba(0, 0, 0, .36)),
                 linear-gradient(145deg, var(--sidebar-1), var(--sidebar-2) 52%, var(--sidebar-3));
         }
+
         .brand-panel::before,
         .brand-panel::after {
             content: "";
             position: absolute;
-            border: 1px solid rgba(255,255,255,.08);
+            border: 1px solid rgba(255, 255, 255, .08);
             border-radius: 50%;
         }
-        .brand-panel::before { width: 520px; height: 520px; right: -220px; top: -220px; }
-        .brand-panel::after { width: 360px; height: 360px; left: -160px; bottom: -180px; }
+
+        .brand-panel::before {
+            width: 520px;
+            height: 520px;
+            right: -220px;
+            top: -220px;
+        }
+
+        .brand-panel::after {
+            width: 360px;
+            height: 360px;
+            left: -160px;
+            bottom: -180px;
+        }
 
         .ambient-gem {
             position: absolute;
@@ -417,15 +474,42 @@ $displayBusinessName = 'Jewellery ERP';
             opacity: .55;
             animation: floatGem 6s ease-in-out infinite;
         }
-        .ambient-gem.g1 { left: 12%; top: 18%; }
-        .ambient-gem.g2 { right: 15%; top: 28%; animation-delay: -2s; }
-        .ambient-gem.g3 { left: 30%; bottom: 18%; animation-delay: -4s; }
-        @keyframes floatGem {
-            0%,100% { transform: translateY(0) rotate(45deg) scale(1); }
-            50% { transform: translateY(-18px) rotate(90deg) scale(1.2); }
+
+        .ambient-gem.g1 {
+            left: 12%;
+            top: 18%;
         }
 
-        .brand-content, .brand-footer { position: relative; z-index: 2; }
+        .ambient-gem.g2 {
+            right: 15%;
+            top: 28%;
+            animation-delay: -2s;
+        }
+
+        .ambient-gem.g3 {
+            left: 30%;
+            bottom: 18%;
+            animation-delay: -4s;
+        }
+
+        @keyframes floatGem {
+
+            0%,
+            100% {
+                transform: translateY(0) rotate(45deg) scale(1);
+            }
+
+            50% {
+                transform: translateY(-18px) rotate(90deg) scale(1.2);
+            }
+        }
+
+        .brand-content,
+        .brand-footer {
+            position: relative;
+            z-index: 2;
+        }
+
         .brand-mark {
             width: 56px;
             height: 56px;
@@ -437,7 +521,14 @@ $displayBusinessName = 'Jewellery ERP';
             color: #fff;
             font-size: 24px;
         }
-        .brand-logo { max-width: 180px; max-height: 72px; object-fit: contain; object-position: left center; }
+
+        .brand-logo {
+            max-width: 180px;
+            max-height: 72px;
+            object-fit: contain;
+            object-position: left center;
+        }
+
         .brand-title {
             max-width: 720px;
             margin: 68px 0 18px;
@@ -446,12 +537,48 @@ $displayBusinessName = 'Jewellery ERP';
             line-height: 1.05;
             font-weight: 700;
         }
-        .brand-copy { max-width: 650px; color: rgba(255,255,255,.72); font-size: 15px; line-height: 1.8; }
-        .feature-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; margin-top: 34px; max-width: 680px; }
-        .feature-item { display: flex; align-items: center; gap: 11px; padding: 13px 14px; border: 1px solid rgba(255,255,255,.1); background: rgba(255,255,255,.055); border-radius: 13px; backdrop-filter: blur(8px); font-size: 12px; transition: .25s ease; }
-        .feature-item:hover { transform: translateY(-2px); border-color: rgba(255,255,255,.2); }
-        .feature-item i { color: color-mix(in srgb, var(--primary) 82%, white); }
-        .brand-footer { color: rgba(255,255,255,.55); font-size: 11px; }
+
+        .brand-copy {
+            max-width: 650px;
+            color: rgba(255, 255, 255, .72);
+            font-size: 15px;
+            line-height: 1.8;
+        }
+
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 12px;
+            margin-top: 34px;
+            max-width: 680px;
+        }
+
+        .feature-item {
+            display: flex;
+            align-items: center;
+            gap: 11px;
+            padding: 13px 14px;
+            border: 1px solid rgba(255, 255, 255, .1);
+            background: rgba(255, 255, 255, .055);
+            border-radius: 13px;
+            backdrop-filter: blur(8px);
+            font-size: 12px;
+            transition: .25s ease;
+        }
+
+        .feature-item:hover {
+            transform: translateY(-2px);
+            border-color: rgba(255, 255, 255, .2);
+        }
+
+        .feature-item i {
+            color: color-mix(in srgb, var(--primary) 82%, white);
+        }
+
+        .brand-footer {
+            color: rgba(255, 255, 255, .55);
+            font-size: 11px;
+        }
 
         .form-panel {
             position: relative;
@@ -461,6 +588,7 @@ $displayBusinessName = 'Jewellery ERP';
             padding: 30px;
             perspective: 1400px;
         }
+
         .form-panel::before {
             content: "";
             position: absolute;
@@ -478,7 +606,7 @@ $displayBusinessName = 'Jewellery ERP';
             background: color-mix(in srgb, var(--card-bg) 95%, transparent);
             border: 1px solid var(--line);
             border-radius: calc(var(--radius) + 8px);
-            box-shadow: 0 24px 70px rgba(24,31,40,.12);
+            box-shadow: 0 24px 70px rgba(24, 31, 40, .12);
             padding: clamp(28px, 4vw, 44px);
             backdrop-filter: blur(18px);
             opacity: 0;
@@ -486,11 +614,15 @@ $displayBusinessName = 'Jewellery ERP';
             transform-origin: top center;
             transition: opacity .75s .23s var(--ease-premium), transform .9s .23s var(--ease-premium), box-shadow .3s ease;
         }
+
         body.welcome-ready .login-card {
             opacity: 1;
             transform: translateY(0) rotateX(0) scale(1);
         }
-        .login-card:hover { box-shadow: 0 30px 85px rgba(24,31,40,.15); }
+
+        .login-card:hover {
+            box-shadow: 0 30px 85px rgba(24, 31, 40, .15);
+        }
 
         .welcome-line {
             position: absolute;
@@ -503,26 +635,155 @@ $displayBusinessName = 'Jewellery ERP';
             transform: scaleX(0);
             transition: transform .75s .6s var(--ease-premium);
         }
-        body.welcome-ready .welcome-line { transform: scaleX(1); }
 
-        .login-eyebrow { display: inline-flex; align-items: center; gap: 7px; padding: 6px 10px; border-radius: 999px; background: var(--primary-soft); color: var(--primary-dark); font-size: 10px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
-        .login-title { font-family: "Playfair Display", serif; font-size: 31px; font-weight: 700; margin: 18px 0 7px; }
-        .login-subtitle { margin: 0 0 28px; color: var(--muted); font-size: 13px; line-height: 1.65; }
-        .form-label { font-size: 11px; font-weight: 700; color: #4b5563; margin-bottom: 7px; }
-        .input-group-modern { position: relative; }
-        .input-group-modern > i { position: absolute; z-index: 4; left: 14px; top: 50%; transform: translateY(-50%); color: #8b95a2; transition: .2s ease; }
-        .input-group-modern .form-control { height: 48px; border: 1px solid var(--line); border-radius: 12px; padding-left: 42px; padding-right: 42px; background: var(--card-bg); color: var(--text); font-size: 13px; box-shadow: none; transition: .22s ease; }
-        .input-group-modern:focus-within > i { color: var(--primary-dark); }
-        .input-group-modern .form-control:focus { border-color: var(--primary); box-shadow: 0 0 0 .22rem color-mix(in srgb, var(--primary) 13%, transparent); transform: translateY(-1px); }
-        .password-toggle { position: absolute; z-index: 5; right: 8px; top: 50%; transform: translateY(-50%); width: 34px; height: 34px; border: 0; background: transparent; color: #8b95a2; border-radius: 9px; }
-        .form-check-label { color: var(--muted); font-size: 11px; }
-        .form-check-input:checked { background-color: var(--primary); border-color: var(--primary); }
-        .login-btn { position: relative; overflow: hidden; height: 48px; border: 0; border-radius: 12px; background: linear-gradient(135deg, var(--primary), var(--primary-dark)); color: #fff; font-weight: 800; font-size: 13px; box-shadow: 0 13px 28px color-mix(in srgb, var(--primary) 25%, transparent); transition: transform .2s ease, filter .2s ease; }
-        .login-btn::after { content: ""; position: absolute; inset: 0; transform: translateX(-110%) skewX(-20deg); background: linear-gradient(90deg, transparent, rgba(255,255,255,.25), transparent); transition: transform .65s ease; }
-        .login-btn:hover { color: #fff; transform: translateY(-2px); filter: brightness(1.03); }
-        .login-btn:hover::after { transform: translateX(110%) skewX(-20deg); }
-        .alert { border: 0; border-radius: 11px; font-size: 11px; }
-        .security-note { display: flex; align-items: center; justify-content: center; gap: 7px; margin-top: 22px; color: var(--muted); font-size: 10px; }
+        body.welcome-ready .welcome-line {
+            transform: scaleX(1);
+        }
+
+        .login-eyebrow {
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            padding: 6px 10px;
+            border-radius: 999px;
+            background: var(--primary-soft);
+            color: var(--primary-dark);
+            font-size: 10px;
+            font-weight: 800;
+            letter-spacing: .08em;
+            text-transform: uppercase;
+        }
+
+        .login-title {
+            font-family: "Playfair Display", serif;
+            font-size: 31px;
+            font-weight: 700;
+            margin: 18px 0 7px;
+        }
+
+        .login-subtitle {
+            margin: 0 0 28px;
+            color: var(--muted);
+            font-size: 13px;
+            line-height: 1.65;
+        }
+
+        .form-label {
+            font-size: 11px;
+            font-weight: 700;
+            color: #4b5563;
+            margin-bottom: 7px;
+        }
+
+        .input-group-modern {
+            position: relative;
+        }
+
+        .input-group-modern>i {
+            position: absolute;
+            z-index: 4;
+            left: 14px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: #8b95a2;
+            transition: .2s ease;
+        }
+
+        .input-group-modern .form-control {
+            height: 48px;
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            padding-left: 42px;
+            padding-right: 42px;
+            background: var(--card-bg);
+            color: var(--text);
+            font-size: 13px;
+            box-shadow: none;
+            transition: .22s ease;
+        }
+
+        .input-group-modern:focus-within>i {
+            color: var(--primary-dark);
+        }
+
+        .input-group-modern .form-control:focus {
+            border-color: var(--primary);
+            box-shadow: 0 0 0 .22rem color-mix(in srgb, var(--primary) 13%, transparent);
+            transform: translateY(-1px);
+        }
+
+        .password-toggle {
+            position: absolute;
+            z-index: 5;
+            right: 8px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 34px;
+            height: 34px;
+            border: 0;
+            background: transparent;
+            color: #8b95a2;
+            border-radius: 9px;
+        }
+
+        .form-check-label {
+            color: var(--muted);
+            font-size: 11px;
+        }
+
+        .form-check-input:checked {
+            background-color: var(--primary);
+            border-color: var(--primary);
+        }
+
+        .login-btn {
+            position: relative;
+            overflow: hidden;
+            height: 48px;
+            border: 0;
+            border-radius: 12px;
+            background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+            color: #fff;
+            font-weight: 800;
+            font-size: 13px;
+            box-shadow: 0 13px 28px color-mix(in srgb, var(--primary) 25%, transparent);
+            transition: transform .2s ease, filter .2s ease;
+        }
+
+        .login-btn::after {
+            content: "";
+            position: absolute;
+            inset: 0;
+            transform: translateX(-110%) skewX(-20deg);
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .25), transparent);
+            transition: transform .65s ease;
+        }
+
+        .login-btn:hover {
+            color: #fff;
+            transform: translateY(-2px);
+            filter: brightness(1.03);
+        }
+
+        .login-btn:hover::after {
+            transform: translateX(110%) skewX(-20deg);
+        }
+
+        .alert {
+            border: 0;
+            border-radius: 11px;
+            font-size: 11px;
+        }
+
+        .security-note {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 7px;
+            margin-top: 22px;
+            color: var(--muted);
+            font-size: 10px;
+        }
 
         /* Opening jewellery-card animation */
         .intro-overlay {
@@ -533,12 +794,24 @@ $displayBusinessName = 'Jewellery ERP';
             place-items: center;
             padding: 20px;
             background:
-                radial-gradient(circle at 50% 44%, rgba(216,148,22,.15), transparent 28%),
+                radial-gradient(circle at 50% 44%, rgba(216, 148, 22, .15), transparent 28%),
                 linear-gradient(145deg, #101419, #20272d 54%, #0d1013);
             transition: opacity .55s var(--ease-premium), visibility .55s;
         }
-        .intro-overlay.hide { opacity: 0; visibility: hidden; pointer-events: none; }
-        .intro-stage { position: relative; width: 300px; height: 255px; perspective: 1100px; }
+
+        .intro-overlay.hide {
+            opacity: 0;
+            visibility: hidden;
+            pointer-events: none;
+        }
+
+        .intro-stage {
+            position: relative;
+            width: 300px;
+            height: 255px;
+            perspective: 1100px;
+        }
+
         .spark {
             position: absolute;
             width: 5px;
@@ -549,14 +822,46 @@ $displayBusinessName = 'Jewellery ERP';
             opacity: 0;
             animation: sparkle 1.25s ease-out forwards;
         }
-        .spark.s1 { left: 22px; top: 78px; animation-delay: .28s; }
-        .spark.s2 { right: 27px; top: 64px; animation-delay: .43s; }
-        .spark.s3 { left: 58px; bottom: 32px; animation-delay: .6s; }
-        .spark.s4 { right: 52px; bottom: 42px; animation-delay: .72s; }
+
+        .spark.s1 {
+            left: 22px;
+            top: 78px;
+            animation-delay: .28s;
+        }
+
+        .spark.s2 {
+            right: 27px;
+            top: 64px;
+            animation-delay: .43s;
+        }
+
+        .spark.s3 {
+            left: 58px;
+            bottom: 32px;
+            animation-delay: .6s;
+        }
+
+        .spark.s4 {
+            right: 52px;
+            bottom: 42px;
+            animation-delay: .72s;
+        }
+
         @keyframes sparkle {
-            0% { opacity: 0; transform: scale(.2) translateY(8px); }
-            35% { opacity: 1; transform: scale(1.4) translateY(0); }
-            100% { opacity: 0; transform: scale(.3) translateY(-20px); }
+            0% {
+                opacity: 0;
+                transform: scale(.2) translateY(8px);
+            }
+
+            35% {
+                opacity: 1;
+                transform: scale(1.4) translateY(0);
+            }
+
+            100% {
+                opacity: 0;
+                transform: scale(.3) translateY(-20px);
+            }
         }
 
         .jewel-box {
@@ -569,10 +874,19 @@ $displayBusinessName = 'Jewellery ERP';
             transform-style: preserve-3d;
             animation: boxArrive .55s var(--ease-premium) both;
         }
+
         @keyframes boxArrive {
-            from { opacity: 0; transform: translate(-50%, -42%) scale(.72); }
-            to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+            from {
+                opacity: 0;
+                transform: translate(-50%, -42%) scale(.72);
+            }
+
+            to {
+                opacity: 1;
+                transform: translate(-50%, -50%) scale(1);
+            }
         }
+
         .box-base {
             position: absolute;
             left: 0;
@@ -581,8 +895,9 @@ $displayBusinessName = 'Jewellery ERP';
             height: 88px;
             border-radius: 18px 18px 26px 26px;
             background: linear-gradient(145deg, #d89416, #9d5607 72%);
-            box-shadow: 0 25px 45px rgba(0,0,0,.38), inset 0 2px 0 rgba(255,255,255,.24);
+            box-shadow: 0 25px 45px rgba(0, 0, 0, .38), inset 0 2px 0 rgba(255, 255, 255, .24);
         }
+
         .box-inner {
             position: absolute;
             inset: 10px 13px 15px;
@@ -592,27 +907,42 @@ $displayBusinessName = 'Jewellery ERP';
             place-items: center;
             overflow: hidden;
         }
+
         .box-inner::after {
             content: "";
             position: absolute;
             width: 115px;
             height: 115px;
             border-radius: 50%;
-            background: radial-gradient(circle, rgba(255,216,121,.34), transparent 62%);
+            background: radial-gradient(circle, rgba(255, 216, 121, .34), transparent 62%);
             animation: glowPulse 1.4s ease-in-out infinite;
         }
-        @keyframes glowPulse { 50% { transform: scale(1.18); opacity: .65; } }
+
+        @keyframes glowPulse {
+            50% {
+                transform: scale(1.18);
+                opacity: .65;
+            }
+        }
+
         .intro-gem {
             position: relative;
             z-index: 2;
             font-size: 34px;
             color: #ffe4a1;
-            filter: drop-shadow(0 0 15px rgba(255,205,90,.75));
+            filter: drop-shadow(0 0 15px rgba(255, 205, 90, .75));
             transform: translateY(12px) scale(.65);
             opacity: 0;
             animation: gemReveal .55s .62s var(--ease-premium) forwards;
         }
-        @keyframes gemReveal { to { transform: translateY(0) scale(1); opacity: 1; } }
+
+        @keyframes gemReveal {
+            to {
+                transform: translateY(0) scale(1);
+                opacity: 1;
+            }
+        }
+
         .box-lid {
             position: absolute;
             left: 0;
@@ -623,19 +953,26 @@ $displayBusinessName = 'Jewellery ERP';
             background: linear-gradient(145deg, #edaa32, #b7650a 75%);
             transform-origin: center bottom;
             transform: rotateX(0deg);
-            box-shadow: inset 0 2px 0 rgba(255,255,255,.28), 0 9px 18px rgba(0,0,0,.2);
+            box-shadow: inset 0 2px 0 rgba(255, 255, 255, .28), 0 9px 18px rgba(0, 0, 0, .2);
             animation: lidOpen .72s .32s var(--ease-premium) forwards;
             backface-visibility: hidden;
         }
+
         .box-lid::before {
             content: "";
             position: absolute;
             inset: 10px 13px;
             border-radius: 14px 14px 8px 8px;
-            border: 1px solid rgba(255,255,255,.24);
-            background: linear-gradient(145deg, rgba(255,255,255,.09), rgba(0,0,0,.1));
+            border: 1px solid rgba(255, 255, 255, .24);
+            background: linear-gradient(145deg, rgba(255, 255, 255, .09), rgba(0, 0, 0, .1));
         }
-        @keyframes lidOpen { to { transform: rotateX(-112deg); } }
+
+        @keyframes lidOpen {
+            to {
+                transform: rotateX(-112deg);
+            }
+        }
+
         .box-clasp {
             position: absolute;
             z-index: 3;
@@ -646,10 +983,17 @@ $displayBusinessName = 'Jewellery ERP';
             border-radius: 5px 5px 9px 9px;
             transform: translateX(-50%);
             background: #f2c45d;
-            box-shadow: inset 0 0 0 3px rgba(126,70,5,.25);
+            box-shadow: inset 0 0 0 3px rgba(126, 70, 5, .25);
             animation: claspDrop .35s .38s ease forwards;
         }
-        @keyframes claspDrop { to { transform: translateX(-50%) translateY(8px); opacity: 0; } }
+
+        @keyframes claspDrop {
+            to {
+                transform: translateX(-50%) translateY(8px);
+                opacity: 0;
+            }
+        }
+
         .intro-copy {
             position: absolute;
             left: 50%;
@@ -657,162 +1001,249 @@ $displayBusinessName = 'Jewellery ERP';
             width: 100%;
             text-align: center;
             transform: translateX(-50%);
-            color: rgba(255,255,255,.8);
+            color: rgba(255, 255, 255, .8);
             opacity: 0;
             animation: copyReveal .55s .85s var(--ease-premium) forwards;
         }
-        .intro-copy strong { display: block; font-family: "Playfair Display", serif; color: #fff; font-size: 22px; letter-spacing: .02em; }
-        .intro-copy span { display: block; margin-top: 6px; font-size: 10px; letter-spacing: .18em; text-transform: uppercase; color: #d9b564; }
-        @keyframes copyReveal { to { opacity: 1; transform: translateX(-50%) translateY(-5px); } }
+
+        .intro-copy strong {
+            display: block;
+            font-family: "Playfair Display", serif;
+            color: #fff;
+            font-size: 22px;
+            letter-spacing: .02em;
+        }
+
+        .intro-copy span {
+            display: block;
+            margin-top: 6px;
+            font-size: 10px;
+            letter-spacing: .18em;
+            text-transform: uppercase;
+            color: #d9b564;
+        }
+
+        @keyframes copyReveal {
+            to {
+                opacity: 1;
+                transform: translateX(-50%) translateY(-5px);
+            }
+        }
 
         @media (prefers-reduced-motion: reduce) {
-            *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
+
+            *,
+            *::before,
+            *::after {
+                animation-duration: .01ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: .01ms !important;
+                scroll-behavior: auto !important;
+            }
         }
 
         @media (max-width: 991.98px) {
-            .login-shell { grid-template-columns: 1fr; }
-            .brand-panel { min-height: 290px; padding: 30px; }
-            .brand-title { margin-top: 34px; font-size: 40px; }
-            .feature-grid { display: none; }
-            .brand-footer { display: none; }
-            .form-panel { padding: 24px 16px 34px; margin-top: -44px; position: relative; z-index: 5; }
+            .login-shell {
+                grid-template-columns: 1fr;
+            }
+
+            .brand-panel {
+                min-height: 290px;
+                padding: 30px;
+            }
+
+            .brand-title {
+                margin-top: 34px;
+                font-size: 40px;
+            }
+
+            .feature-grid {
+                display: none;
+            }
+
+            .brand-footer {
+                display: none;
+            }
+
+            .form-panel {
+                padding: 24px 16px 34px;
+                margin-top: -44px;
+                position: relative;
+                z-index: 5;
+            }
         }
+
         @media (max-width: 575.98px) {
-            .brand-panel { min-height: 240px; }
-            .brand-title { font-size: 31px; }
-            .brand-copy { font-size: 12px; }
-            .login-card { padding: 25px 20px; }
-            .login-title { font-size: 27px; }
-            .intro-stage { transform: scale(.87); }
+            .brand-panel {
+                min-height: 240px;
+            }
+
+            .brand-title {
+                font-size: 31px;
+            }
+
+            .brand-copy {
+                font-size: 12px;
+            }
+
+            .login-card {
+                padding: 25px 20px;
+            }
+
+            .login-title {
+                font-size: 27px;
+            }
+
+            .intro-stage {
+                transform: scale(.87);
+            }
         }
     </style>
 </head>
+
 <body>
-<div class="intro-overlay" id="introOverlay" aria-hidden="true">
-    <div class="intro-stage">
-        <span class="spark s1"></span><span class="spark s2"></span><span class="spark s3"></span><span class="spark s4"></span>
-        <div class="jewel-box">
-            <div class="box-base"><div class="box-inner"><i class="fa-solid fa-gem intro-gem"></i></div></div>
-            <div class="box-lid"></div>
-            <div class="box-clasp"></div>
-        </div>
-        <div class="intro-copy"><strong>Welcome</strong><span>Jewellery ERP</span></div>
-    </div>
-</div>
-
-<div class="login-shell">
-    <section class="brand-panel">
-        <span class="ambient-gem g1"></span><span class="ambient-gem g2"></span><span class="ambient-gem g3"></span>
-        <div class="brand-content">
-            <?php if (!empty($theme['logo_path'])): ?>
-                <img class="brand-logo" src="<?php echo h($theme['logo_path']); ?>" alt="<?php echo h($displayBusinessName); ?>">
-            <?php else: ?>
-                <div class="brand-mark"><i class="fa-solid fa-gem"></i></div>
-            <?php endif; ?>
-
-            <h1 class="brand-title">Jewellery business control, built around every branch.</h1>
-            <p class="brand-copy">Manage billing, stock, customers, purchases, karigar work, pawn, chit collections and reports from one secure multi-business platform.</p>
-
-            <div class="feature-grid">
-                <div class="feature-item"><i class="fa-solid fa-building"></i><span>Unified user access</span></div>
-                <div class="feature-item"><i class="fa-solid fa-code-branch"></i><span>Branch-wise operations</span></div>
-                <div class="feature-item"><i class="fa-solid fa-user-shield"></i><span>Role-based permissions</span></div>
-                <div class="feature-item"><i class="fa-solid fa-clock-rotate-left"></i><span>Complete audit trail</span></div>
+    <div class="intro-overlay" id="introOverlay" aria-hidden="true">
+        <div class="intro-stage">
+            <span class="spark s1"></span><span class="spark s2"></span><span class="spark s3"></span><span
+                class="spark s4"></span>
+            <div class="jewel-box">
+                <div class="box-base">
+                    <div class="box-inner"><i class="fa-solid fa-gem intro-gem"></i></div>
+                </div>
+                <div class="box-lid"></div>
+                <div class="box-clasp"></div>
             </div>
+            <div class="intro-copy"><strong>Welcome</strong><span>Jewellery ERP</span></div>
         </div>
-        <div class="brand-footer">© <?php echo date('Y'); ?> Jewellery ERP. Secure business access.</div>
-    </section>
+    </div>
 
-    <section class="form-panel">
-        <div class="login-card">
-            <div class="welcome-line"></div>
-            <div class="login-eyebrow"><i class="fa-solid fa-shield-halved"></i> Secure login</div>
-            <h2 class="login-title">Welcome back</h2>
-            <p class="login-subtitle">Sign in once. Your role and branch permissions will control the application automatically.</p>
+    <div class="login-shell">
+        <section class="brand-panel">
+            <span class="ambient-gem g1"></span><span class="ambient-gem g2"></span><span class="ambient-gem g3"></span>
+            <div class="brand-content">
+                <?php if (!empty($theme['logo_path'])): ?>
+                    <img class="brand-logo" src="<?php echo h($theme['logo_path']); ?>"
+                        alt="<?php echo h($displayBusinessName); ?>">
+                <?php else: ?>
+                    <div class="brand-mark"><i class="fa-solid fa-gem"></i></div>
+                <?php endif; ?>
 
-            <?php if ($error !== ''): ?>
-                <div class="alert alert-danger alert-dismissible fade show" role="alert">
-                    <i class="fa-solid fa-circle-exclamation me-2"></i><?php echo h($error); ?>
-                    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-                </div>
-            <?php endif; ?>
+                <h1 class="brand-title">Jewellery business control, built around every branch.</h1>
+                <p class="brand-copy">Manage billing, stock, customers, purchases, karigar work, pawn, chit collections
+                    and reports from one secure multi-business platform.</p>
 
-            <?php if ($success !== ''): ?>
-                <div class="alert alert-success alert-dismissible fade show" role="alert">
-                    <i class="fa-solid fa-circle-check me-2"></i><?php echo h($success); ?>
-                    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-                </div>
-            <?php endif; ?>
-
-            <form method="post" action="" autocomplete="on" novalidate>
-                <input type="hidden" name="csrf_token" value="<?php echo h($csrfToken); ?>">
-
-                <div class="mb-3">
-                    <label for="login_id" class="form-label">Username, Email or Mobile</label>
-                    <div class="input-group-modern">
-                        <i class="fa-regular fa-user"></i>
-                        <input type="text" class="form-control" id="login_id" name="login_id" value="<?php echo h($loginId); ?>" placeholder="Enter your login ID" autocomplete="username" required autofocus>
+                <div class="feature-grid">
+                    <div class="feature-item"><i class="fa-solid fa-building"></i><span>Unified user access</span></div>
+                    <div class="feature-item"><i class="fa-solid fa-code-branch"></i><span>Branch-wise operations</span>
                     </div>
-                </div>
-
-                <div class="mb-3">
-                    <label for="password" class="form-label">Password</label>
-                    <div class="input-group-modern">
-                        <i class="fa-solid fa-lock"></i>
-                        <input type="password" class="form-control" id="password" name="password" placeholder="Enter your password" autocomplete="current-password" required>
-                        <button class="password-toggle" type="button" id="passwordToggle" aria-label="Show password"><i class="fa-regular fa-eye"></i></button>
+                    <div class="feature-item"><i class="fa-solid fa-user-shield"></i><span>Role-based permissions</span>
                     </div>
+                    <div class="feature-item"><i class="fa-solid fa-clock-rotate-left"></i><span>Complete audit
+                            trail</span></div>
                 </div>
+            </div>
+            <div class="brand-footer">© <?php echo date('Y'); ?> Jewellery ERP. Secure business access.</div>
+        </section>
 
-                <div class="d-flex align-items-center justify-content-between mb-4">
-                    <div class="form-check">
-                        <input class="form-check-input" type="checkbox" value="1" id="remember" name="remember" <?php echo $remember ? 'checked' : ''; ?>>
-                        <label class="form-check-label" for="remember">Remember login</label>
+        <section class="form-panel">
+            <div class="login-card">
+                <div class="welcome-line"></div>
+                <div class="login-eyebrow"><i class="fa-solid fa-shield-halved"></i> Secure login</div>
+                <h2 class="login-title">Welcome back</h2>
+                <p class="login-subtitle">Sign in once. Your role and branch permissions will control the application
+                    automatically.</p>
+
+                <?php if ($error !== ''): ?>
+                    <div class="alert alert-danger alert-dismissible fade show" role="alert">
+                        <i class="fa-solid fa-circle-exclamation me-2"></i><?php echo h($error); ?>
+                        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
                     </div>
-                    <a href="forgot-password.php" class="text-decoration-none small" style="color:var(--primary-dark)">Forgot password?</a>
-                </div>
+                <?php endif; ?>
 
-                <button class="btn login-btn w-100" type="submit">
-                    Sign In <i class="fa-solid fa-arrow-right ms-2"></i>
-                </button>
-            </form>
+                <?php if ($success !== ''): ?>
+                    <div class="alert alert-success alert-dismissible fade show" role="alert">
+                        <i class="fa-solid fa-circle-check me-2"></i><?php echo h($success); ?>
+                        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                    </div>
+                <?php endif; ?>
 
-            <div class="security-note"><i class="fa-solid fa-lock"></i><span>Your session and business data are securely protected.</span></div>
-        </div>
-    </section>
-</div>
+                <form method="post" action="" autocomplete="on" novalidate>
+                    <input type="hidden" name="csrf_token" value="<?php echo h($csrfToken); ?>">
 
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-<script>
-    document.addEventListener('DOMContentLoaded', function () {
-        const introOverlay = document.getElementById('introOverlay');
-        const passwordInput = document.getElementById('password');
-        const passwordToggle = document.getElementById('passwordToggle');
-        const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+                    <div class="mb-3">
+                        <label for="login_id" class="form-label">Username, Email or Mobile</label>
+                        <div class="input-group-modern">
+                            <i class="fa-regular fa-user"></i>
+                            <input type="text" class="form-control" id="login_id" name="login_id"
+                                value="<?php echo h($loginId); ?>" placeholder="Enter your login ID"
+                                autocomplete="username" required autofocus>
+                        </div>
+                    </div>
 
-        document.body.classList.add('page-ready');
+                    <div class="mb-3">
+                        <label for="password" class="form-label">Password</label>
+                        <div class="input-group-modern">
+                            <i class="fa-solid fa-lock"></i>
+                            <input type="password" class="form-control" id="password" name="password"
+                                placeholder="Enter your password" autocomplete="current-password" required>
+                            <button class="password-toggle" type="button" id="passwordToggle"
+                                aria-label="Show password"><i class="fa-regular fa-eye"></i></button>
+                        </div>
+                    </div>
 
-        const revealWelcome = () => {
-            document.body.classList.add('welcome-ready');
-            introOverlay.classList.add('hide');
-            window.setTimeout(() => introOverlay.remove(), 650);
-        };
+                    <div class="d-flex align-items-center justify-content-between mb-4">
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" value="1" id="remember" name="remember"
+                                <?php echo $remember ? 'checked' : ''; ?>>
+                            <label class="form-check-label" for="remember">Remember login</label>
+                        </div>
+                        <a href="forgot-password.php" class="text-decoration-none small"
+                            style="color:var(--primary-dark)">Forgot password?</a>
+                    </div>
 
-        window.setTimeout(revealWelcome, prefersReducedMotion ? 80 : 1650);
+                    <button class="btn login-btn w-100" type="submit">
+                        Sign In <i class="fa-solid fa-arrow-right ms-2"></i>
+                    </button>
+                </form>
 
-        passwordToggle.addEventListener('click', function () {
-            const showing = passwordInput.type === 'text';
-            passwordInput.type = showing ? 'password' : 'text';
-            this.querySelector('i').className = showing ? 'fa-regular fa-eye' : 'fa-regular fa-eye-slash';
-            this.setAttribute('aria-label', showing ? 'Show password' : 'Hide password');
+                <div class="security-note"><i class="fa-solid fa-lock"></i><span>Your session and business data are
+                        securely protected.</span></div>
+            </div>
+        </section>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            const introOverlay = document.getElementById('introOverlay');
+            const passwordInput = document.getElementById('password');
+            const passwordToggle = document.getElementById('passwordToggle');
+            const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+            document.body.classList.add('page-ready');
+
+            const revealWelcome = () => {
+                document.body.classList.add('welcome-ready');
+                introOverlay.classList.add('hide');
+                window.setTimeout(() => introOverlay.remove(), 650);
+            };
+
+            window.setTimeout(revealWelcome, prefersReducedMotion ? 80 : 1650);
+
+            passwordToggle.addEventListener('click', function () {
+                const showing = passwordInput.type === 'text';
+                passwordInput.type = showing ? 'password' : 'text';
+                this.querySelector('i').className = showing ? 'fa-regular fa-eye' : 'fa-regular fa-eye-slash';
+                this.setAttribute('aria-label', showing ? 'Show password' : 'Hide password');
+            });
+
+            document.querySelector('form').addEventListener('submit', function () {
+                const button = this.querySelector('.login-btn');
+                button.disabled = true;
+                button.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin me-2"></i> Signing In...';
+            });
         });
-
-        document.querySelector('form').addEventListener('submit', function () {
-            const button = this.querySelector('.login-btn');
-            button.disabled = true;
-            button.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin me-2"></i> Signing In...';
-        });
-    });
-</script>
+    </script>
 </body>
+
 </html>

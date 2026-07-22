@@ -356,6 +356,135 @@ function normalizePaymentMethodType(
     return 'other';
 }
 
+
+function paymentMethodCodeBase(string $methodName, string $methodType): string
+{
+    $known = [
+        'cash' => 'CASH',
+        'upi' => 'UPI',
+        'card' => 'CARD',
+        'cheque' => 'CHEQUE',
+        'credit' => 'CREDIT',
+        'split' => 'SPLIT',
+        'other' => 'OTHER',
+    ];
+
+    $type = strtolower(trim($methodType));
+    if (isset($known[$type])) {
+        return $known[$type];
+    }
+
+    $base = strtoupper(preg_replace('/[^A-Za-z0-9]+/', '_', trim($methodName)));
+    $base = trim($base, '_');
+    return $base !== '' ? substr($base, 0, 40) : 'PAYMENT';
+}
+
+function generateUniquePaymentMethodCode(
+    mysqli $conn,
+    string $codeColumn,
+    string $idColumn,
+    string $businessColumn,
+    int $businessId,
+    int $excludeId,
+    string $methodName,
+    string $methodType
+): string {
+    if ($codeColumn === '') {
+        return '';
+    }
+
+    $base = paymentMethodCodeBase($methodName, $methodType);
+    $candidate = $base;
+
+    for ($suffix = 1; $suffix <= 9999; $suffix++) {
+        $sql = "SELECT `{$idColumn}` AS id FROM payment_methods
+                WHERE TRIM(COALESCE(`{$codeColumn}`,'')) = ?
+                  AND `{$idColumn}` <> ?";
+        $types = 'si';
+        $params = [$candidate, $excludeId];
+
+        if ($businessColumn !== '') {
+            $sql .= " AND `{$businessColumn}` = ?";
+            $types .= 'i';
+            $params[] = $businessId;
+        }
+
+        $sql .= ' LIMIT 1';
+        $stmt = $conn->prepare($sql);
+        if (!$stmt) {
+            throw new RuntimeException('Unable to validate payment method code: ' . $conn->error);
+        }
+        bindDynamic($stmt, $types, $params);
+        $stmt->execute();
+        $exists = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        if (!$exists) {
+            return $candidate;
+        }
+
+        $candidate = substr($base, 0, 44) . '_' . ($suffix + 1);
+    }
+
+    throw new RuntimeException('Unable to generate a unique payment method code.');
+}
+
+function repairBlankPaymentMethodCodes(
+    mysqli $conn,
+    string $codeColumn,
+    string $idColumn,
+    string $nameColumn,
+    string $typeColumn,
+    string $businessColumn,
+    int $businessId
+): void {
+    if ($codeColumn === '') return;
+
+    $typeSelect = $typeColumn !== '' ? "`{$typeColumn}` AS method_type" : "'other' AS method_type";
+    $sql = "SELECT `{$idColumn}` AS id, `{$nameColumn}` AS method_name, {$typeSelect}
+            FROM payment_methods
+            WHERE TRIM(COALESCE(`{$codeColumn}`,'')) = ''";
+    $types = '';
+    $params = [];
+
+    if ($businessColumn !== '') {
+        $sql .= " AND `{$businessColumn}` = ?";
+        $types = 'i';
+        $params[] = $businessId;
+    }
+
+    $stmt = $conn->prepare($sql);
+    if (!$stmt) return;
+    bindDynamic($stmt, $types, $params);
+    if (!$stmt->execute()) { $stmt->close(); return; }
+    $rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $stmt->close();
+
+    foreach ($rows as $row) {
+        $id = (int)($row['id'] ?? 0);
+        if ($id <= 0) continue;
+        $name = (string)($row['method_name'] ?? '');
+        $type = normalizePaymentMethodType((string)($row['method_type'] ?? ''), $name);
+        try {
+            $code = generateUniquePaymentMethodCode($conn, $codeColumn, $idColumn, $businessColumn, $businessId, $id, $name, $type);
+            $updateSql = "UPDATE payment_methods SET `{$codeColumn}`=? WHERE `{$idColumn}`=?";
+            $updateTypes = 'si';
+            $updateParams = [$code, $id];
+            if ($businessColumn !== '') {
+                $updateSql .= " AND `{$businessColumn}`=?";
+                $updateTypes .= 'i';
+                $updateParams[] = $businessId;
+            }
+            $update = $conn->prepare($updateSql);
+            if ($update) {
+                bindDynamic($update, $updateTypes, $updateParams);
+                $update->execute();
+                $update->close();
+            }
+        } catch (Throwable $ignored) {}
+    }
+}
+
 $idColumn = firstExistingColumn(
     $conn,
     'payment_methods',
@@ -372,6 +501,12 @@ $typeColumn = firstExistingColumn(
     $conn,
     'payment_methods',
     ['method_type', 'payment_type', 'type']
+);
+
+$codeColumn = firstExistingColumn(
+    $conn,
+    'payment_methods',
+    ['payment_method_code', 'method_code', 'code']
 );
 
 $statusColumn = firstExistingColumn(
@@ -401,6 +536,16 @@ if ($idColumn === '' || $nameColumn === '') {
     );
 }
 
+repairBlankPaymentMethodCodes(
+    $conn,
+    $codeColumn,
+    $idColumn,
+    $nameColumn,
+    $typeColumn,
+    $businessColumn,
+    $businessId
+);
+
 $action = strtolower(
     trim((string)($_REQUEST['action'] ?? 'list'))
 );
@@ -417,6 +562,9 @@ if ($action === 'list') {
         $typeColumn !== ''
             ? "`{$typeColumn}` AS method_type"
             : "'other' AS method_type",
+        $codeColumn !== ''
+            ? "`{$codeColumn}` AS payment_method_code"
+            : "'' AS payment_method_code",
         $statusColumn !== ''
             ? "`{$statusColumn}` AS status"
             : "1 AS status",
@@ -499,6 +647,9 @@ if ($action === 'list') {
                 (string)($row['method_type'] ?? ''),
                 (string)($row['payment_method_name'] ?? '')
             );
+
+        $row['payment_method_code'] =
+            (string)($row['payment_method_code'] ?? '');
 
         $row['status'] =
             (int)($row['status'] ?? 1);
@@ -601,6 +752,21 @@ if ($action === 'save') {
 
     if (!in_array($methodType, $allowedTypes, true)) {
         $methodType = 'other';
+    }
+
+    try {
+        $methodCode = generateUniquePaymentMethodCode(
+            $conn,
+            $codeColumn,
+            $idColumn,
+            $businessColumn,
+            $businessId,
+            $paymentMethodId,
+            $methodName,
+            $methodType
+        );
+    } catch (Throwable $error) {
+        respond(false, $error->getMessage(), [], 422);
     }
 
     $duplicateSql =
@@ -729,6 +895,12 @@ if ($action === 'save') {
             $updateParams[] = $methodType;
         }
 
+        if ($codeColumn !== '') {
+            $sets[] = "`{$codeColumn}` = ?";
+            $updateTypes .= 's';
+            $updateParams[] = $methodCode;
+        }
+
         if ($statusColumn !== '') {
             $sets[] = "`{$statusColumn}` = ?";
             $updateTypes .= 'i';
@@ -794,6 +966,7 @@ if ($action === 'save') {
             [
                 'payment_method_name' => $methodName,
                 'method_type' => $methodType,
+                'payment_method_code' => $methodCode,
                 'status' => $status,
             ]
         );
@@ -827,6 +1000,13 @@ if ($action === 'save') {
         $placeholders[] = '?';
         $insertTypes .= 's';
         $insertParams[] = $methodType;
+    }
+
+    if ($codeColumn !== '') {
+        $fields[] = "`{$codeColumn}`";
+        $placeholders[] = '?';
+        $insertTypes .= 's';
+        $insertParams[] = $methodCode;
     }
 
     if ($statusColumn !== '') {
