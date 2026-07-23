@@ -37,22 +37,143 @@ try{
 }catch(Throwable $e){ die('Unable to build invoice: '.htmlspecialchars($e->getMessage())); }
 
 class InvoicePDF extends FPDF{
-    public $footerText=''; public $watermark='';
-    function Header(){ if($this->watermark!==''){ $this->SetFont('Arial','B',28);$this->SetTextColor(248,239,242);$this->SetXY(16,122);$this->Cell(178,15,txt($this->watermark),0,0,'C'); } }
-    function Footer(){ $this->SetY(-11);$this->SetFont('Arial','',6);$this->SetTextColor(105);if($this->footerText!=='')$this->MultiCell(0,3,txt($this->footerText),0,'C');$this->SetY(-5);$this->Cell(0,3,'Page '.$this->PageNo(),0,0,'C'); }
-    function section($x,$y,$w,$title){$this->SetXY($x,$y);$this->SetFillColor(123,31,58);$this->SetTextColor(255);$this->SetFont('Arial','B',7.5);$this->Cell($w,6,txt($title),1,1,'L',true);$this->SetTextColor(36);}
-    function info($x,$y,$w,$label,$value,$lw=29){$this->SetXY($x,$y);$this->SetFont('Arial','B',7);$this->Cell($lw,4.3,txt($label),0,0);$this->SetFont('Arial','',7);$this->MultiCell($w-$lw,4.3,txt(': '.$value),0,'L');return max($y+4.3,$this->GetY());}
-    function need($h){if($this->GetY()+$h>$this->GetPageHeight()-17){$this->AddPage();$this->SetY(14);}}
+    public $footerText='';
+    public $watermark='';
+    public $watermarkLogo='';
+    protected $extgstates=[];
+
+    function SetAlpha($alpha,$blendMode='Normal'){
+        $alpha=max(0,min(1,(float)$alpha));
+        $this->extgstates[]=[
+            'ca'=>$alpha,
+            'CA'=>$alpha,
+            'BM'=>'/'.$blendMode
+        ];
+        $this->SetExtGState(count($this->extgstates));
+    }
+
+    function SetExtGState($stateNumber){
+        $this->_out(sprintf('/GS%d gs',$stateNumber));
+    }
+
+    function _enddoc(){
+        if(!empty($this->extgstates) && version_compare($this->PDFVersion,'1.4','<')){
+            $this->PDFVersion='1.4';
+        }
+        parent::_enddoc();
+    }
+
+    function _putextgstates(){
+        foreach($this->extgstates as $index=>$state){
+            $this->_newobj();
+            $this->extgstates[$index]['n']=$this->n;
+            $this->_put('<</Type /ExtGState');
+            $this->_put(sprintf('/ca %.3F',$state['ca']));
+            $this->_put(sprintf('/CA %.3F',$state['CA']));
+            $this->_put('/BM '.$state['BM']);
+            $this->_put('>>');
+            $this->_put('endobj');
+        }
+    }
+
+    function _putresourcedict(){
+        parent::_putresourcedict();
+        if(!empty($this->extgstates)){
+            $this->_put('/ExtGState <<');
+            foreach($this->extgstates as $index=>$state){
+                $this->_put('/GS'.($index+1).' '.$state['n'].' 0 R');
+            }
+            $this->_put('>>');
+        }
+    }
+
+    function _putresources(){
+        $this->_putextgstates();
+        parent::_putresources();
+    }
+
+    function Header(){
+        if($this->watermarkLogo!=='' && is_file($this->watermarkLogo)){
+            $maxWidth=82;
+            $maxHeight=82;
+            $imageWidth=$maxWidth;
+            $imageHeight=$maxHeight;
+            $imageInfo=@getimagesize($this->watermarkLogo);
+
+            if(is_array($imageInfo) && !empty($imageInfo[0]) && !empty($imageInfo[1])){
+                $ratio=$imageInfo[0]/$imageInfo[1];
+                if($ratio>=1){
+                    $imageWidth=$maxWidth;
+                    $imageHeight=$maxWidth/$ratio;
+                }else{
+                    $imageHeight=$maxHeight;
+                    $imageWidth=$maxHeight*$ratio;
+                }
+            }
+
+            $x=($this->GetPageWidth()-$imageWidth)/2;
+            $y=($this->GetPageHeight()-$imageHeight)/2;
+
+            $this->SetAlpha(0.075);
+            $this->Image($this->watermarkLogo,$x,$y,$imageWidth,$imageHeight);
+            $this->SetAlpha(1);
+        }elseif($this->watermark!==''){
+            $this->SetFont('Arial','B',28);
+            $this->SetTextColor(248,239,242);
+            $this->SetXY(16,122);
+            $this->Cell(178,15,txt($this->watermark),0,0,'C');
+        }
+    }
+
+    function Footer(){
+        $this->SetY(-11);
+        $this->SetFont('Arial','',6);
+        $this->SetTextColor(105);
+        if($this->footerText!==''){
+            $this->MultiCell(0,3,txt($this->footerText),0,'C');
+        }
+        $this->SetY(-5);
+        $this->Cell(0,3,'Page '.$this->PageNo(),0,0,'C');
+    }
+
+    function section($x,$y,$w,$title){
+        $this->SetXY($x,$y);
+        $this->SetFillColor(123,31,58);
+        $this->SetTextColor(255);
+        $this->SetFont('Arial','B',7.5);
+        $this->Cell($w,6,txt($title),1,1,'L',true);
+        $this->SetTextColor(36);
+    }
+
+    function info($x,$y,$w,$label,$value,$lw=29){
+        $this->SetXY($x,$y);
+        $this->SetFont('Arial','B',7);
+        $this->Cell($lw,4.3,txt($label),0,0);
+        $this->SetFont('Arial','',7);
+        $this->MultiCell($w-$lw,4.3,txt(': '.$value),0,'L');
+        return max($y+4.3,$this->GetY());
+    }
+
+    function need($h){
+        if($this->GetY()+$h>$this->GetPageHeight()-17){
+            $this->AddPage();
+            $this->SetY(14);
+        }
+    }
 }
 
+$logo=(string)($set['invoice_logo_path']??'');
+$logoFile=$logo!==''?__DIR__.'/'.ltrim($logo,'/'):'';
+
 $pdf=new InvoicePDF('P','mm','A4');
-$pdf->SetMargins(8,8,8);$pdf->SetAutoPageBreak(true,17);
+$pdf->SetMargins(8,8,8);
+$pdf->SetAutoPageBreak(true,17);
 $pdf->footerText=(string)($set['footer_text']??'This is a computer-generated invoice.');
 $pdf->watermark=strtoupper((string)($s['business_name']??'JEWELLERY'));
+$pdf->watermarkLogo=is_file($logoFile)?$logoFile:'';
 $pdf->AddPage();
 $P=[123,31,58];$D=[80,17,38];$G=[200,148,36];$GS=[248,236,208];$B=[216,201,172];$W=194;
 
-$logo=(string)($set['invoice_logo_path']??'');$logoFile=$logo!==''?__DIR__.'/'.ltrim($logo,'/'):'';
 if(!empty($set['show_business_logo'])&&is_file($logoFile)){$pdf->Image($logoFile,8,8,23,23);}else{$pdf->SetXY(8,8);$pdf->SetFillColor(...$GS);$pdf->SetDrawColor(...$G);$pdf->SetTextColor(...$P);$pdf->SetFont('Arial','B',12);$initials=strtoupper(substr(preg_replace('/[^A-Za-z]/','',(string)($s['business_name']??'JW')),0,3));$pdf->Cell(23,23,txt($initials?:'JW'),1,0,'C',true);}
 $name=$s['business_name']?:$s['legal_name']?:'Jewellery Business';
 $address=trim(implode(', ',array_filter([$s['branch_address1'],$s['branch_address2'],$s['branch_city'],$s['branch_state'],$s['branch_pincode']])));
@@ -72,19 +193,19 @@ $y=$boxY+8;$y=$pdf->info(107,$y,93,'Invoice Number',(string)$s['invoice_no']);$y
 $pdf->SetY(76);
 $heads=['S.No','Description','HSN / Purity','Gross g','Stone g','Net g','Rate/g','Metal Value','Making','Other','Taxable'];
 $ws=[8,35,19,14,14,14,17,19,17,15,22];
-$drawHead=function()use($pdf,$heads,$ws,$P,$D){$pdf->SetFillColor(...$P);$pdf->SetDrawColor(...$D);$pdf->SetTextColor(255);$pdf->SetFont('Arial','B',5.7);foreach($heads as $i=>$h)$pdf->Cell($ws[$i],8,txt($h),1,0,'C',true);$pdf->Ln();$pdf->SetTextColor(36);};
-$drawHead();$pdf->SetFont('Arial','',6);$pdf->SetDrawColor(...$B);
+$drawHead=function()use($pdf,$heads,$ws,$P,$D){$pdf->SetFillColor(...$P);$pdf->SetDrawColor(...$D);$pdf->SetTextColor(255);$pdf->SetFont('Arial','B',6.8);foreach($heads as $i=>$h)$pdf->Cell($ws[$i],10,txt($h),1,0,'C',true);$pdf->Ln();$pdf->SetTextColor(36);};
+$drawHead();$pdf->SetFont('Arial','',7.2);$pdf->SetDrawColor(...$B);
 foreach($items as $n=>$i){
     if($pdf->GetY()>238){$pdf->AddPage();$pdf->SetY(14);$drawHead();}
     $gross=(float)($i['gross_weight']??0);$stone=(float)($i['stone_weight']??$i['less_weight']??0);$net=(float)($i['net_weight']??max(0,$gross-$stone));$rate=(float)($i['metal_rate']??$i['rate_per_gram']??0);$metal=(float)($i['metal_value']??$net*$rate);$making=(float)($i['making_charge']??0);$other=(float)($i['other_charge']??$i['other_charges']??0);$taxable=(float)($i['taxable_amount']??$metal+$making+$other);$hsn=trim((string)($i['hsn_code']??$i['product_hsn']??'').' / '.(string)($i['purity']??''),' /');
     $vals=[$n+1,$i['item_name']??'-',$hsn?:'-',number_format($gross,3),number_format($stone,3),number_format($net,3),number_format($rate,2),number_format($metal,2),number_format($making,2),number_format($other,2),number_format($taxable,2)];
-    foreach($vals as $c=>$v)$pdf->Cell($ws[$c],7,txt($v),1,0,$c===1?'L':($c<3?'C':'R'));
+    foreach($vals as $c=>$v)$pdf->Cell($ws[$c],9,txt($v),1,0,$c===1?'L':($c<3?'C':'R'));
     $pdf->Ln();
 }
 $pdf->Ln(3);
 
-if($ex){$pdf->need(12+count($ex)*5);$pdf->SetFillColor(...$GS);$pdf->SetTextColor(...$P);$pdf->SetFont('Arial','B',7);$pdf->Cell($W,6,txt('EXCHANGE DETAILS'),1,1,'L',true);$pdf->SetTextColor(36);$pdf->SetFont('Arial','',6.3);foreach($ex as $x){$line=($x['item_name']??'Exchange Item').' | '.number_format((float)$x['eligible_weight'],3).' g x Rs. '.number_format((float)$x['rate_per_gram'],2).' = Rs. '.number_format((float)$x['exchange_value'],2);$pdf->MultiCell($W,4.2,txt($line),1,'L');}$pdf->Ln(2);}
-if($claims){$pdf->need(12+count($claims)*5);$pdf->SetFillColor(...$GS);$pdf->SetTextColor(...$P);$pdf->SetFont('Arial','B',7);$pdf->Cell($W,6,txt('GOLD GRAM CLAIMS'),1,1,'L',true);$pdf->SetTextColor(36);$pdf->SetFont('Arial','',6.3);foreach($claims as $c){$line=($c['group_name']?:'Chit').' / Ticket '.($c['ticket_no']?:'-').' | '.number_format((float)$c['claim_grams'],6).' g x Rs. '.number_format((float)$c['rate_per_gram'],2).' = Rs. '.number_format((float)$c['claim_amount'],2);$pdf->MultiCell($W,4.2,txt($line),1,'L');}$pdf->Ln(2);}
+if($ex){$pdf->need(14+count($ex)*7);$pdf->SetFillColor(...$GS);$pdf->SetTextColor(...$P);$pdf->SetFont('Arial','B',8.5);$pdf->Cell($W,7,txt('EXCHANGE DETAILS'),1,1,'L',true);$pdf->SetTextColor(36);$pdf->SetFont('Arial','',8);foreach($ex as $x){$line=($x['item_name']??'Exchange Item').' | '.number_format((float)$x['eligible_weight'],3).' g x Rs. '.number_format((float)$x['rate_per_gram'],2).' = Rs. '.number_format((float)$x['exchange_value'],2);$pdf->MultiCell($W,6,txt($line),1,'L');}$pdf->Ln(2);}
+if($claims){$pdf->need(14+count($claims)*7);$pdf->SetFillColor(...$GS);$pdf->SetTextColor(...$P);$pdf->SetFont('Arial','B',8.5);$pdf->Cell($W,7,txt('GOLD GRAM CLAIMS'),1,1,'L',true);$pdf->SetTextColor(36);$pdf->SetFont('Arial','',8);foreach($claims as $c){$line=($c['group_name']?:'Chit').' / Ticket '.($c['ticket_no']?:'-').' | '.number_format((float)$c['claim_grams'],6).' g x Rs. '.number_format((float)$c['rate_per_gram'],2).' = Rs. '.number_format((float)$c['claim_amount'],2);$pdf->MultiCell($W,6,txt($line),1,'L');}$pdf->Ln(2);}
 
 $pdf->need(68);$summaryY=$pdf->GetY();$notesW=112;
 $pdf->SetXY(8,$summaryY);$pdf->SetFillColor(...$GS);$pdf->SetTextColor(...$P);$pdf->SetFont('Arial','B',7);$pdf->Cell($notesW,6,txt('TERMS AND CONDITIONS'),1,1,'L',true);$pdf->SetX(8);$pdf->SetTextColor(36);$pdf->SetFont('Arial','',6);
