@@ -1,0 +1,711 @@
+<?php
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+date_default_timezone_set((string) ($_SESSION['timezone'] ?? 'Asia/Kolkata'));
+foreach ([__DIR__ . '/config/config.php', __DIR__ . '/config.php', __DIR__ . '/includes/config.php', __DIR__ . '/super-admin/includes/config.php'] as $f) {
+    if (is_file($f)) {
+        require_once $f;
+        break;
+    }
+}
+if (!isset($conn) || !($conn instanceof mysqli))
+    die('Database configuration is not available.');
+$conn->set_charset('utf8mb4');
+if (empty($_SESSION['user_id'])) {
+    header('Location: login.php');
+    exit;
+}
+function e($v): string
+{
+    return htmlspecialchars((string) ($v ?? ''), ENT_QUOTES, 'UTF-8');
+}
+function canProduct(mysqli $conn, string $action): bool
+{
+    if (($_SESSION['user_type'] ?? '') === 'Platform Admin')
+        return true;
+    $map = ['open' => 'can_open', 'create' => 'can_create', 'update' => 'can_update'];
+    $field = $map[$action] ?? '';
+    foreach (['perm.products', 'perm.products.list'] as $k) {
+        if (isset($_SESSION['permissions'][$k][$field]))
+            return (int) $_SESSION['permissions'][$k][$field] === 1;
+    }
+    return false;
+}
+if (!canProduct($conn, 'create')) {
+    http_response_code(403);
+    die('You do not have permission to create products.');
+}
+$businessId = (int) ($_SESSION['business_id'] ?? 0);
+if ($businessId <= 0)
+    die('A valid business must be selected.');
+if (empty($_SESSION['products_csrf']))
+    $_SESSION['products_csrf'] = bin2hex(random_bytes(32));
+$csrfToken = $_SESSION['products_csrf'];
+$nonGstModeActive = (int)($_SESSION['non_gst_mode'] ?? 0) === 1;
+$categories = [];
+$metals = [];
+$units = [];
+foreach ([['SELECT id,category_name name FROM product_categories WHERE business_id=? AND is_active=1 ORDER BY category_name', 'categories'], ['SELECT id,metal_name name FROM metals WHERE business_id=? AND is_active=1 ORDER BY metal_name', 'metals']] as $q) {
+    $stmt = $conn->prepare($q[0]);
+    if ($stmt) {
+        $stmt->bind_param('i', $businessId);
+        $stmt->execute();
+        $r = $stmt->get_result();
+        while ($x = $r->fetch_assoc())
+            ${$q[1]}[] = $x;
+        $stmt->close();
+    }
+}
+
+$stmt = $conn->prepare('SELECT id, unit_name name FROM units WHERE business_id=? AND is_active=1 ORDER BY unit_name');
+if ($stmt) {
+    $stmt->bind_param('i', $businessId);
+    $stmt->execute();
+    $r = $stmt->get_result();
+    while ($x = $r->fetch_assoc()) {
+        $units[] = $x;
+    }
+    $stmt->close();
+}
+$theme = ['primary_color' => '#d89416', 'primary_dark_color' => '#b86a0b', 'primary_soft_color' => '#fff6e5', 'page_background' => '#f4f3f0', 'card_background' => '#fff', 'text_color' => '#171717', 'muted_text_color' => '#7d8794', 'border_color' => '#e8e8e8', 'font_family' => 'Inter', 'heading_font_family' => 'Playfair Display', 'border_radius_px' => 12, 'sidebar_width_px' => 230, 'sidebar_gradient_1' => '#171c21', 'sidebar_gradient_2' => '#20272d', 'sidebar_gradient_3' => '#101419'];
+$stmt = $conn->prepare('SELECT * FROM business_theme_settings WHERE business_id=? LIMIT 1');
+if ($stmt) {
+    $stmt->bind_param('i', $businessId);
+    $stmt->execute();
+    $x = $stmt->get_result()->fetch_assoc() ?: [];
+    $stmt->close();
+    foreach ($theme as $k => $v)
+        if (isset($x[$k]) && $x[$k] !== '')
+            $theme[$k] = $x[$k];
+}
+$pageTitle = 'Add Product';
+$businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
+?>
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title><?= e($businessName) ?> - Add Product</title><?php include('includes/links.php'); ?>
+    <style>
+        :root {
+            --primary: <?= e($theme['primary_color']) ?>;
+            --primary-dark: <?= e($theme['primary_dark_color']) ?>;
+            --primary-soft: <?= e($theme['primary_soft_color']) ?>;
+            --page-bg: <?= e($theme['page_background']) ?>;
+            --card-bg: <?= e($theme['card_background']) ?>;
+            --text: <?= e($theme['text_color']) ?>;
+            --muted: <?= e($theme['muted_text_color']) ?>;
+            --line: <?= e($theme['border_color']) ?>;
+            --radius: <?= (int) $theme['border_radius_px'] ?>px;
+            --sidebar-width: <?= (int) $theme['sidebar_width_px'] ?>px;
+            --sidebar-gradient-1: <?= e($theme['sidebar_gradient_1']) ?>;
+            --sidebar-gradient-2: <?= e($theme['sidebar_gradient_2']) ?>;
+            --sidebar-gradient-3: <?= e($theme['sidebar_gradient_3']) ?>
+        }
+
+        body {
+            background: var(--page-bg);
+            color: var(--text);
+            font-family: <?= json_encode($theme['font_family']) ?>, sans-serif
+        }
+
+        .sidebar {
+            background: linear-gradient(180deg, var(--sidebar-gradient-1), var(--sidebar-gradient-2), var(--sidebar-gradient-3)) !important
+        }
+
+        .form-card {
+            background: var(--card-bg);
+            border: 1px solid var(--line);
+            border-radius: var(--radius);
+            overflow: hidden
+        }
+
+        .form-head {
+            padding: 16px 18px;
+            border-bottom: 1px solid var(--line);
+            display: flex;
+            justify-content: space-between;
+            align-items: center
+        }
+
+        .form-title {
+            font: 700 20px
+                <?= json_encode($theme['heading_font_family']) ?>
+                , serif
+        }
+
+        .section {
+            padding: 18px;
+            border-bottom: 1px solid var(--line)
+        }
+
+        .section:last-child {
+            border-bottom: 0
+        }
+
+        .section-title {
+            font-size: 11px;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: .06em;
+            margin-bottom: 14px;
+            color: var(--primary-dark)
+        }
+
+        .field-label {
+            font-size: 10px;
+            font-weight: 700;
+            margin-bottom: 5px
+        }
+
+        .form-control,
+        .form-select {
+            font-size: 11px;
+            min-height: 38px;
+            border-color: var(--line);
+            border-radius: 9px;
+            background: var(--card-bg);
+            color: var(--text)
+        }
+
+        .btn-theme {
+            background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+            border: 0;
+            color: #fff;
+            font-size: 11px;
+            font-weight: 700;
+            border-radius: 9px;
+            padding: 9px 15px
+        }
+
+        .preview {
+            width: 140px;
+            height: 140px;
+            border: 1px dashed var(--line);
+            border-radius: 12px;
+            display: grid;
+            place-items: center;
+            overflow: hidden;
+            background: var(--primary-soft);
+            color: var(--primary-dark)
+        }
+
+        .preview img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover
+        }
+
+        .theme-toast {
+            position: fixed;
+            right: 18px;
+            top: 78px;
+            z-index: 20000;
+            padding: 11px 14px;
+            border-radius: 10px;
+            color: #fff;
+            font-size: 11px;
+            font-weight: 600;
+            opacity: 0;
+            transform: translateY(-10px);
+            transition: .22s
+        }
+
+        .theme-toast.show {
+            opacity: 1;
+            transform: none
+        }
+
+        .theme-toast-success {
+            background: #168449
+        }
+
+        .theme-toast-error {
+            background: #c0392b
+        }
+
+        body.dark-mode,
+        body[data-theme=dark] {
+            --page-bg: #0f151b;
+            --card-bg: #182129;
+            --text: #f3f6f8;
+            --muted: #9aa7b3;
+            --line: #2c3944
+        }
+    </style>
+</head>
+
+<body data-non-gst-mode="<?= $nonGstModeActive ? '1' : '0' ?>"><?php include('includes/sidebar.php'); ?>
+    <main class="app-main"><?php include('includes/nav.php'); ?>
+        <div class="content-wrap">
+            <form class="form-card" id="productForm" method="post" action="api/products-save.php" enctype="multipart/form-data">
+                <div class="form-head">
+                    <div>
+                        <div class="form-title">Add Product</div>
+                        <div class="small text-muted">Create a jewellery product master record.</div>
+                    </div><a href="products.php" class="btn btn-light btn-sm js-leave-link"><i
+                            class="fa-solid fa-arrow-left me-2"></i>Back</a>
+                </div><input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>"><input type="hidden"
+                    name="action" value="save"><input type="hidden" name="product_id" value="0">
+                <input type="hidden" name="tax_type" id="taxTypeHidden"
+                    value="<?= $nonGstModeActive ? 'Non-GST' : 'GST' ?>">
+                <div class="section">
+                    <div class="section-title">Basic Information</div>
+                    <div class="row g-3">
+                        <div class="col-md-4"><label class="field-label">Category *</label><select class="form-select"
+                                name="category_id" required>
+                                <option value="">Select category</option><?php foreach ($categories as $x): ?>
+                                    <option value="<?= (int) $x['id'] ?>"><?= e($x['name']) ?></option><?php endforeach ?>
+                            </select></div>
+                        <div class="col-md-4"><label class="field-label">Product code</label><input class="form-control"
+                                name="product_code" placeholder="Auto generated when empty"></div>
+                        <div class="col-md-4"><label class="field-label">Barcode</label><input class="form-control"
+                                name="barcode"></div>
+                        <div class="col-md-6"><label class="field-label">Product name *</label><input
+                                class="form-control" name="product_name" maxlength="180" required></div>
+                        <div class="col-md-3">
+                            <label class="field-label">Product Type *</label>
+                            <select class="form-select" name="product_type" required>
+                                <option value="Gold">Gold</option>
+                                <option value="Silver">Silver</option>
+                                <option value="Diamond">Diamond</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3<?= $nonGstModeActive ? ' d-none' : '' ?>" id="hsnFieldWrap">
+                            <label class="field-label">HSN code</label>
+                            <input class="form-control" name="hsn_code" id="hsnCodeInput" maxlength="20">
+                        </div>
+                        <div class="col-md-3"><label class="field-label">Purity %</label><input class="form-control"
+                                type="number" step="0.0001" name="purity" value="91.6000"></div>
+                    </div>
+                </div>
+                <div class="section">
+                    <div class="section-title">Metal, Unit & Weight</div>
+                    <div class="row g-3">
+                        <div class="col-md-3">
+                            <label class="field-label">Metal</label>
+                            <select class="form-select" name="metal_id">
+                                <option value="0">Select metal</option>
+                                <?php foreach ($metals as $x): ?>
+                                    <option value="<?= (int) $x['id'] ?>"><?= e($x['name']) ?></option>
+                                <?php endforeach ?>
+                            </select>
+                        </div>
+
+                        <div class="col-md-3">
+                            <label class="field-label">Unit *</label>
+                            <select class="form-select" name="unit_id" required>
+                                <option value="">Select unit</option>
+                                <?php foreach ($units as $unit): ?>
+                                    <option value="<?= (int) $unit['id'] ?>"><?= e($unit['name']) ?></option>
+                                <?php endforeach ?>
+                            </select>
+                            
+                        </div>
+
+                        <div class="col-md-2">
+                            <label class="field-label">Gross weight</label>
+                            <input class="form-control weight" type="number" step="0.001" min="0" name="gross_weight"
+                                value="0">
+                        </div>
+
+                        <div class="col-md-2">
+                            <label class="field-label">Stone weight</label>
+                            <input class="form-control weight" type="number" step="0.001" min="0" name="stone_weight"
+                                value="0">
+                        </div>
+
+                        <div class="col-md-2">
+                            <label class="field-label">Net weight</label>
+                            <input class="form-control" type="number" step="0.001" min="0" name="net_weight" value="0"
+                                readonly>
+                        </div>
+                    </div>
+                </div>
+                <div class="section">
+                    <div class="section-title">Charges & Rates</div>
+                    <div class="row g-3">
+                        <div class="col-md-3"><label class="field-label">Making charge type</label><select
+                                class="form-select" name="making_charge_type">
+                                <option>Per Gram</option>
+                                <option>Fixed</option>
+                                <option>Percentage</option>
+                            </select></div>
+                        <div class="col-md-3"><label class="field-label">Making charge</label><input
+                                class="form-control" type="number" step="0.01" name="making_charge" value="0"></div>
+                        <div class="col-md-3"><label class="field-label">Wastage %</label><input class="form-control"
+                                type="number" step="0.001" name="wastage_percent" value="0"></div>
+                        <div class="col-md-3<?= $nonGstModeActive ? ' d-none' : '' ?>" id="taxPercentFieldWrap">
+                            <label class="field-label">Tax %</label>
+                            <input class="form-control" type="number" step="0.001" min="0"
+                                name="tax_percent" id="taxPercentInput" value="<?= $nonGstModeActive ? '0' : '3' ?>">
+                        </div>
+
+                        <div class="col-md-3<?= $nonGstModeActive ? '' : ' d-none' ?>" id="gstTypeFieldWrap">
+                            <label class="field-label">GST Type</label>
+                            <select class="form-select" id="gstTypeSelect" aria-label="GST Type">
+                                <option value="Non-GST" selected>Non-GST</option>
+                            </select>
+                        </div>
+                        <div class="col-md-4"><label class="field-label">Purchase rate</label><input
+                                class="form-control" type="number" step="0.01" name="purchase_rate" value="0"></div>
+                        <div class="col-md-4"><label class="field-label">Sale rate</label><input class="form-control"
+                                type="number" step="0.01" name="sale_rate" value="0"></div>
+                        <div class="col-md-4"><label class="field-label">Minimum stock qty</label><input
+                                class="form-control" type="number" step="0.001" name="minimum_stock_qty" value="0">
+                        </div>
+                    </div>
+                </div>
+                <div class="section">
+                    <div class="section-title">Other Information</div>
+                    <div class="row g-3">
+                        <div class="col-md-8"><label class="field-label">Description</label><textarea
+                                class="form-control" rows="5" name="description"></textarea>
+                            <div class="row g-3 mt-1">
+                                <div class="col-md-6">
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="checkbox" name="track_stock" value="1"
+                                            id="track_stock" checked>
+                                        <label class="form-check-label fw-semibold" for="track_stock">
+                                            Track stock
+                                        </label>
+                                    </div>
+                                    <div class="small text-muted ms-4 mt-1">
+                                        Enable this when purchase and sales transactions should increase or reduce this
+                                        product's stock quantity.
+                                    </div>
+                                </div>
+
+                                <div class="col-md-6">
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="checkbox" name="is_active" value="1"
+                                            id="is_active" checked>
+                                        <label class="form-check-label fw-semibold" for="is_active">
+                                            Active
+                                        </label>
+                                    </div>
+                                    <div class="small text-muted ms-4 mt-1">
+                                        Active products appear in billing, purchase and inventory screens. Disable it to
+                                        hide the product without deleting it.
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-4"><label class="field-label">Product image</label>
+                            <div class="preview mb-2" id="preview"><i class="fa-solid fa-image fa-2x"></i></div><input
+                                class="form-control" type="file" name="image" id="image"
+                                accept="image/jpeg,image/png,image/webp,image/gif">
+                        </div>
+                    </div>
+                </div>
+                <div class="section text-end"><a href="products.php" class="btn btn-light btn-sm me-2 js-leave-link">Cancel</a><button
+                        class="btn btn-theme" id="saveBtn"><i class="fa-solid fa-floppy-disk me-2"></i>Save
+                        Product</button></div>
+            </form><?php include('includes/footer.php'); ?>
+        </div>
+    </main>
+    <div class="modal fade" id="unsavedChangesModal" tabindex="-1" aria-labelledby="unsavedChangesTitle" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content" style="border-radius:14px;border:1px solid var(--line);">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="unsavedChangesTitle"><i class="fa-solid fa-triangle-exclamation text-warning me-2"></i>Unsaved Changes</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div id="unsavedChangesMessage">
+                        You have entered product information that has not been saved. Leaving this page will discard those changes.
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-light btn-sm" data-bs-dismiss="modal">Stay on Page</button>
+                    <button type="button" class="btn btn-danger btn-sm" id="discardChangesBtn">Discard and Leave</button>
+                </div>
+            </div>
+        </div>
+    </div>
+<?php include('includes/script.php'); ?>
+    <script src="assets/js/script.js"></script>
+    <script>
+        (() => {
+            const form = document.getElementById('productForm');
+            const saveButton = document.getElementById('saveBtn');
+            const taxTypeHidden = document.getElementById('taxTypeHidden');
+            const hsnFieldWrap = document.getElementById('hsnFieldWrap');
+            const hsnCodeInput = document.getElementById('hsnCodeInput');
+            const taxPercentFieldWrap = document.getElementById('taxPercentFieldWrap');
+            const taxPercentInput = document.getElementById('taxPercentInput');
+            const gstTypeFieldWrap = document.getElementById('gstTypeFieldWrap');
+            const gstTypeSelect = document.getElementById('gstTypeSelect');
+            let savedGstTaxPercent = taxPercentInput ? (taxPercentInput.value || '3') : '3';
+            let savedHsnCode = hsnCodeInput ? hsnCodeInput.value : '';
+
+            function applyNonGstMode(active) {
+                active = !!active;
+
+                document.body.dataset.nonGstMode = active ? '1' : '0';
+
+                if (taxTypeHidden) {
+                    taxTypeHidden.value = active ? 'Non-GST' : 'GST';
+                }
+
+                if (active) {
+                    if (taxPercentInput && parseFloat(taxPercentInput.value || '0') > 0) {
+                        savedGstTaxPercent = taxPercentInput.value;
+                    }
+                    if (hsnCodeInput && hsnCodeInput.value !== '') {
+                        savedHsnCode = hsnCodeInput.value;
+                    }
+
+                    hsnFieldWrap?.classList.add('d-none');
+                    taxPercentFieldWrap?.classList.add('d-none');
+                    gstTypeFieldWrap?.classList.remove('d-none');
+
+                    if (hsnCodeInput) {
+                        hsnCodeInput.value = '';
+                        hsnCodeInput.disabled = true;
+                    }
+
+                    if (taxPercentInput) {
+                        taxPercentInput.value = '0';
+                        taxPercentInput.disabled = false;
+                    }
+
+                    if (gstTypeSelect) {
+                        gstTypeSelect.value = 'Non-GST';
+                    }
+                } else {
+                    hsnFieldWrap?.classList.remove('d-none');
+                    taxPercentFieldWrap?.classList.remove('d-none');
+                    gstTypeFieldWrap?.classList.add('d-none');
+
+                    if (hsnCodeInput) {
+                        hsnCodeInput.disabled = false;
+                        if (hsnCodeInput.value === '' && savedHsnCode !== '') {
+                            hsnCodeInput.value = savedHsnCode;
+                        }
+                    }
+
+                    if (taxPercentInput) {
+                        taxPercentInput.disabled = false;
+                        if (parseFloat(taxPercentInput.value || '0') === 0) {
+                            taxPercentInput.value = savedGstTaxPercent || '3';
+                        }
+                    }
+                }
+            }
+
+            applyNonGstMode(document.body.dataset.nonGstMode === '1');
+
+            window.addEventListener('nonGstModeChanged', event => {
+                applyNonGstMode(!!event.detail?.active);
+            });
+
+            const discardButton = document.getElementById('discardChangesBtn');
+            const modalElement = document.getElementById('unsavedChangesModal');
+            const modalMessage = document.getElementById('unsavedChangesMessage');
+            let isDirty = false;
+            let isSubmitting = false;
+            let pendingUrl = null;
+            let pendingAction = 'leave';
+            let handlingPopState = false;
+            const unsavedModal = modalElement && window.bootstrap ? new bootstrap.Modal(modalElement, { backdrop: 'static', keyboard: false }) : null;
+
+            function toast(type, message) {
+                const element = document.createElement('div');
+                element.className = 'theme-toast theme-toast-' + type;
+                element.textContent = message;
+                document.body.appendChild(element);
+                requestAnimationFrame(() => element.classList.add('show'));
+                setTimeout(() => { element.classList.remove('show'); setTimeout(() => element.remove(), 250); }, 3000);
+            }
+
+            function markDirty() { if (!isSubmitting) isDirty = true; }
+
+            function hasEnteredValue() {
+                return Array.from(form.querySelectorAll('input, select, textarea')).some(control => {
+                    if (['hidden', 'submit', 'button'].includes(control.type)) return false;
+                    if (control.type === 'checkbox' || control.type === 'radio') return control.checked !== control.defaultChecked;
+                    if (control.type === 'file') return control.files && control.files.length > 0;
+                    if (control.tagName === 'SELECT') return control.value !== '';
+                    return String(control.value || '').trim() !== String(control.defaultValue || '').trim();
+                });
+            }
+
+            function shouldWarn() { return !isSubmitting && (isDirty || hasEnteredValue()); }
+
+            function showUnsavedModal(action = 'leave', url = null) {
+                pendingAction = action;
+                pendingUrl = url;
+
+                if (modalMessage) {
+                    modalMessage.textContent = action === 'refresh'
+                        ? 'You have entered product information that has not been saved. Refreshing this page will discard those changes.'
+                        : 'You have entered product information that has not been saved. Leaving this page will discard those changes.';
+                }
+
+                if (discardButton) {
+                    discardButton.textContent = action === 'refresh'
+                        ? 'Discard and Refresh'
+                        : 'Discard and Leave';
+                }
+
+                unsavedModal?.show();
+            }
+
+            function requestLeave(url = null) {
+                if (!shouldWarn()) {
+                    isSubmitting = true;
+                    if (url) window.location.href = url; else history.back();
+                    return;
+                }
+
+                showUnsavedModal('leave', url);
+            }
+
+            function requestRefresh() {
+                if (!shouldWarn()) {
+                    isSubmitting = true;
+                    window.location.reload();
+                    return;
+                }
+
+                showUnsavedModal('refresh');
+            }
+
+            document.querySelectorAll('.weight').forEach(input => {
+                input.addEventListener('input', () => {
+                    const gross = parseFloat(form.gross_weight.value) || 0;
+                    const stone = parseFloat(form.stone_weight.value) || 0;
+                    form.net_weight.value = Math.max(0, gross - stone).toFixed(3);
+                    markDirty();
+                });
+            });
+
+            document.getElementById('image').addEventListener('change', event => {
+                const file = event.target.files[0];
+                if (!file) return;
+                const image = document.createElement('img');
+                image.src = URL.createObjectURL(file);
+                document.getElementById('preview').replaceChildren(image);
+                markDirty();
+            });
+
+            form.querySelectorAll('input, select, textarea').forEach(control => {
+                control.addEventListener('input', markDirty);
+                control.addEventListener('change', markDirty);
+            });
+
+            document.querySelectorAll('.js-leave-link').forEach(link => {
+                link.addEventListener('click', event => {
+                    if (!shouldWarn()) return;
+                    event.preventDefault();
+                    requestLeave(link.href);
+                });
+            });
+
+            discardButton?.addEventListener('click', () => {
+                isDirty = false;
+                isSubmitting = true;
+                unsavedModal?.hide();
+
+                if (pendingAction === 'refresh') {
+                    window.location.reload();
+                    return;
+                }
+
+                if (pendingUrl) {
+                    window.location.href = pendingUrl;
+                } else {
+                    handlingPopState = true;
+                    history.back();
+                }
+            });
+
+            history.pushState({ productFormGuard: true }, '', window.location.href);
+            window.addEventListener('popstate', () => {
+                if (handlingPopState || isSubmitting) return;
+                if (shouldWarn()) {
+                    history.pushState({ productFormGuard: true }, '', window.location.href);
+                    showUnsavedModal('leave', null);
+                }
+            });
+
+            // F5, Ctrl+R and Cmd+R can be intercepted and shown using the Bootstrap modal.
+            document.addEventListener('keydown', event => {
+                const key = String(event.key || '').toLowerCase();
+                const isRefreshShortcut =
+                    key === 'f5' ||
+                    ((event.ctrlKey || event.metaKey) && key === 'r');
+
+                if (!isRefreshShortcut) return;
+
+                event.preventDefault();
+                requestRefresh();
+            });
+
+            // Browser toolbar refresh and closing the tab cannot display a custom
+            // Bootstrap modal. Browsers only permit their own built-in confirmation.
+            window.addEventListener('beforeunload', event => {
+                if (!shouldWarn()) return;
+                event.preventDefault();
+                event.returnValue = '';
+            });
+
+            form.addEventListener('submit', async event => {
+                event.preventDefault();
+
+                const nonGstActive = document.body.dataset.nonGstMode === '1';
+
+                if (taxTypeHidden) {
+                    taxTypeHidden.value = nonGstActive ? 'Non-GST' : 'GST';
+                }
+
+                if (nonGstActive) {
+                    if (taxPercentInput) {
+                        taxPercentInput.disabled = false;
+                        taxPercentInput.value = '0';
+                    }
+                    if (hsnCodeInput) {
+                        hsnCodeInput.disabled = false;
+                        hsnCodeInput.value = '';
+                    }
+                }
+
+                const unitId = parseInt(form.unit_id?.value || '0', 10);
+                if (!(unitId > 0)) {
+                    toast('error', 'Select the product unit.');
+                    form.unit_id?.focus();
+                    return;
+                }
+                const oldContent = saveButton.innerHTML;
+                isSubmitting = true;
+                saveButton.disabled = true;
+                saveButton.innerHTML = '<i class="fa-solid fa-spinner fa-spin me-2"></i>Saving...';
+                try {
+                    const response = await fetch('api/products-save.php', {
+                        method: 'POST',
+                        body: new FormData(form),
+                        credentials: 'same-origin',
+                        headers: { 'X-Requested-With': 'XMLHttpRequest' }
+                    });
+                    const result = await response.json().catch(() => ({ success: false, message: 'Invalid server response.' }));
+                    if (!response.ok || !result.success) throw new Error(result.message || 'Unable to save product.');
+                    isDirty = false;
+                    toast('success', result.message);
+                    setTimeout(() => { window.location.href = 'products.php'; }, 600);
+                } catch (error) {
+                    isSubmitting = false;
+                    toast('error', error.message);
+                } finally {
+                    saveButton.disabled = false;
+                    saveButton.innerHTML = oldContent;
+                }
+            });
+        })();
+    </script>
+</body>
+
+</html>
