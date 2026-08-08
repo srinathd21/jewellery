@@ -43,6 +43,116 @@ function columnExists(mysqli $c, string $table, string $column): bool
     $r = $c->query("SHOW COLUMNS FROM `{$table}` LIKE '{$column}'");
     return $r && $r->num_rows > 0;
 }
+
+function ensureCustomerPaymentLedgerTables(mysqli $c): void
+{
+    if (!tableExists($c, 'customer_payments')) {
+        $sql = "CREATE TABLE `customer_payments` (
+            `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            `business_id` INT NOT NULL,
+            `branch_id` INT NOT NULL,
+            `customer_id` INT NOT NULL,
+            `sale_id` INT NULL,
+            `payment_method_id` INT NULL,
+            `payment_no` VARCHAR(100) NOT NULL,
+            `payment_date` DATETIME NOT NULL,
+            `amount` DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+            `reference_no` VARCHAR(255) NULL,
+            `remarks` TEXT NULL,
+            `created_by` INT NULL,
+            `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uq_customer_payment_no` (`business_id`,`payment_no`),
+            KEY `idx_customer_payment_customer` (`business_id`,`customer_id`,`payment_date`),
+            KEY `idx_customer_payment_sale` (`business_id`,`sale_id`),
+            KEY `idx_customer_payment_branch` (`business_id`,`branch_id`,`payment_date`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci";
+
+        if (!$c->query($sql)) {
+            throw new RuntimeException('Unable to create customer_payments table: ' . $c->error);
+        }
+    }
+
+    /*
+     * Existing installations may already have customer_payments but with
+     * an older schema. Add every column required by the current billing API.
+     */
+    $customerPaymentColumns = [
+        'business_id' => "INT NOT NULL DEFAULT 0",
+        'branch_id' => "INT NOT NULL DEFAULT 0",
+        'customer_id' => "INT NOT NULL DEFAULT 0",
+        'sale_id' => "INT NULL",
+        'payment_method_id' => "INT NULL",
+        'payment_no' => "VARCHAR(100) NULL",
+        'payment_date' => "DATETIME NULL",
+        'amount' => "DECIMAL(18,2) NOT NULL DEFAULT 0.00",
+        'reference_no' => "VARCHAR(255) NULL",
+        'remarks' => "TEXT NULL",
+        'created_by' => "INT NULL",
+        'created_at' => "TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"
+    ];
+
+    foreach ($customerPaymentColumns as $column => $definition) {
+        if (!columnExists($c, 'customer_payments', $column)) {
+            if (!$c->query("ALTER TABLE `customer_payments` ADD COLUMN `{$column}` {$definition}")) {
+                throw new RuntimeException(
+                    'Unable to upgrade customer_payments.' . $column . ': ' . $c->error
+                );
+            }
+        }
+    }
+
+    /*
+     * Give older rows a usable payment number before making future values
+     * unique/non-empty. This does not overwrite existing payment numbers.
+     */
+    if (columnExists($c, 'customer_payments', 'payment_no')) {
+        $c->query(
+            "UPDATE `customer_payments`
+             SET `payment_no` = CONCAT('CPY-OLD-', `id`)
+             WHERE `payment_no` IS NULL OR TRIM(`payment_no`) = ''"
+        );
+    }
+
+    if (!tableExists($c, 'customer_payment_splits')) {
+        $sql = "CREATE TABLE `customer_payment_splits` (
+            `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            `payment_id` BIGINT UNSIGNED NOT NULL,
+            `payment_method_id` INT NOT NULL,
+            `amount` DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+            `reference_no` VARCHAR(255) NULL,
+            `created_by` INT NULL,
+            `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            KEY `idx_customer_split_payment` (`payment_id`),
+            KEY `idx_customer_split_method` (`payment_method_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci";
+
+        if (!$c->query($sql)) {
+            throw new RuntimeException('Unable to create customer_payment_splits table: ' . $c->error);
+        }
+    }
+
+    $splitColumns = [
+        'payment_id' => "BIGINT UNSIGNED NOT NULL DEFAULT 0",
+        'payment_method_id' => "INT NOT NULL DEFAULT 0",
+        'amount' => "DECIMAL(18,2) NOT NULL DEFAULT 0.00",
+        'reference_no' => "VARCHAR(255) NULL",
+        'created_by' => "INT NULL",
+        'created_at' => "TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"
+    ];
+
+    foreach ($splitColumns as $column => $definition) {
+        if (!columnExists($c, 'customer_payment_splits', $column)) {
+            if (!$c->query("ALTER TABLE `customer_payment_splits` ADD COLUMN `{$column}` {$definition}")) {
+                throw new RuntimeException(
+                    'Unable to upgrade customer_payment_splits.' . $column . ': ' . $c->error
+                );
+            }
+        }
+    }
+}
+
 function permission(mysqli $c, string $action): bool
 {
     if (($_SESSION['user_type'] ?? '') === 'Platform Admin')
@@ -779,37 +889,110 @@ try {
 
     /* Customer payment ledger: records only money actually received. */
     if ($receivedAmount > 0.001) {
-        if (!tableExists($conn, 'customer_payments') || !tableExists($conn, 'customer_payment_splits')) {
+        ensureCustomerPaymentLedgerTables($conn);
+
+        $paymentDateTime = $invoiceDate . ' ' . $invoiceTime . ':00';
+        $temporaryPaymentNo = 'TMP-' . $businessId . '-' . bin2hex(random_bytes(8));
+        $ledgerReference = 'Sale ' . $invoiceNo;
+
+        /*
+         * Some older customer_payments schemas contain a mandatory
+         * payment_method_id foreign key. Use the first ACTUALLY RECEIVED
+         * (non-credit) payment method as the header method while preserving
+         * every split below in customer_payment_splits.
+         */
+        $ledgerPrimaryMethodId = 0;
+        foreach ($payments as $ledgerPayment) {
+            if (!empty($ledgerPayment['is_credit'])) {
+                continue;
+            }
+
+            $candidateMethodId = (int)($ledgerPayment['method_id'] ?? 0);
+            $candidateAmount = (float)($ledgerPayment['amount'] ?? 0);
+
+            if ($candidateMethodId > 0 && $candidateAmount > 0) {
+                $ledgerPrimaryMethodId = $candidateMethodId;
+                break;
+            }
+        }
+
+        if ($ledgerPrimaryMethodId <= 0) {
             throw new RuntimeException(
-                'Customer payment ledger tables are missing. Run customer-payment-ledger.sql first.'
+                'Unable to determine the received payment method for the customer ledger.'
             );
         }
 
-        $paymentDateTime = $invoiceDate . ' ' . $invoiceTime . ':00';
-        $temporaryPaymentNo = 'TMP-' . bin2hex(random_bytes(8));
-        $ledgerReference = 'Sale ' . $invoiceNo;
-
-        $customerPaymentStmt = prepareOrFail(
+        /*
+         * Validate again because legacy customer_payments.payment_method_id
+         * may be protected by a foreign key to payment_methods.id.
+         */
+        $ledgerMethodCheck = prepareOrFail(
             $conn,
-            'INSERT INTO customer_payments
-                (business_id,branch_id,customer_id,sale_id,payment_no,payment_date,
-                 amount,reference_no,remarks,created_by)
-             VALUES(?,?,?,?,?,?,?,?,?,?)',
-            'Unable to prepare customer payment ledger insert'
+            'SELECT id
+             FROM payment_methods
+             WHERE id=? AND business_id=? AND is_active=1
+             LIMIT 1',
+            'Unable to validate customer ledger payment method'
         );
-        $customerPaymentStmt->bind_param(
-            'iiiissdssi',
-            $businessId,
-            $branchId,
-            $customerId,
-            $saleId,
-            $temporaryPaymentNo,
-            $paymentDateTime,
-            $receivedAmount,
-            $ledgerReference,
-            $notes,
-            $userId
-        );
+        $ledgerMethodCheck->bind_param('ii', $ledgerPrimaryMethodId, $businessId);
+        $ledgerMethodCheck->execute();
+        $ledgerMethodRow = $ledgerMethodCheck->get_result()->fetch_assoc();
+        $ledgerMethodCheck->close();
+
+        if (!$ledgerMethodRow) {
+            throw new RuntimeException(
+                'The selected received payment method is invalid for the customer ledger.'
+            );
+        }
+
+        if (columnExists($conn, 'customer_payments', 'payment_method_id')) {
+            $customerPaymentStmt = prepareOrFail(
+                $conn,
+                'INSERT INTO customer_payments
+                    (business_id,branch_id,customer_id,sale_id,payment_method_id,
+                     payment_no,payment_date,amount,reference_no,remarks,created_by)
+                 VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                'Unable to prepare customer payment ledger insert'
+            );
+
+            $customerPaymentStmt->bind_param(
+                'iiiiissdssi',
+                $businessId,
+                $branchId,
+                $customerId,
+                $saleId,
+                $ledgerPrimaryMethodId,
+                $temporaryPaymentNo,
+                $paymentDateTime,
+                $receivedAmount,
+                $ledgerReference,
+                $notes,
+                $userId
+            );
+        } else {
+            $customerPaymentStmt = prepareOrFail(
+                $conn,
+                'INSERT INTO customer_payments
+                    (business_id,branch_id,customer_id,sale_id,payment_no,payment_date,
+                     amount,reference_no,remarks,created_by)
+                 VALUES(?,?,?,?,?,?,?,?,?,?)',
+                'Unable to prepare customer payment ledger insert'
+            );
+
+            $customerPaymentStmt->bind_param(
+                'iiiissdssi',
+                $businessId,
+                $branchId,
+                $customerId,
+                $saleId,
+                $temporaryPaymentNo,
+                $paymentDateTime,
+                $receivedAmount,
+                $ledgerReference,
+                $notes,
+                $userId
+            );
+        }
         if (!$customerPaymentStmt->execute()) {
             throw new RuntimeException(
                 'Unable to save customer payment ledger: ' . $customerPaymentStmt->error
