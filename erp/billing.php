@@ -58,7 +58,7 @@ if (!billingPermission($conn, 'open') && !billingPermission($conn, 'create')) {
 }
 $businessId = (int) ($_SESSION['business_id'] ?? 0);
 $branchId = (int) ($_SESSION['branch_id'] ?? ($_SESSION['default_branch_id'] ?? 0));
-$nonGstModeActive = (int)($_SESSION['non_gst_mode'] ?? 0) === 1;
+$nonGstModeActive = (int) ($_SESSION['non_gst_mode'] ?? 0) === 1;
 if ($businessId <= 0 || $branchId <= 0)
     die('A valid business and branch must be selected.');
 if (empty($_SESSION['billing_csrf']))
@@ -178,15 +178,19 @@ function billingPeriodKey(string $reset, string $date): string
 {
     $ts = strtotime($date);
     switch ($reset) {
-        case 'Monthly': return date('Ym', $ts);
-        case 'Daily': return date('Ymd', $ts);
-        case 'Calendar Year': return date('Y', $ts);
+        case 'Monthly':
+            return date('Ym', $ts);
+        case 'Daily':
+            return date('Ymd', $ts);
+        case 'Calendar Year':
+            return date('Y', $ts);
         case 'Financial Year':
-            $year = (int)date('Y', $ts);
-            $month = (int)date('n', $ts);
+            $year = (int) date('Y', $ts);
+            $month = (int) date('n', $ts);
             $start = $month >= 4 ? $year : $year - 1;
             return $start . '-' . ($start + 1);
-        default: return 'ALL';
+        default:
+            return 'ALL';
     }
 }
 
@@ -237,21 +241,24 @@ function previewNextBillingNumber(mysqli $conn, int $businessId, int $branchId, 
          ORDER BY (branch_id=?) DESC,id DESC
          LIMIT 1"
     );
-    if (!$stmt) return $documentType === 'Estimate' ? 'EST-NOT-CONFIGURED' : 'INV-NOT-CONFIGURED';
+    if (!$stmt)
+        return $documentType === 'Estimate' ? 'EST-NOT-CONFIGURED' : 'INV-NOT-CONFIGURED';
     $stmt->bind_param('iisi', $businessId, $branchId, $documentKey, $branchId);
     $stmt->execute();
     $setting = $stmt->get_result()->fetch_assoc();
     $stmt->close();
-    if (!$setting) return $documentType === 'Estimate' ? 'EST-NOT-CONFIGURED' : 'INV-NOT-CONFIGURED';
+    if (!$setting)
+        return $documentType === 'Estimate' ? 'EST-NOT-CONFIGURED' : 'INV-NOT-CONFIGURED';
 
-    $periodKey = billingPeriodKey((string)$setting['reset_frequency'], $date);
+    $periodKey = billingPeriodKey((string) $setting['reset_frequency'], $date);
     $seqStmt = $conn->prepare('SELECT current_number FROM number_sequences WHERE business_id=? AND branch_id=? AND document_type=? AND period_key=? LIMIT 1');
-    if (!$seqStmt) return renderBillingNumber($setting, max(1, (int)($setting['sequence_start'] ?? 1)), $date);
+    if (!$seqStmt)
+        return renderBillingNumber($setting, max(1, (int) ($setting['sequence_start'] ?? 1)), $date);
     $seqStmt->bind_param('iiss', $businessId, $branchId, $documentType, $periodKey);
     $seqStmt->execute();
     $sequenceRow = $seqStmt->get_result()->fetch_assoc();
     $seqStmt->close();
-    $next = $sequenceRow ? ((int)$sequenceRow['current_number'] + 1) : max(1, (int)($setting['sequence_start'] ?? 1));
+    $next = $sequenceRow ? ((int) $sequenceRow['current_number'] + 1) : max(1, (int) ($setting['sequence_start'] ?? 1));
     return renderBillingNumber($setting, $next, $date);
 }
 
@@ -942,8 +949,8 @@ $defaultBillNo = previewNextBillingNumber($conn, $businessId, $branchId, $defaul
         body[data-theme=dark] .product-detail-pill,
         html.dark-mode body .product-detail-pill,
         html[data-theme=dark] body .product-detail-pill {
-            background: rgba(255,255,255,.08);
-            border-color: rgba(255,255,255,.16);
+            background: rgba(255, 255, 255, .08);
+            border-color: rgba(255, 255, 255, .16);
             color: #f3f6f8;
         }
 
@@ -1021,7 +1028,9 @@ $defaultBillNo = previewNextBillingNumber($conn, $businessId, $branchId, $defaul
 <body>
     <div class="standalone-wrap">
         <form id="billingForm" autocomplete="off"><input type="hidden" name="csrf_token"
-                value="<?= e($csrfToken) ?>"><input type="hidden" name="action" value="save"><input type="hidden" name="document_mode" id="documentMode" value="<?= $nonGstModeActive ? 'Non GST Invoice' : 'Invoice' ?>"><input type="hidden"
+                value="<?= e($csrfToken) ?>"><input type="hidden" name="action" value="save"><input type="hidden"
+                name="document_mode" id="documentMode"
+                value="<?= $nonGstModeActive ? 'Non GST Invoice' : 'Invoice' ?>"><input type="hidden"
                 name="chit_claims_json" id="chitClaimsJson" value="[]"><input type="hidden" name="exchange_items_json"
                 id="exchangeItemsJson" value="[]">
             <div class="bill-card">
@@ -1033,7 +1042,7 @@ $defaultBillNo = previewNextBillingNumber($conn, $businessId, $branchId, $defaul
                         <button type="button" class="btn-theme" id="addScannedProduct">
                             <i class="fa-solid fa-barcode me-1"></i>Add Product
                         </button>
-                        
+
                     </div>
                     <div class="top-back-wrap">
                         <a href="sales-list.php" class="btn btn-light btn-sm">
@@ -1050,16 +1059,18 @@ $defaultBillNo = previewNextBillingNumber($conn, $businessId, $branchId, $defaul
                         </div>
                         <div class="bill-body">
                             <div class="bill-detail-grid">
-                                <div class="c3"><label class="field-label" id="documentNumberLabel">Bill No</label><input class="form-control"
-                                        id="documentNumberPreview" value="<?= e($defaultBillNo) ?>" readonly></div>
+                                <div class="c3"><label class="field-label" id="documentNumberLabel">Bill
+                                        No</label><input class="form-control" id="documentNumberPreview"
+                                        value="<?= e($defaultBillNo) ?>" readonly></div>
                                 <div class="c3"><label class="field-label">Bill Date *</label><input type="date"
-                                        name="invoice_date" id="invoiceDate" class="form-control" value="<?= date('Y-m-d') ?>" required>
+                                        name="invoice_date" id="invoiceDate" class="form-control"
+                                        value="<?= date('Y-m-d') ?>" required>
                                 </div>
                                 <div class="c3"><label class="field-label">Bill Time *</label><input type="time"
                                         name="invoice_time" class="form-control" value="<?= date('H:i') ?>" required>
                                 </div>
-                                <div class="c3"><label class="field-label">Bill Type</label><select name="bill_type" id="billType"
-                                        class="form-select select2-static">
+                                <div class="c3"><label class="field-label">Bill Type</label><select name="bill_type"
+                                        id="billType" class="form-select select2-static">
                                         <?php if ($nonGstModeActive): ?>
                                             <option value="Non GST" selected>Non GST</option>
                                         <?php else: ?>
@@ -1100,8 +1111,9 @@ $defaultBillNo = previewNextBillingNumber($conn, $businessId, $branchId, $defaul
                         <div class="bill-head">
                             <div class="section-title">Bill Items</div>
                             <div class="d-flex align-items-center gap-2">
-                                
-                                <button type="button" class="btn-theme btn-sm" id="addItem"><i class="fa-solid fa-plus me-1"></i>Add Item</button>
+
+                                <button type="button" class="btn-theme btn-sm" id="addItem"><i
+                                        class="fa-solid fa-plus me-1"></i>Add Item</button>
                             </div>
                         </div>
                         <div class="table-responsive">
@@ -1193,6 +1205,10 @@ $defaultBillNo = previewNextBillingNumber($conn, $businessId, $branchId, $defaul
                                 readonly>
                             <div class="summary-row"><span>Subtotal</span><strong>₹<span
                                         id="sumSubtotal">0.00</span></strong></div>
+                            <div class="summary-row"><span>Wastage Amount</span><strong>₹<span
+                                        id="sumWastage">0.00</span></strong></div>
+                            <div class="summary-row"><span>Making Charges</span><strong>₹<span
+                                        id="sumMaking">0.00</span></strong></div>
                             <div class="summary-row"><span>Discount</span><strong>₹<span
                                         id="sumDiscount">0.00</span></strong></div>
                             <div class="summary-row"><span>Taxable</span><strong>₹<span
@@ -1209,7 +1225,9 @@ $defaultBillNo = previewNextBillingNumber($conn, $businessId, $branchId, $defaul
                                         id="sumGrand">0.00</span></strong></div>
                             <div class="summary-row"><span>Balance</span><strong>₹<span
                                         id="sumBalance">0.00</span></strong></div><button
-                                class="btn btn-theme w-100 mt-3" id="saveBtn"><i class="fa-solid fa-floppy-disk me-2"></i><span id="saveButtonText">Save Bill</span></button>
+                                class="btn btn-theme w-100 mt-3" id="saveBtn"><i
+                                    class="fa-solid fa-floppy-disk me-2"></i><span id="saveButtonText">Save
+                                    Bill</span></button>
                         </div>
                     </div>
                 </div>
@@ -1256,7 +1274,8 @@ $defaultBillNo = previewNextBillingNumber($conn, $businessId, $branchId, $defaul
                 <div class="modal-header">
                     <div>
                         <h5 class="modal-title">Claim Saved Gold Grams</h5>
-                        <div class="small text-muted">Enter the grams to claim. Partial claims keep the remaining grams available for future bills.</div>
+                        <div class="small text-muted">Enter the grams to claim. Partial claims keep the remaining grams
+                            available for future bills.</div>
                     </div><button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                 </div>
                 <div class="modal-body">
@@ -1342,7 +1361,7 @@ $defaultBillNo = previewNextBillingNumber($conn, $businessId, $branchId, $defaul
                     fd.append('document_date', invoiceDateInput.value || new Date().toISOString().slice(0, 10));
                     const response = await fetch('api/billing-save.php', {
                         method: 'POST', body: fd, credentials: 'same-origin',
-                        headers: {'X-Requested-With':'XMLHttpRequest','Accept':'application/json'}
+                        headers: { 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json' }
                     });
                     const result = await response.json();
                     if (!response.ok || !result.success) throw new Error(result.message || 'Unable to load next number.');
@@ -1536,11 +1555,11 @@ $defaultBillNo = previewNextBillingNumber($conn, $businessId, $branchId, $defaul
 
                     row.querySelector('.stock-info').innerHTML =
                         '<div class="product-detail-strip">' +
-                            '<span class="product-detail-pill detail-stock"><i class="fa-solid fa-boxes-stacked"></i>Stock: <b>' + Number(product.stock_qty || 0).toFixed(3) + '</b></span>' +
-                            '<span class="product-detail-pill detail-gross">Gross: <b>' + Number(product.gross_weight || 0).toFixed(3) + ' g</b></span>' +
-                            '<span class="product-detail-pill detail-net">Net: <b>' + Number(product.net_weight || 0).toFixed(3) + ' g</b></span>' +
-                            '<span class="product-detail-pill detail-stock">Type: <b>' + esc(product.product_type || 'Gold') + '</b></span>' +
-                            '<span class="product-detail-pill detail-stock">Tax: <b>' + esc(product.tax_type || (nonGstModeActive ? 'Non-GST' : 'GST')) + '</b></span>' +
+                        '<span class="product-detail-pill detail-stock"><i class="fa-solid fa-boxes-stacked"></i>Stock: <b>' + Number(product.stock_qty || 0).toFixed(3) + '</b></span>' +
+                        '<span class="product-detail-pill detail-gross">Gross: <b>' + Number(product.gross_weight || 0).toFixed(3) + ' g</b></span>' +
+                        '<span class="product-detail-pill detail-net">Net: <b>' + Number(product.net_weight || 0).toFixed(3) + ' g</b></span>' +
+                        '<span class="product-detail-pill detail-stock">Type: <b>' + esc(product.product_type || 'Gold') + '</b></span>' +
+                        '<span class="product-detail-pill detail-stock">Tax: <b>' + esc(product.tax_type || (nonGstModeActive ? 'Non-GST' : 'GST')) + '</b></span>' +
                         '</div>';
                     calc();
                 }
@@ -1624,6 +1643,8 @@ $defaultBillNo = previewNextBillingNumber($conn, $businessId, $branchId, $defaul
 
                 function calc() {
                     let subtotal = 0;
+                    let totalWastage = 0;
+                    let totalMaking = 0;
                     let itemDisc = 0;
                     let taxable = 0;
                     let cgst = 0;
@@ -1645,35 +1666,30 @@ $defaultBillNo = previewNextBillingNumber($conn, $businessId, $branchId, $defaul
                             return;
                         }
 
-                        const netWeight = (Number(product.net_weight) || 0) * qty;
-                        const metal = netWeight > 0 ? netWeight * rate : qty * rate;
-                        const wastage = metal * wastagePercent / 100;
-                        const productType = String(product.product_type || 'Gold').trim().toLowerCase();
-                        const makingType = String(product.making_charge_type || 'Flat').trim().toLowerCase();
-                        let makingAmount = making;
+                        const grossWeight = (Number(product.gross_weight) || 0) * qty;
 
-                        // Product-type making rule:
-                        // Gold   -> entered making is a direct amount.
-                        // Silver -> entered making is per gram: making × bill net weight.
-                        // Others -> follow the configured making charge type.
-                        if (productType === 'silver') {
-                            makingAmount = making * netWeight;
-                        } else if (productType === 'gold') {
-                            makingAmount = making;
-                        } else if (makingType.includes('gram')) {
-                            makingAmount = making * netWeight;
-                        } else if (makingType.includes('percent')) {
-                            makingAmount = metal * making / 100;
-                        }
+                        /*
+                         * Jewellery calculation:
+                         *   Base Amount    = (Rate + Making Rate) × Gross Weight
+                         *   Metal Amount   = Rate × Gross Weight
+                         *   Making Amount  = Making Rate × Gross Weight
+                         *   Wastage Amount = Base Amount × Wastage %
+                         */
+                        const metal = grossWeight > 0 ? grossWeight * rate : qty * rate;
+                        const makingAmount = grossWeight > 0 ? grossWeight * making : qty * making;
+                        const baseAmount = metal + makingAmount;
+                        const wastage = baseAmount * wastagePercent / 100;
 
                         const effectiveGstPercent = (nonGstModeActive || !gstEnabled) ? 0 : gstPercent;
-                        const rowSubtotal = metal + makingAmount + wastage + stone + other;
+                        const rowSubtotal = baseAmount + wastage + stone + other;
                         const rowTaxable = Math.max(0, rowSubtotal - discount);
                         const tax = rowTaxable * effectiveGstPercent / 100;
                         const total = rowTaxable + tax;
 
                         row.querySelector('.line-total').value = money(total);
                         subtotal += rowSubtotal;
+                        totalWastage += wastage;
+                        totalMaking += makingAmount;
                         itemDisc += discount;
                         taxable += rowTaxable;
                         cgst += tax / 2;
@@ -1692,6 +1708,8 @@ $defaultBillNo = previewNextBillingNumber($conn, $businessId, $branchId, $defaul
                     const paid = Math.min([...pays.querySelectorAll('.pay-amount')].reduce((a, x) => a + (Number(x.value) || 0), 0), grand);
 
                     document.getElementById('sumSubtotal').textContent = money(subtotal);
+                    document.getElementById('sumWastage').textContent = money(totalWastage);
+                    document.getElementById('sumMaking').textContent = money(totalMaking);
                     document.getElementById('sumDiscount').textContent = money(itemDisc + overall);
                     document.getElementById('sumTaxable').textContent = money(taxable);
                     document.getElementById('sumCgst').textContent = money(cgst);
@@ -1934,8 +1952,8 @@ $defaultBillNo = previewNextBillingNumber($conn, $businessId, $branchId, $defaul
                         const changedCalculationField = event && event.target &&
                             event.target.closest('.adjustment-card') === card &&
                             (event.target.classList.contains('ex-gross') ||
-                             event.target.classList.contains('ex-waste') ||
-                             event.target.classList.contains('ex-rate'));
+                                event.target.classList.contains('ex-waste') ||
+                                event.target.classList.contains('ex-rate'));
 
                         if (editedValueInput === valueInput) {
                             value = Math.max(0, Number(valueInput.value) || 0);
@@ -1974,7 +1992,7 @@ $defaultBillNo = previewNextBillingNumber($conn, $businessId, $branchId, $defaul
                             method: 'POST',
                             body: fd,
                             credentials: 'same-origin',
-                            headers: {'X-Requested-With':'XMLHttpRequest','Accept':'application/json'}
+                            headers: { 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json' }
                         });
                         const result = await response.json();
                         if (!response.ok || !result.success) {
@@ -2000,7 +2018,7 @@ $defaultBillNo = previewNextBillingNumber($conn, $businessId, $branchId, $defaul
 
                 if (billTypeSelect) {
                     billTypeSelect.addEventListener('change', () => {
-                            });
+                    });
                 }
 
                 document.getElementById('addItem').addEventListener('click', () => addItem());
