@@ -197,14 +197,34 @@ $drawHead=function()use($pdf,$heads,$ws,$P,$D){$pdf->SetFillColor(...$P);$pdf->S
 $drawHead();$pdf->SetFont('Arial','',7.2);$pdf->SetDrawColor(...$B);
 foreach($items as $n=>$i){
     if($pdf->GetY()>238){$pdf->AddPage();$pdf->SetY(14);$drawHead();}
-    $gross=(float)($i['gross_weight']??0);$stone=(float)($i['stone_weight']??$i['less_weight']??0);$net=(float)($i['net_weight']??max(0,$gross-$stone));$rate=(float)($i['metal_rate']??$i['rate_per_gram']??0);$metal=(float)($i['metal_value']??$net*$rate);$making=(float)($i['making_charge']??0);$other=(float)($i['other_charge']??$i['other_charges']??0);$taxable=(float)($i['taxable_amount']??$metal+$making+$other);$hsn=trim((string)($i['hsn_code']??$i['product_hsn']??'').' / '.(string)($i['purity']??''),' /');
+    $gross=(float)($i['gross_weight']??0);
+    $stone=(float)($i['stone_weight']??$i['less_weight']??0);
+    $net=(float)($i['net_weight']??max(0,$gross-$stone));
+    $rate=(float)($i['metal_rate']??$i['rate_per_gram']??0);
+    $metal=(float)($i['metal_value']??($gross>0?$gross*$rate:$net*$rate));
+    $making=(float)($i['making_charge']??0);
+    $wastageAmount=(float)($i['wastage_amount']??0);
+    $stoneAmount=(float)($i['stone_amount']??0);
+    $other=(float)($i['other_charge']??$i['other_charges']??0);
+    $discount=(float)($i['discount_amount']??0);
+
+    /*
+     * Saved billing formula:
+     * Taxable = Metal + Making + Wastage + Stone + Other - Item Discount
+     * Example:
+     * 348,750 + 50 + 6,976 = 355,776
+     */
+    $taxable=(float)($i['taxable_amount']
+        ?? max(0,$metal+$making+$wastageAmount+$stoneAmount+$other-$discount));
+
+    $hsn=trim((string)($i['hsn_code']??$i['product_hsn']??'').' / '.(string)($i['purity']??''),' /');
     $vals=[$n+1,$i['item_name']??'-',$hsn?:'-',number_format($gross,3),number_format($stone,3),number_format($net,3),number_format($rate,2),number_format($metal,2),number_format($making,2),number_format($other,2),number_format($taxable,2)];
     foreach($vals as $c=>$v)$pdf->Cell($ws[$c],9,txt($v),1,0,$c===1?'L':($c<3?'C':'R'));
     $pdf->Ln();
 }
 $pdf->Ln(3);
 
-if($ex){$pdf->need(14+count($ex)*7);$pdf->SetFillColor(...$GS);$pdf->SetTextColor(...$P);$pdf->SetFont('Arial','B',8.5);$pdf->Cell($W,7,txt('EXCHANGE DETAILS'),1,1,'L',true);$pdf->SetTextColor(36);$pdf->SetFont('Arial','',8);foreach($ex as $x){$line=($x['item_name']??'Exchange Item').' | '.number_format((float)$x['eligible_weight'],3).' g x Rs. '.number_format((float)$x['rate_per_gram'],2).' = Rs. '.number_format((float)$x['exchange_value'],2);$pdf->MultiCell($W,6,txt($line),1,'L');}$pdf->Ln(2);}
+if($ex){$pdf->need(14+count($ex)*7);$pdf->SetFillColor(...$GS);$pdf->SetTextColor(...$P);$pdf->SetFont('Arial','B',8.5);$pdf->Cell($W,7,txt('EXCHANGE DETAILS'),1,1,'L',true);$pdf->SetTextColor(36);$pdf->SetFont('Arial','',8);foreach($ex as $x){$line=($x['item_name']??'Exchange Item').' | '.number_format((float)$x['eligible_weight'],3).' g = Rs. '.number_format((float)$x['exchange_value'],2);$pdf->MultiCell($W,6,txt($line),1,'L');}$pdf->Ln(2);}
 if($claims){$pdf->need(14+count($claims)*7);$pdf->SetFillColor(...$GS);$pdf->SetTextColor(...$P);$pdf->SetFont('Arial','B',8.5);$pdf->Cell($W,7,txt('GOLD GRAM CLAIMS'),1,1,'L',true);$pdf->SetTextColor(36);$pdf->SetFont('Arial','',8);foreach($claims as $c){$line=($c['group_name']?:'Chit').' / Ticket '.($c['ticket_no']?:'-').' | '.number_format((float)$c['claim_grams'],6).' g x Rs. '.number_format((float)$c['rate_per_gram'],2).' = Rs. '.number_format((float)$c['claim_amount'],2);$pdf->MultiCell($W,6,txt($line),1,'L');}$pdf->Ln(2);}
 
 $pdf->need(68);$summaryY=$pdf->GetY();$notesW=112;

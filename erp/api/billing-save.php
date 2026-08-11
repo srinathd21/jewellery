@@ -44,6 +44,97 @@ function columnExists(mysqli $c, string $table, string $column): bool
     return $r && $r->num_rows > 0;
 }
 
+
+
+function billingAuditLog(
+    mysqli $c,
+    int $businessId,
+    int $branchId,
+    int $userId,
+    string $moduleCode,
+    string $actionType,
+    string $referenceTable,
+    int $referenceId,
+    string $description,
+    ?array $oldValues = null,
+    ?array $newValues = null
+): void {
+    if (!tableExists($c, 'audit_logs')) {
+        throw new RuntimeException('audit_logs table is not available.');
+    }
+
+    $oldJson = $oldValues === null
+        ? null
+        : json_encode($oldValues, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+    $newJson = $newValues === null
+        ? null
+        : json_encode($newValues, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+    if ($oldJson === false) {
+        $oldJson = null;
+    }
+
+    if ($newJson === false) {
+        $newJson = null;
+    }
+
+    $ipAddress = trim((string)($_SERVER['REMOTE_ADDR'] ?? ''));
+    $userAgent = trim((string)($_SERVER['HTTP_USER_AGENT'] ?? ''));
+
+    $stmt = $c->prepare(
+        "INSERT INTO audit_logs
+            (
+                business_id,
+                branch_id,
+                user_id,
+                module_code,
+                action_type,
+                reference_table,
+                reference_id,
+                description,
+                old_values_json,
+                new_values_json,
+                ip_address,
+                user_agent
+            )
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
+    );
+
+    if (!$stmt) {
+        throw new RuntimeException(
+            'Unable to prepare audit_logs insert: ' . $c->error
+        );
+    }
+
+    $stmt->bind_param(
+        'iiisssisssss',
+        $businessId,
+        $branchId,
+        $userId,
+        $moduleCode,
+        $actionType,
+        $referenceTable,
+        $referenceId,
+        $description,
+        $oldJson,
+        $newJson,
+        $ipAddress,
+        $userAgent
+    );
+
+    if (!$stmt->execute()) {
+        $error = $stmt->error;
+        $stmt->close();
+        throw new RuntimeException(
+            'Unable to save audit log: ' . $error
+        );
+    }
+
+    $stmt->close();
+}
+
+
 function ensureCustomerPaymentLedgerTables(mysqli $c): void
 {
     if (!tableExists($c, 'customer_payments')) {
@@ -84,6 +175,7 @@ function ensureCustomerPaymentLedgerTables(mysqli $c): void
         'sale_id' => "INT NULL",
         'payment_method_id' => "INT NULL",
         'payment_no' => "VARCHAR(100) NULL",
+        'receipt_no' => "VARCHAR(100) NULL",
         'payment_date' => "DATETIME NULL",
         'amount' => "DECIMAL(18,2) NOT NULL DEFAULT 0.00",
         'reference_no' => "VARCHAR(255) NULL",
@@ -376,6 +468,27 @@ if ($action === 'create_customer') {
             $cs->execute();
             $cs->close();
         }
+        billingAuditLog(
+            $conn,
+            $businessId,
+            $branchId,
+            $userId,
+            'customers',
+            'Create',
+            'customers',
+            $id,
+            'Created billing customer ' . $name,
+            null,
+            [
+                'customer_code' => $code,
+                'customer_name' => $name,
+                'mobile' => $mobile,
+                'email' => $email,
+                'gstin' => $gstin,
+                'service_type' => 'Billing'
+            ]
+        );
+
         $conn->commit();
         respond(true, 'Customer created successfully.', ['customer' => ['id' => $id, 'customer_code' => $code, 'customer_name' => $name, 'mobile' => $mobile]]);
     } catch (Throwable $e) {
@@ -477,28 +590,21 @@ try {
         $gross = (float) $p['gross_weight'] * $qty;
         $stoneWeight = (float) $p['stone_weight'] * $qty;
         $net = (float) $p['net_weight'] * $qty;
-        $metal = $net > 0 ? $net * $rate : $qty * $rate;
-        $wastageAmount = $metal * $w / 100;
 
-        $productType = strtolower(trim((string)($p['product_type'] ?? 'Gold')));
-        $makingType = strtolower(trim((string)($p['making_charge_type'] ?? 'Flat')));
-        $makingAmount = $making;
+        /*
+         * Jewellery billing rule:
+         *   Metal Amount  = Rate × Gross Weight
+         *   Making Amount = Making Rate × Gross Weight
+         *   Base Value    = (Rate + Making Rate) × Gross Weight
+         *
+         * Wastage remains a separate percentage charge on the metal amount.
+         */
+        $metal = $gross > 0 ? $gross * $rate : $qty * $rate;
+        $makingAmount = $gross > 0 ? $gross * $making : $qty * $making;
+        $baseAmount = $metal + $makingAmount;
+        $wastageAmount = $baseAmount * $w / 100;
 
-        // Product-type making rule:
-        // Gold   -> entered making is a direct amount.
-        // Silver -> entered making is per gram: making × bill net weight.
-        // Others -> follow the configured making charge type.
-        if ($productType === 'silver') {
-            $makingAmount = $making * $net;
-        } elseif ($productType === 'gold') {
-            $makingAmount = $making;
-        } elseif (strpos($makingType, 'gram') !== false) {
-            $makingAmount = $making * $net;
-        } elseif (strpos($makingType, 'percent') !== false) {
-            $makingAmount = $metal * $making / 100;
-        }
-
-        $rowSub = $metal + $wastageAmount + $makingAmount + $stone + $other;
+        $rowSub = $baseAmount + $wastageAmount + $stone + $other;
         $rowTaxable = max(0, $rowSub - $disc);
         $tax = $rowTaxable * $taxPercent / 100;
         $line = $rowTaxable + $tax;
@@ -779,6 +885,37 @@ try {
             $claimStmt->close();
         }
 
+        billingAuditLog(
+            $conn,
+            $businessId,
+            $branchId,
+            $userId,
+            'billing.estimates',
+            'Create',
+            'estimates',
+            $estimateId,
+            'Created estimate ' . $estimateNo,
+            null,
+            [
+                'estimate_no' => $estimateNo,
+                'customer_id' => $customerId,
+                'customer_name' => (string)$customer['customer_name'],
+                'bill_type' => $billType,
+                'subtotal' => round($subtotal, 2),
+                'discount_total' => round($discountTotal, 2),
+                'taxable_amount' => round($taxable, 2),
+                'cgst_amount' => round($cgst, 2),
+                'sgst_amount' => round($sgst, 2),
+                'exchange_amount' => round($exchangeTotal, 2),
+                'chit_claim_amount' => round($claimTotal, 2),
+                'net_estimate_amount' => round($netPayable, 2),
+                'proposed_paid_amount' => round($paid, 2),
+                'proposed_balance_amount' => round($balance, 2),
+                'item_count' => count($items),
+                'payment_count' => count($payments)
+            ]
+        );
+
         $conn->commit();
         respond(true, 'Estimate ' . $estimateNo . ' created successfully.', [
             'document_type' => 'Estimate',
@@ -945,54 +1082,79 @@ try {
             );
         }
 
-        if (columnExists($conn, 'customer_payments', 'payment_method_id')) {
-            $customerPaymentStmt = prepareOrFail(
-                $conn,
-                'INSERT INTO customer_payments
-                    (business_id,branch_id,customer_id,sale_id,payment_method_id,
-                     payment_no,payment_date,amount,reference_no,remarks,created_by)
-                 VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-                'Unable to prepare customer payment ledger insert'
-            );
+        $hasLedgerMethodColumn = columnExists($conn, 'customer_payments', 'payment_method_id');
+        $hasLedgerReceiptColumn = columnExists($conn, 'customer_payments', 'receipt_no');
 
-            $customerPaymentStmt->bind_param(
-                'iiiiissdssi',
-                $businessId,
-                $branchId,
-                $customerId,
-                $saleId,
-                $ledgerPrimaryMethodId,
-                $temporaryPaymentNo,
-                $paymentDateTime,
-                $receivedAmount,
-                $ledgerReference,
-                $notes,
-                $userId
-            );
-        } else {
-            $customerPaymentStmt = prepareOrFail(
-                $conn,
-                'INSERT INTO customer_payments
-                    (business_id,branch_id,customer_id,sale_id,payment_no,payment_date,
-                     amount,reference_no,remarks,created_by)
-                 VALUES(?,?,?,?,?,?,?,?,?,?)',
-                'Unable to prepare customer payment ledger insert'
-            );
+        /*
+         * Legacy installations may have UNIQUE(business_id, receipt_no).
+         * Never allow receipt_no to fall back to an empty/default value.
+         * Use the same unique temporary number during INSERT and replace it
+         * with the final CPY number after the auto-increment id is known.
+         */
+        $temporaryReceiptNo = $temporaryPaymentNo;
 
-            $customerPaymentStmt->bind_param(
-                'iiiissdssi',
-                $businessId,
-                $branchId,
-                $customerId,
-                $saleId,
-                $temporaryPaymentNo,
-                $paymentDateTime,
-                $receivedAmount,
-                $ledgerReference,
-                $notes,
-                $userId
-            );
+        $ledgerColumns = [
+            'business_id',
+            'branch_id',
+            'customer_id',
+            'sale_id'
+        ];
+        $ledgerTypes = 'iiii';
+        $ledgerValues = [
+            $businessId,
+            $branchId,
+            $customerId,
+            $saleId
+        ];
+
+        if ($hasLedgerMethodColumn) {
+            $ledgerColumns[] = 'payment_method_id';
+            $ledgerTypes .= 'i';
+            $ledgerValues[] = $ledgerPrimaryMethodId;
         }
+
+        $ledgerColumns[] = 'payment_no';
+        $ledgerTypes .= 's';
+        $ledgerValues[] = $temporaryPaymentNo;
+
+        if ($hasLedgerReceiptColumn) {
+            $ledgerColumns[] = 'receipt_no';
+            $ledgerTypes .= 's';
+            $ledgerValues[] = $temporaryReceiptNo;
+        }
+
+        $ledgerColumns[] = 'payment_date';
+        $ledgerTypes .= 's';
+        $ledgerValues[] = $paymentDateTime;
+
+        $ledgerColumns[] = 'amount';
+        $ledgerTypes .= 'd';
+        $ledgerValues[] = $receivedAmount;
+
+        $ledgerColumns[] = 'reference_no';
+        $ledgerTypes .= 's';
+        $ledgerValues[] = $ledgerReference;
+
+        $ledgerColumns[] = 'remarks';
+        $ledgerTypes .= 's';
+        $ledgerValues[] = $notes;
+
+        $ledgerColumns[] = 'created_by';
+        $ledgerTypes .= 'i';
+        $ledgerValues[] = $userId;
+
+        $ledgerPlaceholders = implode(',', array_fill(0, count($ledgerColumns), '?'));
+        $customerPaymentStmt = prepareOrFail(
+            $conn,
+            'INSERT INTO customer_payments (' . implode(',', $ledgerColumns) . ') VALUES (' . $ledgerPlaceholders . ')',
+            'Unable to prepare customer payment ledger insert'
+        );
+
+        if (strlen($ledgerTypes) !== count($ledgerValues)) {
+            throw new RuntimeException('Customer payment ledger bind definition mismatch.');
+        }
+
+        bindDynamic($customerPaymentStmt, $ledgerTypes, $ledgerValues);
         if (!$customerPaymentStmt->execute()) {
             throw new RuntimeException(
                 'Unable to save customer payment ledger: ' . $customerPaymentStmt->error
@@ -1003,12 +1165,21 @@ try {
 
         $customerPaymentNo = 'CPY/' . date('Ym', strtotime($invoiceDate)) . '/' .
             str_pad((string)$customerPaymentId, 6, '0', STR_PAD_LEFT);
-        $paymentNoStmt = prepareOrFail(
-            $conn,
-            'UPDATE customer_payments SET payment_no=? WHERE id=?',
-            'Unable to update customer payment number'
-        );
-        $paymentNoStmt->bind_param('si', $customerPaymentNo, $customerPaymentId);
+        if (columnExists($conn, 'customer_payments', 'receipt_no')) {
+            $paymentNoStmt = prepareOrFail(
+                $conn,
+                'UPDATE customer_payments SET payment_no=?, receipt_no=? WHERE id=?',
+                'Unable to update customer payment number'
+            );
+            $paymentNoStmt->bind_param('ssi', $customerPaymentNo, $customerPaymentNo, $customerPaymentId);
+        } else {
+            $paymentNoStmt = prepareOrFail(
+                $conn,
+                'UPDATE customer_payments SET payment_no=? WHERE id=?',
+                'Unable to update customer payment number'
+            );
+            $paymentNoStmt->bind_param('si', $customerPaymentNo, $customerPaymentId);
+        }
         if (!$paymentNoStmt->execute()) {
             throw new RuntimeException('Unable to update customer payment number.');
         }
@@ -1098,6 +1269,46 @@ try {
 
         $cc->close();
     }
+    billingAuditLog(
+        $conn,
+        $businessId,
+        $branchId,
+        $userId,
+        'billing.sales',
+        'Create',
+        'sales',
+        $saleId,
+        'Created bill ' . $invoiceNo,
+        null,
+        [
+            'invoice_no' => $invoiceNo,
+            'invoice_date' => $invoiceDate,
+            'invoice_time' => $invoiceTime,
+            'customer_id' => $customerId,
+            'customer_name' => $customerName,
+            'customer_mobile' => $customerMobile,
+            'bill_type' => $billType,
+            'subtotal' => round($subtotal, 2),
+            'discount_amount' => round($discountTotal, 2),
+            'taxable_amount' => round($taxable, 2),
+            'cgst_amount' => round($cgst, 2),
+            'sgst_amount' => round($sgst, 2),
+            'round_off' => round($round, 2),
+            'grand_total' => round($storedGrandTotal, 2),
+            'exchange_amount' => round($exchangeTotal, 2),
+            'chit_claim_amount' => round($claimTotal, 2),
+            'net_payable_amount' => round($netPayable, 2),
+            'received_amount' => round($paid, 2),
+            'credit_amount' => round($creditAmount, 2),
+            'balance_amount' => round($balance, 2),
+            'payment_status' => $paymentStatus,
+            'item_count' => count($items),
+            'payment_count' => count($payments),
+            'exchange_item_count' => count($validatedExchange),
+            'chit_claim_count' => count($validatedClaims)
+        ]
+    );
+
     $conn->commit();
     respond(true, 'Bill ' . $number['document_no'] . ' created successfully.', [
         'document_type' => $documentType,
