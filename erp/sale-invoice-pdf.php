@@ -318,7 +318,24 @@ $gst=$s['branch_gstin']?:$s['business_gstin'];
 $pdf->SetXY(34,8);$pdf->SetTextColor(...$P);$pdf->SetFont('Arial','B',16);$pdf->Cell(116,7,txt(strtoupper($name)),0,1,'C');
 $pdf->SetX(34);$pdf->SetTextColor(...$G);$pdf->SetFont('Arial','B',7);$pdf->Cell(116,4,txt('GOLD - SILVER - DIAMOND - PRECIOUS JEWELLERY'),0,1,'C');
 $pdf->SetX(34);$pdf->SetTextColor(68);$pdf->SetFont('Arial','',6.5);if($address!=='')$pdf->MultiCell(116,3.4,txt($address),0,'C');$pdf->SetX(34);if($contact!=='')$pdf->MultiCell(116,3.4,txt($contact),0,'C');$pdf->SetX(34);if(!empty($set['show_gstin'])&&$gst)$pdf->Cell(116,3.4,txt('GSTIN: '.$gst),0,1,'C');
-$pdf->SetXY(153,8);$pdf->SetTextColor(...$P);$pdf->SetFont('Arial','B',11);$pdf->Cell(49,7,txt($set['header_text']??'TAX INVOICE'),0,1,'R');$pdf->SetX(153);$pdf->SetFillColor(...$GS);$pdf->SetDrawColor(...$G);$pdf->SetFont('Arial','B',6);$pdf->Cell(49,6,txt('ORIGINAL FOR RECIPIENT'),1,1,'C',true);
+$invoiceStatus=(string)($s['workflow_status']??$s['status']??'');
+$isCancelledInvoice=strcasecmp(trim($invoiceStatus),'Cancelled')===0;
+$pdf->SetXY(153,8);$pdf->SetTextColor(...$P);$pdf->SetFont('Arial','B',11);$pdf->Cell(49,7,txt($set['header_text']??'TAX INVOICE'),0,1,'R');
+$pdf->SetX(153);
+if($isCancelledInvoice){
+    $pdf->SetFillColor(255,235,235);
+    $pdf->SetDrawColor(220,53,69);
+    $pdf->SetTextColor(220,53,69);
+    $pdf->SetFont('Arial','B',8);
+    $pdf->Cell(49,6,txt('CANCELLED'),1,1,'C',true);
+}else{
+    $pdf->SetFillColor(...$GS);
+    $pdf->SetDrawColor(...$G);
+    $pdf->SetTextColor(...$P);
+    $pdf->SetFont('Arial','B',6);
+    $pdf->Cell(49,6,txt('ORIGINAL FOR RECIPIENT'),1,1,'C',true);
+}
+
 $pdf->SetDrawColor(...$P);$pdf->SetLineWidth(.8);$pdf->Line(8,34,202,34);$pdf->SetLineWidth(.2);
 
 $boxY=38;$boxW=97;$boxH=34;$pdf->SetDrawColor(...$B);$pdf->Rect(8,$boxY,$boxW,$boxH);$pdf->Rect(105,$boxY,$boxW,$boxH);$pdf->section(8,$boxY,$boxW,'CUSTOMER DETAILS');$pdf->section(105,$boxY,$boxW,'INVOICE DETAILS');
