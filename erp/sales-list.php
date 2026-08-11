@@ -253,6 +253,9 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
         .action-group{display:inline-flex;align-items:center;gap:4px;flex-wrap:wrap;justify-content:flex-end}
         .pay-action{color:#168449}
         .print-action{color:#1d4ed8}
+        .whatsapp-action{color:#168449}
+        .btn-whatsapp{background:#25D366!important;color:#fff!important;border:0!important}
+        .btn-cancel-preview{background:var(--card-bg)!important;color:var(--text)!important;border:1px solid var(--line)!important}
         body.dark-mode,body[data-theme=dark]{--page-bg:#0f151b;--card-bg:#182129;--text:#f3f6f8;--muted:#9aa7b3;--line:#2c3944}
         @media(max-width:991px){.stat-grid{grid-template-columns:1fr 1fr}.filter-grid{grid-template-columns:1fr 1fr}.filter-grid .search{grid-column:1/-1}}
         @media(max-width:767px){
@@ -360,11 +363,18 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
                     <div class="small text-muted" id="printPreviewInvoice"></div>
                 </div>
                 <div class="print-preview-actions">
+                    <button type="button" class="btn-theme btn-whatsapp" id="whatsappInvoiceButton">
+                        <i class="fa-brands fa-whatsapp"></i>
+                        <span>WhatsApp</span>
+                    </button>
                     <button type="button" class="btn-theme" id="printFrameButton">
                         <i class="fa-solid fa-print"></i>
                         <span>Print</span>
                     </button>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    <button type="button" class="btn-soft btn-cancel-preview" data-bs-dismiss="modal">
+                        <i class="fa-solid fa-xmark"></i>
+                        <span>Cancel</span>
+                    </button>
                 </div>
             </div>
             <div class="modal-body">
@@ -470,7 +480,7 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
                     <td class="text-end">
                         <div class="action-group">
                             <a class="action-btn" href="sales-view.php?id=${row.id}" title="Full details"><i class="fa-regular fa-eye"></i></a>
-                            <button type="button" class="action-btn print-action print-sale" data-id="${row.id}" data-no="${esc(row.invoice_no)}" title="Print invoice"><i class="fa-solid fa-print"></i></button>
+                            <button type="button" class="action-btn print-action print-sale" data-id="${row.id}" data-no="${esc(row.invoice_no)}" data-mobile="${esc(row.customer_mobile || '')}" title="Print / Share invoice"><i class="fa-solid fa-print"></i></button>
                             ${Number(row.balance_amount || 0) > 0 && row.workflow_status !== 'Cancelled' ? `<a class="action-btn pay-action" href="sale-make-payment.php?id=${row.id}" title="Make balance payment"><i class="fa-solid fa-indian-rupee-sign"></i></a>` : ''}
                             ${canCancel && row.workflow_status !== 'Cancelled' ? `<button type="button" class="action-btn cancel-sale" data-id="${row.id}" data-no="${esc(row.invoice_no)}" title="Cancel"><i class="fa-solid fa-ban"></i></button>` : ''}
                         </div>
@@ -528,12 +538,65 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
         }
     }
 
-    function openPrintPreview(id, invoiceNo) {
+    let currentPrintSaleId = '';
+    let currentPrintInvoiceNo = '';
+    let currentPrintMobile = '';
+
+    function normalizeWhatsAppMobile(value) {
+        let digits = String(value || '').replace(/\D/g, '');
+
+        if (digits.length === 10) {
+            digits = '91' + digits;
+        } else if (digits.length === 11 && digits.charAt(0) === '0') {
+            digits = '91' + digits.substring(1);
+        }
+
+        return digits;
+    }
+
+    function buildInvoiceShareUrl(id) {
+        const url = new URL('sale-invoice-pdf.php', window.location.href);
+        url.searchParams.set('sale_id', id);
+        url.searchParams.set('inline', '1');
+        return url.toString();
+    }
+
+    function openPrintPreview(id, invoiceNo, customerMobile) {
         const frame = document.getElementById('printPreviewFrame');
-        document.getElementById('printPreviewInvoice').textContent = invoiceNo || '';
-        frame.src = 'sale-invoice-pdf.php?sale_id=' + encodeURIComponent(id) + '&inline=1';
+
+        currentPrintSaleId = String(id || '');
+        currentPrintInvoiceNo = String(invoiceNo || '');
+        currentPrintMobile = String(customerMobile || '');
+
+        document.getElementById('printPreviewInvoice').textContent = currentPrintInvoiceNo;
+        frame.src = 'sale-invoice-pdf.php?sale_id=' + encodeURIComponent(currentPrintSaleId) + '&inline=1';
+
         bootstrap.Modal.getOrCreateInstance(document.getElementById('printPreviewModal')).show();
     }
+
+    document.getElementById('whatsappInvoiceButton').addEventListener('click', () => {
+        if (!currentPrintSaleId) {
+            toast('error', 'Invoice is not selected.');
+            return;
+        }
+
+        const mobile = normalizeWhatsAppMobile(currentPrintMobile);
+        if (!mobile) {
+            toast('error', 'Customer WhatsApp/mobile number is not available.');
+            return;
+        }
+
+        const invoiceUrl = buildInvoiceShareUrl(currentPrintSaleId);
+        const message =
+            'Invoice: ' + currentPrintInvoiceNo + '\n' +
+            'View Invoice: ' + invoiceUrl;
+
+        const whatsappUrl =
+            'https://wa.me/' + encodeURIComponent(mobile) +
+            '?text=' + encodeURIComponent(message);
+
+        window.open(whatsappUrl, '_blank', 'noopener');
+    });
 
     document.getElementById('printFrameButton').addEventListener('click', () => {
         const frame = document.getElementById('printPreviewFrame');
@@ -574,7 +637,13 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
         const pageButton = e.target.closest('.page-go');
         if (pageButton) loadSales(Number(pageButton.dataset.page));
         const printButton = e.target.closest('.print-sale');
-        if (printButton) openPrintPreview(printButton.dataset.id, printButton.dataset.no);
+        if (printButton) {
+            openPrintPreview(
+                printButton.dataset.id,
+                printButton.dataset.no,
+                printButton.dataset.mobile || ''
+            );
+        }
         const cancelButton = e.target.closest('.cancel-sale');
         if (cancelButton) cancelSale(cancelButton.dataset.id, cancelButton.dataset.no);
     });
