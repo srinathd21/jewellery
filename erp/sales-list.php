@@ -574,28 +574,47 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
         bootstrap.Modal.getOrCreateInstance(document.getElementById('printPreviewModal')).show();
     }
 
-    document.getElementById('whatsappInvoiceButton').addEventListener('click', () => {
+    document.getElementById('whatsappInvoiceButton').addEventListener('click', async () => {
         if (!currentPrintSaleId) {
             toast('error', 'Invoice is not selected.');
             return;
         }
 
-        const mobile = normalizeWhatsAppMobile(currentPrintMobile);
-        if (!mobile) {
-            toast('error', 'Customer WhatsApp/mobile number is not available.');
-            return;
+        const button = document.getElementById('whatsappInvoiceButton');
+        const original = button.innerHTML;
+        button.disabled = true;
+        button.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i><span>Preparing...</span>';
+
+        try {
+            const url = 'sale-invoice-pdf.php?action=share_link&sale_id=' + encodeURIComponent(currentPrintSaleId);
+            const response = await fetch(url, {credentials:'same-origin', headers:{'X-Requested-With':'XMLHttpRequest'}});
+            const raw = await response.text();
+            let result;
+            try {
+                result = JSON.parse(raw);
+            } catch (e) {
+                throw new Error('Unable to create invoice share link.');
+            }
+
+            if (!response.ok || !result.success) {
+                throw new Error(result.message || 'Unable to create invoice share link.');
+            }
+
+            if (!result.whatsapp_url) {
+                throw new Error('Customer WhatsApp/mobile number is not available.');
+            }
+
+            if (result.is_local_url) {
+                toast('error', result.message);
+            }
+
+            window.open(result.whatsapp_url, '_blank', 'noopener');
+        } catch (error) {
+            toast('error', error.message);
+        } finally {
+            button.disabled = false;
+            button.innerHTML = original;
         }
-
-        const invoiceUrl = buildInvoiceShareUrl(currentPrintSaleId);
-        const message =
-            'Invoice: ' + currentPrintInvoiceNo + '\n' +
-            'View Invoice: ' + invoiceUrl;
-
-        const whatsappUrl =
-            'https://wa.me/' + encodeURIComponent(mobile) +
-            '?text=' + encodeURIComponent(message);
-
-        window.open(whatsappUrl, '_blank', 'noopener');
     });
 
     document.getElementById('printFrameButton').addEventListener('click', () => {
@@ -616,8 +635,35 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
             return;
         }
         try {
-            const result = await request({action:'cancel', sale_id:id, cancel_reason:reason.trim()});
-            toast('success', result.message);
+            const form = new FormData();
+            form.append('sale_id', id);
+            form.append('cancel_reason', reason.trim());
+            form.append('csrf_token', csrfToken);
+
+            const response = await fetch('api/sale-cancel.php', {
+                method: 'POST',
+                body: form,
+                credentials: 'same-origin',
+                headers: {'X-Requested-With':'XMLHttpRequest'}
+            });
+
+            const raw = await response.text();
+            let result;
+            try {
+                result = JSON.parse(raw);
+            } catch (parseError) {
+                throw new Error('Sale cancellation API did not return JSON.');
+            }
+
+            if (!response.ok || !result.success) {
+                throw new Error(result.message || 'Unable to cancel sale.');
+            }
+
+            toast(
+                'success',
+                result.message +
+                (result.restocked_items ? ' Restocked items: ' + result.restocked_items + '.' : '')
+            );
             loadSales(currentPage);
         } catch (error) {
             toast('error', error.message);
