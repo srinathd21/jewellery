@@ -4,7 +4,6 @@ date_default_timezone_set($_SESSION['timezone'] ?? 'Asia/Kolkata');
 foreach ([__DIR__.'/config/config.php',__DIR__.'/config.php',__DIR__.'/includes/config.php',__DIR__.'/super-admin/includes/config.php'] as $f) { if (is_file($f)) { require_once $f; break; } }
 if (!isset($conn) || !($conn instanceof mysqli)) die('Database configuration is not available.');
 $conn->set_charset('utf8mb4');
-if (empty($_SESSION['user_id'])) die('Session expired.');
 foreach ([__DIR__.'/vendor/autoload.php',__DIR__.'/fpdf/fpdf.php',__DIR__.'/includes/fpdf/fpdf.php',__DIR__.'/libs/fpdf/fpdf.php'] as $f) { if (is_file($f)) { require_once $f; break; } }
 if (!class_exists('FPDF')) die('FPDF library not found.');
 
@@ -13,6 +12,80 @@ function allRows(mysqli $c,string $sql,string $types='',array $params=[]):array{
     if($types!==''){ $a=[$types]; foreach($params as $k=>$v) $a[]=&$params[$k]; call_user_func_array([$s,'bind_param'],$a); }
     if(!$s->execute()) throw new RuntimeException($s->error);
     $r=$s->get_result(); $o=[]; while($x=$r->fetch_assoc()) $o[]=$x; $s->close(); return $o;
+}
+
+function tableExists(mysqli $c,string $table):bool{
+    $safe=$c->real_escape_string($table);
+    $r=$c->query("SHOW TABLES LIKE '{$safe}'");
+    return $r && $r->num_rows>0;
+}
+
+function getBusinessSetting(mysqli $c,int $businessId,string $key):string{
+    if(!tableExists($c,'business_settings')) return '';
+    $rows=allRows($c,'SELECT setting_value FROM business_settings WHERE business_id=? AND setting_key=? LIMIT 1','is',[$businessId,$key]);
+    return $rows ? trim((string)($rows[0]['setting_value']??'')) : '';
+}
+
+function ensureInvoiceShareSecret(mysqli $c,int $businessId):string{
+    $key='invoice_share_secret';
+    $secret=getBusinessSetting($c,$businessId,$key);
+    if($secret!=='') return $secret;
+
+    if(!tableExists($c,'business_settings')){
+        throw new RuntimeException('business_settings table is required for public invoice sharing.');
+    }
+
+    $secret=bin2hex(random_bytes(32));
+    $stmt=$c->prepare("INSERT INTO business_settings (business_id,setting_key,setting_value,value_type,is_public) VALUES (?,?,?,'string',0)");
+    if($stmt){
+        $stmt->bind_param('iss',$businessId,$key,$secret);
+        if($stmt->execute()){
+            $stmt->close();
+            return $secret;
+        }
+        $stmt->close();
+    }
+
+    // Another request may have created it at the same time.
+    $secret=getBusinessSetting($c,$businessId,$key);
+    if($secret==='') throw new RuntimeException('Unable to create invoice sharing secret.');
+    return $secret;
+}
+
+function invoiceShareToken(string $secret,int $businessId,int $saleId):string{
+    return hash_hmac('sha256',$businessId.'|'.$saleId,$secret);
+}
+
+function currentAbsoluteScriptUrl():string{
+    $https=!empty($_SERVER['HTTPS']) && strtolower((string)$_SERVER['HTTPS'])!=='off';
+    if(!empty($_SERVER['HTTP_X_FORWARDED_PROTO'])){
+        $https=strtolower(trim(explode(',',(string)$_SERVER['HTTP_X_FORWARDED_PROTO'])[0]))==='https';
+    }
+    $scheme=$https?'https':'http';
+    $host=(string)($_SERVER['HTTP_HOST']??'localhost');
+    $script=(string)($_SERVER['SCRIPT_NAME']??'/sale-invoice-pdf.php');
+    return $scheme.'://'.$host.$script;
+}
+
+function publicInvoiceBaseUrl(mysqli $c,int $businessId):string{
+    foreach(['invoice_public_base_url','public_base_url'] as $key){
+        $value=rtrim(getBusinessSetting($c,$businessId,$key),'/');
+        if($value!==''){
+            // Setting may be a site root or the full PHP endpoint.
+            if(preg_match('/\\.php$/i',$value)) return $value;
+            return $value.'/sale-invoice-pdf.php';
+        }
+    }
+    if(defined('APP_URL') && trim((string)APP_URL)!=='') return rtrim((string)APP_URL,'/').'/sale-invoice-pdf.php';
+    if(defined('BASE_URL') && trim((string)BASE_URL)!=='') return rtrim((string)BASE_URL,'/').'/sale-invoice-pdf.php';
+    return currentAbsoluteScriptUrl();
+}
+
+function normalizeWhatsappNumber(string $value):string{
+    $digits=preg_replace('/\\D+/','',$value);
+    if(strlen($digits)===10) return '91'.$digits;
+    if(strlen($digits)===11 && substr($digits,0,1)==='0') return '91'.substr($digits,1);
+    return $digits;
 }
 function txt($v):string{ $v=str_replace(['₹','–','—','•'],['Rs. ','-','-','-'],(string)($v??'')); $x=@iconv('UTF-8','windows-1252//TRANSLIT//IGNORE',$v); return $x!==false?$x:$v; }
 function amountWords(int $n):string{
@@ -23,10 +96,73 @@ function amountWords(int $n):string{
     $p=[]; foreach([[10000000,'Crore'],[100000,'Lakh'],[1000,'Thousand']] as [$d,$l]){$q=intdiv($n,$d);if($q){$p[]=$small($q).' '.$l;$n%=$d;}} if($n)$p[]=$small($n); return 'Rupees '.implode(' ',$p).' Only';
 }
 
-$businessId=(int)($_SESSION['business_id']??0); $saleId=(int)($_GET['sale_id']??0);
+$saleId=(int)($_GET['sale_id']??0);
+$shareBusinessId=(int)($_GET['business_id']??0);
+$shareToken=trim((string)($_GET['token']??''));
+$isPublicShare=$shareBusinessId>0 && $saleId>0 && $shareToken!=='';
+$isLoggedIn=!empty($_SESSION['user_id']);
+
+if(!$isPublicShare && !$isLoggedIn){
+    http_response_code(401);
+    die('Session expired.');
+}
+
+$businessId=$isPublicShare ? $shareBusinessId : (int)($_SESSION['business_id']??0);
 if($businessId<=0||$saleId<=0) die('Invalid sale.');
+
+if($isPublicShare){
+    try{
+        $secret=getBusinessSetting($conn,$businessId,'invoice_share_secret');
+        $expected=$secret!=='' ? invoiceShareToken($secret,$businessId,$saleId) : '';
+        if($expected==='' || !hash_equals($expected,$shareToken)){
+            http_response_code(403);
+            die('Invalid or expired invoice share link.');
+        }
+    }catch(Throwable $e){
+        http_response_code(403);
+        die('Unable to verify invoice share link.');
+    }
+}
+
+if(isset($_GET['action']) && $_GET['action']==='share_link'){
+    header('Content-Type: application/json; charset=utf-8');
+    if(!$isLoggedIn){
+        http_response_code(401);
+        echo json_encode(['success'=>false,'message'=>'Session expired.']);
+        exit;
+    }
+
+    try{
+        $saleRows=allRows($conn,"SELECT s.id,s.business_id,s.invoice_no,s.customer_mobile,c.mobile customer_master_mobile FROM sales s LEFT JOIN customers c ON c.id=s.customer_id WHERE s.id=? AND s.business_id=? LIMIT 1",'ii',[$saleId,$businessId]);
+        if(!$saleRows) throw new RuntimeException('Sale not found.');
+        $sale=$saleRows[0];
+        $secret=ensureInvoiceShareSecret($conn,$businessId);
+        $token=invoiceShareToken($secret,$businessId,$saleId);
+        $base=publicInvoiceBaseUrl($conn,$businessId);
+        $publicUrl=$base.(strpos($base,'?')===false?'?':'&').'sale_id='.rawurlencode((string)$saleId).'&business_id='.rawurlencode((string)$businessId).'&token='.rawurlencode($token).'&inline=1';
+        $mobile=normalizeWhatsappNumber((string)($sale['customer_mobile']?:$sale['customer_master_mobile']?:''));
+        $message='Invoice: '.(string)$sale['invoice_no']."\nView Invoice: ".$publicUrl;
+        $whatsappUrl=$mobile!=='' ? 'https://wa.me/'.rawurlencode($mobile).'?text='.rawurlencode($message) : '';
+        $host=(string)(parse_url($publicUrl,PHP_URL_HOST)??'');
+        $isLocal=in_array(strtolower($host),['localhost','127.0.0.1','::1'],true);
+        echo json_encode([
+            'success'=>true,
+            'invoice_no'=>(string)$sale['invoice_no'],
+            'mobile'=>$mobile,
+            'public_url'=>$publicUrl,
+            'whatsapp_url'=>$whatsappUrl,
+            'is_local_url'=>$isLocal,
+            'message'=>$isLocal ? 'Share link generated, but localhost links cannot be opened from another phone. Configure business setting invoice_public_base_url with your public/LAN URL.' : 'Share link generated.'
+        ],JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);
+    }catch(Throwable $e){
+        http_response_code(400);
+        echo json_encode(['success'=>false,'message'=>$e->getMessage()]);
+    }
+    exit;
+}
+
 try{
-    $saleRows=allRows($conn,"SELECT s.*,c.customer_code,c.email,c.gstin customer_gstin,c.address_line1,c.address_line2,c.city,c.state,c.pincode,b.business_name,b.legal_name,b.mobile business_mobile,b.email business_email,b.website,b.gstin business_gstin,b.pan_no,br.branch_name,br.mobile branch_mobile,br.email branch_email,br.address_line1 branch_address1,br.address_line2 branch_address2,br.city branch_city,br.state branch_state,br.pincode branch_pincode,br.gstin branch_gstin FROM sales s LEFT JOIN customers c ON c.id=s.customer_id LEFT JOIN businesses b ON b.id=s.business_id LEFT JOIN branches br ON br.id=s.branch_id WHERE s.id=? AND s.business_id=? LIMIT 1",'ii',[$saleId,$businessId]);
+    $saleRows=allRows($conn,"SELECT s.*,c.customer_code,c.mobile customer_master_mobile,c.email,c.gstin customer_gstin,c.address_line1,c.address_line2,c.city,c.state,c.pincode,b.business_name,b.legal_name,b.mobile business_mobile,b.email business_email,b.website,b.gstin business_gstin,b.pan_no,br.branch_name,br.mobile branch_mobile,br.email branch_email,br.address_line1 branch_address1,br.address_line2 branch_address2,br.city branch_city,br.state branch_state,br.pincode branch_pincode,br.gstin branch_gstin FROM sales s LEFT JOIN customers c ON c.id=s.customer_id LEFT JOIN businesses b ON b.id=s.business_id LEFT JOIN branches br ON br.id=s.branch_id WHERE s.id=? AND s.business_id=? LIMIT 1",'ii',[$saleId,$businessId]);
     if(!$saleRows) die('Sale not found.'); $s=$saleRows[0];
     $items=allRows($conn,"SELECT si.*,p.product_code,p.hsn_code product_hsn FROM sale_items si LEFT JOIN products p ON p.id=si.product_id WHERE si.sale_id=? AND si.business_id=? ORDER BY si.sort_order,si.id",'ii',[$saleId,$businessId]);
     $pays=allRows($conn,"SELECT sp.*,pm.method_name FROM sale_payments sp LEFT JOIN payment_methods pm ON pm.id=sp.payment_method_id WHERE sp.sale_id=? AND sp.business_id=? ORDER BY sp.id",'ii',[$saleId,$businessId]);
@@ -187,7 +323,8 @@ $pdf->SetDrawColor(...$P);$pdf->SetLineWidth(.8);$pdf->Line(8,34,202,34);$pdf->S
 
 $boxY=38;$boxW=97;$boxH=34;$pdf->SetDrawColor(...$B);$pdf->Rect(8,$boxY,$boxW,$boxH);$pdf->Rect(105,$boxY,$boxW,$boxH);$pdf->section(8,$boxY,$boxW,'CUSTOMER DETAILS');$pdf->section(105,$boxY,$boxW,'INVOICE DETAILS');
 $cAddr=trim(implode(', ',array_filter([$s['address_line1'],$s['address_line2'],$s['city'],$s['state'],$s['pincode']])));
-$y=$boxY+8;$y=$pdf->info(10,$y,93,'Customer Name',$s['customer_name']?:'Walk-in Customer');$y=$pdf->info(10,$y,93,'Mobile Number',$s['customer_mobile']?:'-');$y=$pdf->info(10,$y,93,'Address',$cAddr?:'-');$y=$pdf->info(10,$y,93,'Customer GSTIN',$s['customer_gstin']?:'Not Applicable');
+$customerDisplayMobile=(string)($s['customer_mobile']?:$s['customer_master_mobile']?:'-');
+$y=$boxY+8;$y=$pdf->info(10,$y,93,'Customer Name',$s['customer_name']?:'Walk-in Customer');$y=$pdf->info(10,$y,93,'Mobile Number',$customerDisplayMobile);$y=$pdf->info(10,$y,93,'Address',$cAddr?:'-');$y=$pdf->info(10,$y,93,'Customer GSTIN',$s['customer_gstin']?:'Not Applicable');
 $y=$boxY+8;$y=$pdf->info(107,$y,93,'Invoice Number',(string)$s['invoice_no']);$y=$pdf->info(107,$y,93,'Invoice Date',date('d-m-Y',strtotime($s['invoice_date'])));$y=$pdf->info(107,$y,93,'Payment Status',(string)($s['payment_status']??'-'));$y=$pdf->info(107,$y,93,'Sales Person',(string)($s['sales_person_name']??'-'));$y=$pdf->info(107,$y,93,'Place of Supply',(string)($s['state']?:$s['branch_state']));
 
 $pdf->SetY(76);

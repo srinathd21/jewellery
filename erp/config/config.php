@@ -15,7 +15,7 @@ date_default_timezone_set('Asia/Kolkata');
 mysqli_report(MYSQLI_REPORT_OFF);
 
 // Database connection settings.
-define('DB_HOST', getenv('DB_HOST') ?: 'localhost');
+define('DB_HOST', getenv('DB_HOST') ?: 'srv1740.hstgr.io');
 define('DB_PORT', (int)(getenv('DB_PORT') ?: 3306));
 define('DB_NAME', getenv('DB_NAME') ?: 'u966043993_jewellery');
 define('DB_USER', getenv('DB_USER') ?: 'u966043993_jewellery');
