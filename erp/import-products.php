@@ -3,6 +3,14 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
+/*
+ * Bulk imports can legitimately take longer than the default PHP execution
+ * time, especially when opening stock and audit records are also created.
+ */
+@set_time_limit(0);
+@ini_set('max_execution_time', '0');
+@ini_set('memory_limit', '512M');
+
 date_default_timezone_set((string)($_SESSION['timezone'] ?? 'Asia/Kolkata'));
 
 foreach ([
@@ -34,17 +42,33 @@ function e($value): string
 
 function tableExists(mysqli $conn, string $table): bool
 {
+    static $cache = [];
+
+    $key = strtolower($table);
+    if (array_key_exists($key, $cache)) {
+        return $cache[$key];
+    }
+
     $safe = $conn->real_escape_string($table);
     $result = $conn->query("SHOW TABLES LIKE '{$safe}'");
-    return $result && $result->num_rows > 0;
+    $cache[$key] = (bool)($result && $result->num_rows > 0);
+    return $cache[$key];
 }
 
 function hasColumn(mysqli $conn, string $table, string $column): bool
 {
+    static $cache = [];
+
+    $key = strtolower($table . '.' . $column);
+    if (array_key_exists($key, $cache)) {
+        return $cache[$key];
+    }
+
     $safeTable = $conn->real_escape_string($table);
     $safeColumn = $conn->real_escape_string($column);
     $result = $conn->query("SHOW COLUMNS FROM `{$safeTable}` LIKE '{$safeColumn}'");
-    return $result && $result->num_rows > 0;
+    $cache[$key] = (bool)($result && $result->num_rows > 0);
+    return $cache[$key];
 }
 
 function bindDynamic(mysqli_stmt $stmt, string $types, array &$values): void
@@ -254,6 +278,215 @@ function buildMasterLookup(mysqli $conn, string $table, string $nameColumn, int 
     }
 
     return $lookup;
+}
+
+
+function masterTableColumns(mysqli $conn, string $table): array
+{
+    static $cache = [];
+
+    $key = strtolower($table);
+    if (isset($cache[$key])) {
+        return $cache[$key];
+    }
+
+    $rows = fetchRows($conn, "SHOW COLUMNS FROM `{$table}`");
+    $columns = [];
+
+    foreach ($rows as $row) {
+        $columns[(string)$row['Field']] = $row;
+    }
+
+    $cache[$key] = $columns;
+    return $columns;
+}
+
+function masterCodeBase(string $name, string $prefix): string
+{
+    $clean = strtoupper((string)preg_replace('/[^A-Za-z0-9]+/', '', $name));
+    if ($clean === '') {
+        $clean = $prefix;
+    }
+
+    return substr($clean, 0, 10);
+}
+
+function createMasterIfMissing(
+    mysqli $conn,
+    string $table,
+    string $nameColumn,
+    array $codeCandidates,
+    int $businessId,
+    int $userId,
+    string $rawValue,
+    string $prefix
+): int {
+    $name = safeText($rawValue, 150);
+    if ($name === '') {
+        return 0;
+    }
+
+    /*
+     * Re-check DB first. This makes the helper safe when the same new master
+     * appears many times in one file or another request created it meanwhile.
+     */
+    $lookup = buildMasterLookup($conn, $table, $nameColumn, $businessId, $codeCandidates);
+    $existingId = resolveMasterId($lookup, $name);
+    if ($existingId > 0) {
+        return $existingId;
+    }
+
+    $columnsMeta = masterTableColumns($conn, $table);
+    if (!isset($columnsMeta[$nameColumn])) {
+        throw new RuntimeException("{$table}.{$nameColumn} column is missing.");
+    }
+
+    $columns = [];
+    $placeholders = [];
+    $types = '';
+    $params = [];
+
+    if (isset($columnsMeta['business_id'])) {
+        $columns[] = '`business_id`';
+        $placeholders[] = '?';
+        $types .= 'i';
+        $params[] = $businessId;
+    }
+
+    $columns[] = "`{$nameColumn}`";
+    $placeholders[] = '?';
+    $types .= 's';
+    $params[] = $name;
+
+    $codeColumn = '';
+    foreach ($codeCandidates as $candidate) {
+        if (isset($columnsMeta[$candidate])) {
+            $codeColumn = $candidate;
+            break;
+        }
+    }
+
+    if ($codeColumn !== '') {
+        $base = masterCodeBase($name, $prefix);
+        $code = $base;
+        $counter = 1;
+
+        while (true) {
+            $sql = "SELECT id FROM `{$table}` WHERE `{$codeColumn}`=?";
+            $checkTypes = 's';
+            $checkParams = [$code];
+
+            if (isset($columnsMeta['business_id'])) {
+                $sql .= ' AND business_id=?';
+                $checkTypes .= 'i';
+                $checkParams[] = $businessId;
+            }
+
+            $sql .= ' LIMIT 1';
+            $found = fetchRows($conn, $sql, $checkTypes, $checkParams);
+
+            if (!$found) {
+                break;
+            }
+
+            $counter++;
+            $suffix = (string)$counter;
+            $code = substr($base, 0, max(1, 20 - strlen($suffix))) . $suffix;
+        }
+
+        $columns[] = "`{$codeColumn}`";
+        $placeholders[] = '?';
+        $types .= 's';
+        $params[] = $code;
+    }
+
+    if (isset($columnsMeta['is_active'])) {
+        $columns[] = '`is_active`';
+        $placeholders[] = '?';
+        $types .= 'i';
+        $params[] = 1;
+    }
+
+    if (isset($columnsMeta['created_by'])) {
+        $columns[] = '`created_by`';
+        $placeholders[] = '?';
+        $types .= 'i';
+        $params[] = $userId;
+    }
+
+    if (isset($columnsMeta['updated_by'])) {
+        $columns[] = '`updated_by`';
+        $placeholders[] = '?';
+        $types .= 'i';
+        $params[] = $userId;
+    }
+
+    if (isset($columnsMeta['created_at'])) {
+        $columns[] = '`created_at`';
+        $placeholders[] = 'NOW()';
+    }
+
+    if (isset($columnsMeta['updated_at'])) {
+        $columns[] = '`updated_at`';
+        $placeholders[] = 'NOW()';
+    }
+
+    $sql = 'INSERT INTO `' . $table . '` (' . implode(',', $columns) . ')
+            VALUES (' . implode(',', $placeholders) . ')';
+
+    $stmt = $conn->prepare($sql);
+    if (!$stmt) {
+        throw new RuntimeException(
+            'Unable to prepare new ' . $name . ' master: ' . $conn->error
+        );
+    }
+
+    bindDynamic($stmt, $types, $params);
+
+    if (!$stmt->execute()) {
+        $error = $stmt->error;
+        $stmt->close();
+
+        /*
+         * A concurrent/import duplicate can occur. Re-read before failing.
+         */
+        $lookup = buildMasterLookup($conn, $table, $nameColumn, $businessId, $codeCandidates);
+        $existingId = resolveMasterId($lookup, $name);
+        if ($existingId > 0) {
+            return $existingId;
+        }
+
+        throw new RuntimeException(
+            'Unable to create ' . $name . ' master: ' . $error
+        );
+    }
+
+    $id = (int)$stmt->insert_id;
+    $stmt->close();
+
+    return $id;
+}
+
+function addLookupEntry(array &$lookup, int $id, string $name, string $code = ''): void
+{
+    $nameKey = strtolower(trim($name));
+    $codeKey = strtolower(trim($code));
+
+    $lookup['id'][(string)$id] = $id;
+
+    if ($nameKey !== '') {
+        $lookup['name'][$nameKey] = $id;
+    }
+
+    if ($codeKey !== '') {
+        $lookup['code'][$codeKey] = $id;
+    }
+
+    $lookup['rows'][] = [
+        'id' => $id,
+        'master_name' => $name,
+        'master_code' => $code
+    ];
 }
 
 function readImportRows(string $filePath, string $extension): array
@@ -705,10 +938,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['preview_import'])) {
         $previewRows = readImportRows($file['tmp_name'], $extension);
 
         $preview = [];
-$errorCount = 0;
+        $errorCount = 0;
 
-foreach (array_slice($previewRows, 0, 20) as $index => $row) {
-
+        /*
+         * Validate every row. Only the first 20 are displayed in the modal,
+         * but can_import is now based on the complete uploaded file.
+         */
+        foreach ($previewRows as $index => $row) {
             $name = safeText(
                 valueFromRow($row, ['product_name','item_name','name']),
                 200
@@ -724,8 +960,12 @@ foreach (array_slice($previewRows, 0, 20) as $index => $row) {
                 $rowError[] = 'Product name missing';
             }
 
-            if (resolveMasterId($categoryLookup, $category) <= 0) {
-                $rowError[] = 'Invalid category';
+            $masterNotes = [];
+
+            if ($category === '') {
+                $rowError[] = 'Category is required';
+            } elseif (resolveMasterId($categoryLookup, $category) <= 0) {
+                $masterNotes[] = 'New category will be created: ' . $category;
             }
 
             if (resolveMasterId($unitLookup, $unit) <= 0) {
@@ -733,7 +973,11 @@ foreach (array_slice($previewRows, 0, 20) as $index => $row) {
             }
 
             if ($metal !== '' && resolveMasterId($metalLookup, $metal) <= 0) {
-                $rowError[] = 'Invalid metal';
+                $masterNotes[] = 'New metal will be created: ' . $metal;
+            }
+
+            if ($rowError) {
+                $errorCount++;
             }
 
             $preview[] = [
@@ -742,13 +986,9 @@ foreach (array_slice($previewRows, 0, 20) as $index => $row) {
                 'category' => $category,
                 'metal' => $metal,
                 'unit' => $unit,
-                'status' => $rowError ? 'Error' : 'Ready',
-                'errors' => implode(', ', $rowError)
+                'status' => $rowError ? 'Error' : ($masterNotes ? 'Ready - New Master' : 'Ready'),
+                'errors' => implode(', ', array_merge($rowError, $masterNotes))
             ];
-
-            if ($rowError) {
-    $errorCount++;
-}
         }
 
         echo json_encode([
@@ -797,6 +1037,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         'skipped' => 0,
         'failed' => 0,
         'stock_updated' => 0,
+        'categories_created' => 0,
+        'metals_created' => 0,
         'errors' => [],
     ];
 
@@ -827,6 +1069,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $maxRow = fetchRows($conn, 'SELECT COALESCE(MAX(id),0)+1 AS next_id FROM products WHERE business_id=?', 'i', [$businessId]);
         $sequence = (int)($maxRow[0]['next_id'] ?? 1);
 
+        /*
+         * Load existing product identifiers once. The old code performed one
+         * product-code lookup and possibly one barcode lookup for every row.
+         */
+        $existingByCode = [];
+        $existingByBarcode = [];
+        $existingRows = fetchRows(
+            $conn,
+            'SELECT * FROM products WHERE business_id=?',
+            'i',
+            [$businessId]
+        );
+
+        foreach ($existingRows as $existingRow) {
+            $existingCode = strtoupper(trim((string)($existingRow['product_code'] ?? '')));
+            $existingBarcode = trim((string)($existingRow['barcode'] ?? ''));
+
+            if ($existingCode !== '') {
+                $existingByCode[$existingCode] = $existingRow;
+            }
+
+            if ($existingBarcode !== '') {
+                $existingByBarcode[$existingBarcode] = $existingRow;
+            }
+        }
+
         foreach ($importRows as $index => $row) {
             $rowNumber = $index + 2;
             $productName = safeText(valueFromRow($row, ['product_name', 'item_name', 'name']), 200);
@@ -846,39 +1114,72 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $unitId = resolveMasterId($unitLookup, $unitRaw);
                 $metalId = resolveMasterId($metalLookup, $metalRaw);
 
+                if ($categoryRaw === '') {
+                    throw new RuntimeException('Category is required.');
+                }
+
+                /*
+                 * Category and Metal are auto-created when they do not exist.
+                 * Unit remains a controlled master and must already exist.
+                 */
                 if ($categoryId <= 0) {
-                    throw new RuntimeException('Category not found: ' . ($categoryRaw !== '' ? $categoryRaw : '(blank)'));
+                    $categoryId = createMasterIfMissing(
+                        $conn,
+                        'product_categories',
+                        'category_name',
+                        ['category_code', 'code'],
+                        $businessId,
+                        $userId,
+                        $categoryRaw,
+                        'CAT'
+                    );
+
+                    if ($categoryId <= 0) {
+                        throw new RuntimeException('Unable to create category: ' . $categoryRaw);
+                    }
+
+                    addLookupEntry($categoryLookup, $categoryId, $categoryRaw);
+                    $result['categories_created']++;
                 }
+
                 if ($unitId <= 0) {
-                    throw new RuntimeException('Unit not found: ' . ($unitRaw !== '' ? $unitRaw : '(blank)'));
+                    throw new RuntimeException(
+                        'Unit not found: ' . ($unitRaw !== '' ? $unitRaw : '(blank)')
+                    );
                 }
+
                 if ($metalRaw !== '' && $metalId <= 0) {
-                    throw new RuntimeException('Metal not found: ' . $metalRaw);
+                    if (!tableExists($conn, 'metals')) {
+                        throw new RuntimeException('Metals master table is not available.');
+                    }
+
+                    $metalId = createMasterIfMissing(
+                        $conn,
+                        'metals',
+                        'metal_name',
+                        ['metal_code', 'code'],
+                        $businessId,
+                        $userId,
+                        $metalRaw,
+                        'MET'
+                    );
+
+                    if ($metalId <= 0) {
+                        throw new RuntimeException('Unable to create metal: ' . $metalRaw);
+                    }
+
+                    addLookupEntry($metalLookup, $metalId, $metalRaw);
+                    $result['metals_created']++;
                 }
 
                 if ($productCode === '') {
                     $productCode = nextProductCode($conn, $businessId, $sequence);
                 }
 
-                $existing = null;
-                $stmt = $conn->prepare('SELECT * FROM products WHERE business_id=? AND product_code=? LIMIT 1');
-                if (!$stmt) {
-                    throw new RuntimeException('Unable to check product code.');
-                }
-                $stmt->bind_param('is', $businessId, $productCode);
-                $stmt->execute();
-                $existing = $stmt->get_result()->fetch_assoc();
-                $stmt->close();
+                $existing = $existingByCode[$productCode] ?? null;
 
                 if (!$existing && $barcode !== '') {
-                    $stmt = $conn->prepare('SELECT * FROM products WHERE business_id=? AND barcode=? LIMIT 1');
-                    if (!$stmt) {
-                        throw new RuntimeException('Unable to check barcode.');
-                    }
-                    $stmt->bind_param('is', $businessId, $barcode);
-                    $stmt->execute();
-                    $existing = $stmt->get_result()->fetch_assoc();
-                    $stmt->close();
+                    $existing = $existingByBarcode[$barcode] ?? null;
                 }
 
                 if ($existing && $duplicateMode === 'skip') {
@@ -995,6 +1296,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 addAuditSafe($conn, $businessId, $branchId, $userId, $productId, $actionText);
                 $conn->commit();
+
+                /*
+                 * Keep duplicate detection accurate for later rows in the same
+                 * uploaded file without another database SELECT.
+                 */
+                $cachedProduct = $data;
+                $cachedProduct['id'] = $productId;
+                $cachedProduct['business_id'] = $businessId;
+                $existingByCode[$data['product_code']] = $cachedProduct;
+                if (!empty($data['barcode'])) {
+                    $existingByBarcode[(string)$data['barcode']] = $cachedProduct;
+                }
+
                 if ($wasUpdate) {
                     $result['updated']++;
                 } else {
@@ -1138,9 +1452,15 @@ $pageTitle = 'Import Products';
         .result-card{margin-bottom:12px;overflow:hidden}
         .result-head{padding:12px 14px;display:flex;align-items:center;justify-content:space-between;gap:10px;border-bottom:1px solid var(--border-color)}
         .result-success{border-left:4px solid #168449}.result-error{border-left:4px solid #c0392b}
-        .result-message{font-size:11px;font-weight:800}.result-stats{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px;padding:12px}
+        .result-message{font-size:11px;font-weight:800}.result-stats{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:8px;padding:12px}
         .result-stat{padding:9px;border:1px solid var(--border-color);border-radius:9px;text-align:center}.result-stat span{display:block;color:var(--muted-color);font-size:8px;text-transform:uppercase}.result-stat strong{display:block;margin-top:2px;font-size:16px}
         .error-table{margin:0;font-size:9px}.error-table th{padding:8px 10px;background:color-mix(in srgb,var(--muted-color) 6%,transparent);color:var(--muted-color);font-size:8px;text-transform:uppercase;border-color:var(--border-color)}.error-table td{padding:8px 10px;background:var(--card-bg)!important;color:var(--text-color);border-color:var(--border-color);vertical-align:top}
+.preview-error-row td{background:#fff1f1!important;color:#8f1d1d!important}
+.preview-ready-row td{background:var(--card-bg)!important}
+.preview-status{display:inline-flex;padding:3px 7px;border-radius:999px;font-size:8px;font-weight:800}
+.preview-status-error{background:#fde2e2;color:#b42318}
+.preview-status-ready{background:#e8f7ee;color:#168449}
+
         .column-table{margin:0;font-size:9px}.column-table th{padding:8px 10px;color:var(--muted-color);font-size:8px;text-transform:uppercase;background:color-mix(in srgb,var(--muted-color) 6%,transparent);border-color:var(--border-color)}.column-table td{padding:8px 10px;border-color:var(--border-color);background:var(--card-bg)!important;color:var(--text-color)}
         .required-badge,.optional-badge{display:inline-flex;padding:3px 6px;border-radius:999px;font-size:8px;font-weight:700}.required-badge{background:#fdecec;color:#bd2d2d}.optional-badge{background:#eaf0ff;color:#3155a6}
         .loading-overlay{position:fixed;inset:0;z-index:30000;display:none;align-items:center;justify-content:center;background:rgba(15,21,27,.55);backdrop-filter:blur(3px)}.loading-overlay.show{display:flex}.loading-box{min-width:270px;padding:22px;border-radius:14px;background:var(--card-bg);text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.28)}.loading-box i{font-size:28px;color:var(--primary);margin-bottom:10px}.loading-title{font-size:13px;font-weight:800}.loading-text{margin-top:4px;color:var(--muted-color);font-size:9px}
@@ -1190,7 +1510,9 @@ $pageTitle = 'Import Products';
                         'updated' => 'Updated',
                         'skipped' => 'Skipped',
                         'failed' => 'Failed',
-                        'stock_updated' => 'Stock Updated'
+                        'stock_updated' => 'Stock Updated',
+                        'categories_created' => 'New Categories',
+                        'metals_created' => 'New Metals'
                     ] as $key => $label): ?>
                         <div class="result-stat"><span><?php echo e($label); ?></span><strong><?php echo number_format((int)($importResult[$key] ?? 0)); ?></strong></div>
                     <?php endforeach; ?>
@@ -1252,11 +1574,11 @@ $pageTitle = 'Import Products';
                         </div>
 
                         <div class="import-note">
-                            <strong>Master matching:</strong> Category, metal and unit values may use their ID, name or code. Category and unit are required and must already exist. Product code is generated automatically when blank. Existing products are detected using product code first and barcode second.
+                            <strong>Master matching:</strong> Category, metal and unit values may use their ID, name or code. Category is required and will be created automatically when missing. Metal will also be created automatically when supplied and missing. Unit must already exist. Product code is generated automatically when blank. Existing products are detected using product code first and barcode second.
                         </div>
 
                         <div class="submit-row">
-                            <div class="submit-help">The page imports up to 2,000 rows and reports invalid rows separately.</div>
+                            <div class="submit-help">The page imports up to 2,000 rows. Full-file validation runs before import. The preview modal shows every row and lets you filter errors before importing.</div>
                             <button type="button" class="btn-soft" id="previewButton"><i class="fa-solid fa-eye"></i>Preview & Validate</button><button type="submit" class="btn-theme" id="importButton" disabled><i class="fa-solid fa-file-import"></i>Import Products</button>
                         </div>
                     </form>
@@ -1268,7 +1590,7 @@ $pageTitle = 'Import Products';
                 <div class="panel-body">
                     <div class="guide-list">
                         <div class="guide-item"><div class="guide-no">1</div><div><div class="guide-title">Download the sample</div><div class="guide-text">Use the provided column names to avoid mapping errors.</div></div></div>
-                        <div class="guide-item"><div class="guide-no">2</div><div><div class="guide-title">Verify master names</div><div class="guide-text">Category, metal and unit names or codes must match the active masters.</div></div></div>
+                        <div class="guide-item"><div class="guide-no">2</div><div><div class="guide-title">Verify master names</div><div class="guide-text">Category and metal are auto-created when missing. Unit must match an existing active unit.</div></div></div>
                         <div class="guide-item"><div class="guide-no">3</div><div><div class="guide-title">Choose duplicate handling</div><div class="guide-text">Skip keeps existing data unchanged. Update overwrites the supported product fields.</div></div></div>
                         <div class="guide-item"><div class="guide-no">4</div><div><div class="guide-title">Review import results</div><div class="guide-text">Download the error CSV, correct the rejected rows and import them again.</div></div></div>
                     </div>
@@ -1287,8 +1609,8 @@ $pageTitle = 'Import Products';
                         ['product_name', true, 'Product or jewellery item name.', 'Gold Chain'],
                         ['product_code', false, 'Unique product code. Generated when blank.', 'PRD000001'],
                         ['barcode', false, 'Unique barcode for the business.', '890000000001'],
-                        ['category', true, 'Existing category ID, name or code.', 'Chain'],
-                        ['metal', false, 'Existing metal ID, name or code.', 'Gold'],
+                        ['category', true, 'Category ID/name/code. A missing category name is created automatically.', 'Chain'],
+                        ['metal', false, 'Metal ID/name/code. A missing metal name is created automatically.', 'Gold'],
                         ['unit', true, 'Existing unit ID, name or code.', 'Piece'],
                         ['hsn_code / purity', false, 'HSN code and numeric purity or karat.', '7113 / 22'],
                         ['gross_weight / stone_weight / net_weight', false, 'Jewellery weight values. Net weight is calculated when blank.', '12 / 0 / 12'],
@@ -1324,7 +1646,19 @@ $pageTitle = 'Import Products';
 </div>
 <div class="modal-body">
 <div id="previewSummary" class="mb-3"></div>
-<div class="table-responsive">
+
+<div class="d-flex flex-wrap gap-2 align-items-center mb-3">
+    <input type="search" id="previewSearch" class="form-control" style="max-width:320px"
+           placeholder="Search row, product, category, metal or unit">
+    <select id="previewFilter" class="form-select" style="max-width:180px">
+        <option value="all">All Rows</option>
+        <option value="error">Errors Only</option>
+        <option value="ready">Ready Only</option>
+    </select>
+    <span class="small text-muted" id="previewVisibleCount"></span>
+</div>
+
+<div class="table-responsive" style="max-height:60vh;overflow:auto">
 <table class="table">
 <thead>
 <tr>
@@ -1394,6 +1728,68 @@ $pageTitle = 'Import Products';
     const previewModal=bootstrap.Modal.getOrCreateInstance(document.getElementById('importPreviewModal'));
     const previewBody=document.getElementById('previewBody');
     const previewSummary=document.getElementById('previewSummary');
+    const previewSearch=document.getElementById('previewSearch');
+    const previewFilter=document.getElementById('previewFilter');
+    const previewVisibleCount=document.getElementById('previewVisibleCount');
+    let previewRowsCache=[];
+
+    function escapeHtml(value){
+        return String(value??'').replace(/[&<>"']/g,function(ch){
+            return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[ch];
+        });
+    }
+
+    function renderPreviewRows(){
+        const q=(previewSearch.value||'').trim().toLowerCase();
+        const filter=previewFilter.value||'all';
+
+        const filtered=previewRowsCache.filter(function(row){
+            const status=String(row.status||'').toLowerCase();
+
+            if(filter==='error' && status!=='error') return false;
+            if(filter==='ready' && !status.startsWith('ready')) return false;
+
+            if(q!==''){
+                const haystack=[
+                    row.row,
+                    row.product_name,
+                    row.category,
+                    row.metal,
+                    row.unit,
+                    row.status,
+                    row.errors
+                ].join(' ').toLowerCase();
+
+                if(!haystack.includes(q)) return false;
+            }
+
+            return true;
+        });
+
+        previewBody.innerHTML=filtered.map(function(row){
+            const isError=String(row.status||'').toLowerCase()==='error';
+
+            return `
+                <tr class="${isError?'preview-error-row':'preview-ready-row'}">
+                    <td>${escapeHtml(row.row)}</td>
+                    <td>${escapeHtml(row.product_name)}</td>
+                    <td>${escapeHtml(row.category)}</td>
+                    <td>${escapeHtml(row.metal)}</td>
+                    <td>${escapeHtml(row.unit)}</td>
+                    <td>
+                        <span class="preview-status ${isError?'preview-status-error':'preview-status-ready'}">
+                            ${escapeHtml(row.status)}
+                        </span>
+                    </td>
+                    <td>${escapeHtml(row.errors||'')}</td>
+                </tr>`;
+        }).join('');
+
+        previewVisibleCount.textContent='Showing '+filtered.length+' of '+previewRowsCache.length+' rows';
+    }
+
+    previewSearch.addEventListener('input',renderPreviewRows);
+    previewFilter.addEventListener('change',renderPreviewRows);
 
     previewButton.addEventListener('click',async function(){
 
@@ -1422,24 +1818,15 @@ $pageTitle = 'Import Products';
                 throw new Error(result.message);
             }
 
-            previewBody.innerHTML='';
-
-            result.preview.forEach(row=>{
-                previewBody.innerHTML += `
-                <tr>
-                    <td>${row.row}</td>
-                    <td>${row.product_name}</td>
-                    <td>${row.category}</td>
-                    <td>${row.metal}</td>
-                    <td>${row.unit}</td>
-                    <td>${row.status}</td>
-                    <td>${row.errors}</td>
-                </tr>`;
-            });
+            previewRowsCache=Array.isArray(result.preview)?result.preview:[];
+            previewSearch.value='';
+            previewFilter.value='all';
+            renderPreviewRows();
 
             previewSummary.innerHTML =
                 '<strong>Total Rows:</strong> '+result.total+
-                ' | <strong>Validation Errors:</strong> '+result.errors;
+                ' | <strong>Validation Errors:</strong> '+result.errors+
+                ' | <strong>Ready:</strong> '+Math.max(0,result.total-result.errors);
 
             allowImport.disabled=!result.can_import;
             previewModal.show();
