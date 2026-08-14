@@ -4,381 +4,325 @@ if (session_status() === PHP_SESSION_NONE) {
 }
 
 date_default_timezone_set((string)($_SESSION['timezone'] ?? 'Asia/Kolkata'));
+header('Content-Type: application/json; charset=utf-8');
+mysqli_report(MYSQLI_REPORT_OFF);
+ini_set('display_errors', '0');
 
-function respond(bool $success,string $message,array $extra=[],int $status=200): void
+function out($success, $message, array $extra = array(), $status = 200)
 {
-    http_response_code($status);
-    header('Content-Type: application/json; charset=utf-8');
-    echo json_encode(array_merge(['success'=>$success,'message'=>$message],$extra),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
+    http_response_code((int)$status);
+    echo json_encode(array_merge(array('success' => (bool)$success, 'message' => (string)$message), $extra), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     exit;
 }
 
-$root=dirname(__DIR__);
-$configCandidates=[
-    $root.'/config/config.php',
-    $root.'/config.php',
-    $root.'/includes/config.php',
-    $root.'/super-admin/includes/config.php',
-];
-
-$configLoaded=false;
-foreach($configCandidates as $configFile){
-    if(is_file($configFile)){
+foreach (array(
+    dirname(__DIR__) . '/config/config.php',
+    dirname(__DIR__) . '/config.php',
+    dirname(__DIR__) . '/includes/config.php',
+    dirname(__DIR__) . '/super-admin/includes/config.php'
+) as $configFile) {
+    if (is_file($configFile)) {
         require_once $configFile;
-        $configLoaded=true;
         break;
     }
 }
 
-if(!$configLoaded||!isset($conn)||!($conn instanceof mysqli)){
-    respond(false,'Database configuration is not available.',[],500);
+if (!isset($conn) || !($conn instanceof mysqli)) {
+    out(false, 'Database configuration is not available.', array(), 500);
 }
-
-mysqli_report(MYSQLI_REPORT_OFF);
 $conn->set_charset('utf8mb4');
 
-function tableExists(mysqli $conn,string $table): bool
-{
-    $safe=$conn->real_escape_string($table);
-    $result=$conn->query("SHOW TABLES LIKE '{$safe}'");
-    return $result&&$result->num_rows>0;
+if (empty($_SESSION['user_id'])) {
+    out(false, 'Your session has expired. Please log in again.', array(), 401);
 }
 
-function hasColumn(mysqli $conn,string $table,string $column): bool
-{
-    $safeTable=$conn->real_escape_string($table);
-    $safeColumn=$conn->real_escape_string($column);
-    $result=$conn->query("SHOW COLUMNS FROM `{$safeTable}` LIKE '{$safeColumn}'");
-    return $result&&$result->num_rows>0;
+$businessId = (int)($_SESSION['business_id'] ?? 0);
+$branchId = (int)($_SESSION['branch_id'] ?? ($_SESSION['default_branch_id'] ?? 0));
+if ($businessId <= 0) {
+    out(false, 'A valid business must be selected.', array(), 403);
 }
 
-function firstColumn(mysqli $conn,string $table,array $columns): string
+function tableExistsReport(mysqli $conn, $table)
 {
-    foreach($columns as $column){
-        if(hasColumn($conn,$table,$column))return $column;
+    $safe = $conn->real_escape_string((string)$table);
+    $r = $conn->query("SHOW TABLES LIKE '{$safe}'");
+    return $r && $r->num_rows > 0;
+}
+
+function bindDynamicReport(mysqli_stmt $stmt, $types, array &$params)
+{
+    if ($types === '') {
+        return;
     }
-    return '';
+    $bind = array($types);
+    foreach ($params as $k => $v) {
+        $bind[] = &$params[$k];
+    }
+    call_user_func_array(array($stmt, 'bind_param'), $bind);
 }
 
-function bindDynamic(mysqli_stmt $stmt,string $types,array &$params): void
+function validDateReport($value)
 {
-    if(!$params)return;
-    $bind=[$types];
-    foreach($params as $key=>$value)$bind[]=&$params[$key];
-    call_user_func_array([$stmt,'bind_param'],$bind);
+    if ($value === '') {
+        return false;
+    }
+    $d = DateTime::createFromFormat('Y-m-d', $value);
+    return $d && $d->format('Y-m-d') === $value;
 }
 
-function validDate(string $date): bool
+function defaultFromDateReport()
 {
-    $object=DateTime::createFromFormat('Y-m-d',$date);
-    return $object&&$object->format('Y-m-d')===$date;
+    return date('Y-m-01');
 }
 
-if(empty($_SESSION['user_id'])){
-    respond(false,'Your session has expired. Please log in again.',[],401);
+function defaultToDateReport()
+{
+    return date('Y-m-d');
 }
 
-$businessId=(int)($_SESSION['business_id']??0);
-$branchId=(int)($_SESSION['branch_id']??$_SESSION['default_branch_id']??0);
-
-if($businessId<=0){
-    respond(false,'A valid business must be selected.',[],403);
+if (!tableExistsReport($conn, 'sales')) {
+    out(false, 'Required sales table was not found.', array(), 500);
 }
 
-if(!tableExists($conn,'sales')){
-    respond(false,'Required table `sales` was not found.',[],500);
-}
+$action = trim((string)($_GET['action'] ?? 'list'));
 
-$action=strtolower(trim((string)($_GET['action']??'list')));
+if ($action === 'bootstrap') {
+    $customers = array();
+    $stmt = $conn->prepare("SELECT DISTINCT c.id,c.customer_code,c.customer_name
+        FROM customers c
+        INNER JOIN sales s ON s.customer_id=c.id AND s.business_id=c.business_id
+        WHERE c.business_id=?
+          AND COALESCE(s.workflow_status,'Posted') <> 'Cancelled'" . ($branchId > 0 ? " AND s.branch_id=?" : "") . "
+        ORDER BY c.customer_name,c.id");
+    if ($stmt) {
+        if ($branchId > 0) {
+            $stmt->bind_param('ii', $businessId, $branchId);
+        } else {
+            $stmt->bind_param('i', $businessId);
+        }
+        $stmt->execute();
+        $r = $stmt->get_result();
+        while ($row = $r->fetch_assoc()) {
+            $customers[] = $row;
+        }
+        $stmt->close();
+    }
 
-$customerIdColumn=tableExists($conn,'customers')?firstColumn($conn,'customers',['id','customer_id']):'';
-$customerNameColumn=tableExists($conn,'customers')?firstColumn($conn,'customers',['customer_name','name']):'';
-$customerCodeColumn=tableExists($conn,'customers')?firstColumn($conn,'customers',['customer_code','code']):'';
-$customerMobileColumn=tableExists($conn,'customers')?firstColumn($conn,'customers',['mobile','phone']):'';
-
-$paymentMethodIdColumn=tableExists($conn,'payment_methods')?firstColumn($conn,'payment_methods',['payment_method_id','id','method_id']):'';
-$paymentMethodNameColumn=tableExists($conn,'payment_methods')?firstColumn($conn,'payment_methods',['payment_method_name','method_name','name']):'';
-
-if($action==='bootstrap'){
-    $customers=[];
-
-    if($customerIdColumn!==''&&$customerNameColumn!==''){
-        $sql="SELECT `{$customerIdColumn}` AS id,`{$customerNameColumn}` AS customer_name,".
-            ($customerCodeColumn!==''?"`{$customerCodeColumn}`":"''")." AS customer_code
-              FROM customers
-              WHERE business_id=?";
-
-        if(hasColumn($conn,'customers','is_active'))$sql.=" AND is_active=1";
-        elseif(hasColumn($conn,'customers','status'))$sql.=" AND (status=1 OR status='Active')";
-
-        $sql.=" ORDER BY `{$customerNameColumn}` ASC";
-        $stmt=$conn->prepare($sql);
-
-        if($stmt){
-            $stmt->bind_param('i',$businessId);
-            $stmt->execute();
-            $result=$stmt->get_result();
-
-            while($result&&$row=$result->fetch_assoc()){
-                $customers[]=[
-                    'id'=>(int)$row['id'],
-                    'customer_name'=>(string)$row['customer_name'],
-                    'customer_code'=>(string)$row['customer_code'],
-                ];
+    $billTypes = array();
+    $sql = "SELECT DISTINCT bill_type FROM sales WHERE business_id=? AND COALESCE(workflow_status,'Posted') <> 'Cancelled'";
+    if ($branchId > 0) {
+        $sql .= " AND branch_id=?";
+    }
+    $sql .= " ORDER BY bill_type";
+    $stmt = $conn->prepare($sql);
+    if ($stmt) {
+        if ($branchId > 0) {
+            $stmt->bind_param('ii', $businessId, $branchId);
+        } else {
+            $stmt->bind_param('i', $businessId);
+        }
+        $stmt->execute();
+        $r = $stmt->get_result();
+        while ($row = $r->fetch_assoc()) {
+            if ((string)$row['bill_type'] !== '') {
+                $billTypes[] = (string)$row['bill_type'];
             }
-
-            $stmt->close();
         }
+        $stmt->close();
     }
 
-    $billTypes=['Retail','GST','Estimate','Exchange'];
-    if(hasColumn($conn,'sales','bill_type')){
-        $sql="SELECT DISTINCT bill_type FROM sales WHERE business_id=? AND bill_type IS NOT NULL AND bill_type<>'' ORDER BY bill_type";
-        $stmt=$conn->prepare($sql);
-        if($stmt){
-            $stmt->bind_param('i',$businessId);
-            $stmt->execute();
-            $result=$stmt->get_result();
-            $dynamic=[];
-            while($result&&$row=$result->fetch_assoc())$dynamic[]=(string)$row['bill_type'];
-            $stmt->close();
-            if($dynamic)$billTypes=$dynamic;
+    $paymentStatuses = array();
+    $sql = "SELECT DISTINCT payment_status FROM sales WHERE business_id=? AND COALESCE(workflow_status,'Posted') <> 'Cancelled'";
+    if ($branchId > 0) {
+        $sql .= " AND branch_id=?";
+    }
+    $sql .= " ORDER BY FIELD(payment_status,'Unpaid','Partial','Paid'),payment_status";
+    $stmt = $conn->prepare($sql);
+    if ($stmt) {
+        if ($branchId > 0) {
+            $stmt->bind_param('ii', $businessId, $branchId);
+        } else {
+            $stmt->bind_param('i', $businessId);
         }
+        $stmt->execute();
+        $r = $stmt->get_result();
+        while ($row = $r->fetch_assoc()) {
+            if ((string)$row['payment_status'] !== '') {
+                $paymentStatuses[] = (string)$row['payment_status'];
+            }
+        }
+        $stmt->close();
     }
 
-    $paymentStatuses=['Paid','Partial','Unpaid'];
-    if(hasColumn($conn,'sales','payment_status')){
-        $sql="SELECT DISTINCT payment_status FROM sales WHERE business_id=? AND payment_status IS NOT NULL AND payment_status<>'' ORDER BY payment_status";
-        $stmt=$conn->prepare($sql);
-        if($stmt){
-            $stmt->bind_param('i',$businessId);
-            $stmt->execute();
-            $result=$stmt->get_result();
-            $dynamic=[];
-            while($result&&$row=$result->fetch_assoc())$dynamic[]=(string)$row['payment_status'];
-            $stmt->close();
-            if($dynamic)$paymentStatuses=$dynamic;
-        }
-    }
-
-    respond(true,'Sales report filters loaded.',[
-        'customers'=>$customers,
-        'bill_types'=>$billTypes,
-        'payment_statuses'=>$paymentStatuses,
-        'defaults'=>[
-            'from_date'=>date('Y-m-01'),
-            'to_date'=>date('Y-m-d'),
-        ],
-    ]);
+    out(true, 'Sales report filters loaded.', array(
+        'customers' => $customers,
+        'bill_types' => $billTypes,
+        'payment_statuses' => $paymentStatuses,
+        'defaults' => array(
+            'from_date' => defaultFromDateReport(),
+            'to_date' => defaultToDateReport()
+        )
+    ));
 }
 
-$fromDate=trim((string)($_GET['from_date']??date('Y-m-01')));
-$toDate=trim((string)($_GET['to_date']??date('Y-m-d')));
-$customerId=(int)($_GET['customer_id']??0);
-$billType=trim((string)($_GET['bill_type']??''));
-$paymentStatus=trim((string)($_GET['payment_status']??''));
-$search=trim((string)($_GET['search']??''));
-
-if(!validDate($fromDate))$fromDate=date('Y-m-01');
-if(!validDate($toDate))$toDate=date('Y-m-d');
-if($fromDate>$toDate)[$fromDate,$toDate]=[$toDate,$fromDate];
-
-$saleIdColumn=firstColumn($conn,'sales',['id','sale_id']);
-$billNoColumn=firstColumn($conn,'sales',['bill_no','invoice_no','sale_no']);
-$billDateColumn=firstColumn($conn,'sales',['bill_date','sale_date','invoice_date','created_at']);
-$billTimeColumn=firstColumn($conn,'sales',['bill_time','sale_time']);
-$saleCustomerIdColumn=firstColumn($conn,'sales',['customer_id']);
-$saleCustomerNameColumn=firstColumn($conn,'sales',['customer_name']);
-$saleCustomerMobileColumn=firstColumn($conn,'sales',['customer_mobile','mobile']);
-$salePaymentMethodColumn=firstColumn($conn,'sales',['payment_method_id','method_id']);
-
-if($saleIdColumn===''||$billDateColumn===''){
-    respond(false,'The sales table has no supported ID or bill-date column.',[],500);
+if ($action !== 'list') {
+    out(false, 'Invalid action.', array(), 400);
 }
 
-$joins=[];
-$customerJoin='';
+$fromDate = trim((string)($_GET['from_date'] ?? defaultFromDateReport()));
+$toDate = trim((string)($_GET['to_date'] ?? defaultToDateReport()));
+$customerId = (int)($_GET['customer_id'] ?? 0);
+$billType = trim((string)($_GET['bill_type'] ?? ''));
+$paymentStatus = trim((string)($_GET['payment_status'] ?? ''));
+$search = trim((string)($_GET['search'] ?? ''));
 
-if(
-    $saleCustomerIdColumn!==''&&
-    $customerIdColumn!==''&&
-    $customerNameColumn!==''&&
-    tableExists($conn,'customers')
-){
-    $customerJoin="LEFT JOIN customers c ON c.`{$customerIdColumn}`=s.`{$saleCustomerIdColumn}`";
-    $joins[]=$customerJoin;
+if (!validDateReport($fromDate)) {
+    $fromDate = defaultFromDateReport();
+}
+if (!validDateReport($toDate)) {
+    $toDate = defaultToDateReport();
+}
+if ($fromDate > $toDate) {
+    $tmp = $fromDate;
+    $fromDate = $toDate;
+    $toDate = $tmp;
 }
 
-$methodJoin='';
-if(
-    $salePaymentMethodColumn!==''&&
-    $paymentMethodIdColumn!==''&&
-    $paymentMethodNameColumn!==''&&
-    tableExists($conn,'payment_methods')
-){
-    $methodJoin="LEFT JOIN payment_methods pm ON pm.`{$paymentMethodIdColumn}`=s.`{$salePaymentMethodColumn}`";
-    $joins[]=$methodJoin;
+/*
+ * IMPORTANT: Cancelled invoices are excluded at SQL level.
+ * This same WHERE clause is used for both rows and summary, so cancelled
+ * invoice amounts can never enter report totals.
+ */
+$where = " WHERE s.business_id=? AND COALESCE(s.workflow_status,'Posted') <> 'Cancelled'";
+$types = 'i';
+$params = array($businessId);
+
+if ($branchId > 0) {
+    $where .= ' AND s.branch_id=?';
+    $types .= 'i';
+    $params[] = $branchId;
 }
 
-$where=['s.business_id=?',"DATE(s.`{$billDateColumn}`) BETWEEN ? AND ?"];
-$types='iss';
-$params=[$businessId,$fromDate,$toDate];
+$where .= ' AND s.invoice_date>=? AND s.invoice_date<=?';
+$types .= 'ss';
+$params[] = $fromDate;
+$params[] = $toDate;
 
-if(hasColumn($conn,'sales','branch_id')&&$branchId>0){
-    $where[]='s.branch_id=?';
-    $types.='i';
-    $params[]=$branchId;
+if ($customerId > 0) {
+    $where .= ' AND s.customer_id=?';
+    $types .= 'i';
+    $params[] = $customerId;
 }
 
-if(hasColumn($conn,'sales','status')){
-    $where[]="(s.status='Active' OR s.status=1)";
+if ($billType !== '') {
+    $where .= ' AND s.bill_type=?';
+    $types .= 's';
+    $params[] = $billType;
 }
 
-if($customerId>0&&$saleCustomerIdColumn!==''){
-    $where[]="s.`{$saleCustomerIdColumn}`=?";
-    $types.='i';
-    $params[]=$customerId;
+if (in_array($paymentStatus, array('Unpaid', 'Partial', 'Paid'), true)) {
+    $where .= ' AND s.payment_status=?';
+    $types .= 's';
+    $params[] = $paymentStatus;
 }
 
-if($billType!==''&&hasColumn($conn,'sales','bill_type')){
-    $where[]='s.bill_type=?';
-    $types.='s';
-    $params[]=$billType;
+if ($search !== '') {
+    $like = '%' . $search . '%';
+    $where .= " AND (s.invoice_no LIKE ? OR COALESCE(s.customer_name,'') LIKE ? OR COALESCE(s.customer_mobile,'') LIKE ?)";
+    $types .= 'sss';
+    $params[] = $like;
+    $params[] = $like;
+    $params[] = $like;
 }
 
-if($paymentStatus!==''&&hasColumn($conn,'sales','payment_status')){
-    $where[]='s.payment_status=?';
-    $types.='s';
-    $params[]=$paymentStatus;
+$methodSelect = "'' AS method_name";
+if (tableExistsReport($conn, 'sale_payments') && tableExistsReport($conn, 'payment_methods')) {
+    $methodSelect = "COALESCE((
+        SELECT GROUP_CONCAT(DISTINCT pm.method_name ORDER BY sp.id SEPARATOR ', ')
+        FROM sale_payments sp
+        INNER JOIN payment_methods pm ON pm.id=sp.payment_method_id AND pm.business_id=sp.business_id
+        WHERE sp.sale_id=s.id AND sp.business_id=s.business_id
+    ),'') AS method_name";
 }
 
-if($search!==''){
-    $parts=[];
-    $like='%'.$search.'%';
+$listSql = "SELECT
+        s.id,
+        s.invoice_no AS bill_no,
+        s.invoice_date AS bill_date,
+        s.invoice_time AS bill_time,
+        s.customer_id,
+        s.customer_name,
+        s.customer_mobile,
+        s.bill_type,
+        s.subtotal,
+        s.discount_amount,
+        s.taxable_amount,
+        s.cgst_amount,
+        s.sgst_amount,
+        s.igst_amount,
+        s.round_off,
+        s.grand_total,
+        s.paid_amount,
+        s.balance_amount,
+        s.payment_status,
+        s.workflow_status,
+        s.cancelled_at,
+        {$methodSelect}
+    FROM sales s
+    {$where}
+    ORDER BY s.invoice_date DESC,s.invoice_time DESC,s.id DESC";
 
-    if($billNoColumn!=='')$parts[]="s.`{$billNoColumn}` LIKE ?";
-    if($saleCustomerNameColumn!=='')$parts[]="s.`{$saleCustomerNameColumn}` LIKE ?";
-    if($saleCustomerMobileColumn!=='')$parts[]="s.`{$saleCustomerMobileColumn}` LIKE ?";
-    if($customerJoin!==''&&$customerNameColumn!=='')$parts[]="c.`{$customerNameColumn}` LIKE ?";
-    if($customerJoin!==''&&$customerCodeColumn!=='')$parts[]="c.`{$customerCodeColumn}` LIKE ?";
-    if($customerJoin!==''&&$customerMobileColumn!=='')$parts[]="c.`{$customerMobileColumn}` LIKE ?";
-
-    if($parts){
-        $where[]='('.implode(' OR ',$parts).')';
-        foreach($parts as $_){
-            $types.='s';
-            $params[]=$like;
-        }
-    }
+$stmt = $conn->prepare($listSql);
+if (!$stmt) {
+    out(false, 'Unable to prepare sales report: ' . $conn->error, array(), 500);
 }
-
-$whereSql=implode(' AND ',$where);
-
-$sumColumns=[
-    'subtotal','discount_amount','taxable_amount','cgst_amount','sgst_amount',
-    'igst_amount','round_off','grand_total','paid_amount','balance_amount'
-];
-
-$summarySelect=["COUNT(*) AS total_bills"];
-foreach($sumColumns as $column){
-    $summarySelect[]=hasColumn($conn,'sales',$column)
-        ?"COALESCE(SUM(s.`{$column}`),0) AS `{$column}`"
-        :"0 AS `{$column}`";
-}
-
-$summarySql="SELECT ".implode(',',$summarySelect)."
-             FROM sales s
-             ".implode(' ',$joins)."
-             WHERE {$whereSql}";
-
-$stmt=$conn->prepare($summarySql);
-if(!$stmt)respond(false,'Unable to prepare sales summary: '.$conn->error,[],500);
-bindDynamic($stmt,$types,$params);
+$listParams = $params;
+bindDynamicReport($stmt, $types, $listParams);
 $stmt->execute();
-$summary=$stmt->get_result()->fetch_assoc()?:[];
+$r = $stmt->get_result();
+$rows = array();
+while ($row = $r->fetch_assoc()) {
+    $row['bill_date_display'] = !empty($row['bill_date']) ? date('d-m-Y', strtotime($row['bill_date'])) : '';
+    $row['bill_time_display'] = !empty($row['bill_time']) ? date('h:i A', strtotime($row['bill_time'])) : '';
+    $rows[] = $row;
+}
 $stmt->close();
 
-$select=[
-    "s.`{$saleIdColumn}` AS id",
-    $billNoColumn!==''?"s.`{$billNoColumn}` AS bill_no":"'' AS bill_no",
-    "s.`{$billDateColumn}` AS bill_date",
-    $billTimeColumn!==''?"s.`{$billTimeColumn}` AS bill_time":"NULL AS bill_time",
-    $saleCustomerNameColumn!==''?"s.`{$saleCustomerNameColumn}` AS direct_customer_name":"'' AS direct_customer_name",
-    $saleCustomerMobileColumn!==''?"s.`{$saleCustomerMobileColumn}` AS customer_mobile":"'' AS customer_mobile",
-    $customerJoin!==''&&$customerNameColumn!==''?"c.`{$customerNameColumn}` AS master_customer_name":"'' AS master_customer_name",
-    hasColumn($conn,'sales','bill_type')?"s.bill_type":"'—' AS bill_type",
-    $methodJoin!==''?"pm.`{$paymentMethodNameColumn}` AS method_name":"'' AS method_name",
-    hasColumn($conn,'sales','payment_status')?"s.payment_status":"'Unpaid' AS payment_status",
-];
+$summarySql = "SELECT
+        COUNT(*) AS total_bills,
+        COALESCE(SUM(s.subtotal),0) AS subtotal,
+        COALESCE(SUM(s.discount_amount),0) AS discount_amount,
+        COALESCE(SUM(s.taxable_amount),0) AS taxable_amount,
+        COALESCE(SUM(s.cgst_amount),0) AS cgst_amount,
+        COALESCE(SUM(s.sgst_amount),0) AS sgst_amount,
+        COALESCE(SUM(s.igst_amount),0) AS igst_amount,
+        COALESCE(SUM(s.grand_total),0) AS grand_total,
+        COALESCE(SUM(s.paid_amount),0) AS paid_amount,
+        COALESCE(SUM(s.balance_amount),0) AS balance_amount
+    FROM sales s
+    {$where}";
 
-foreach($sumColumns as $column){
-    $select[]=hasColumn($conn,'sales',$column)?"s.`{$column}`":"0 AS `{$column}`";
+$stmt = $conn->prepare($summarySql);
+if (!$stmt) {
+    out(false, 'Unable to prepare sales report summary: ' . $conn->error, array(), 500);
 }
-
-$listSql="SELECT ".implode(',',$select)."
-          FROM sales s
-          ".implode(' ',$joins)."
-          WHERE {$whereSql}
-          ORDER BY s.`{$billDateColumn}` DESC,s.`{$saleIdColumn}` DESC";
-
-$stmt=$conn->prepare($listSql);
-if(!$stmt)respond(false,'Unable to prepare sales list: '.$conn->error,[],500);
-bindDynamic($stmt,$types,$params);
+$summaryParams = $params;
+bindDynamicReport($stmt, $types, $summaryParams);
 $stmt->execute();
-$result=$stmt->get_result();
-$rows=[];
-
-while($result&&$row=$result->fetch_assoc()){
-    $row['id']=(int)$row['id'];
-    foreach($sumColumns as $column)$row[$column]=(float)($row[$column]??0);
-    $row['customer_name']=(string)($row['master_customer_name']?:$row['direct_customer_name']?:'Walk-in Customer');
-    $row['bill_date_display']=!empty($row['bill_date'])?date('d-m-Y',strtotime($row['bill_date'])):'—';
-    $row['bill_time_display']=!empty($row['bill_time'])?date('h:i A',strtotime($row['bill_time'])):'';
-    unset($row['master_customer_name'],$row['direct_customer_name']);
-    $rows[]=$row;
-}
-
+$summary = $stmt->get_result()->fetch_assoc();
 $stmt->close();
 
-if($action==='export'){
-    header('Content-Type: text/csv; charset=utf-8');
-    header('Content-Disposition: attachment; filename="sales_report_'.date('Y-m-d').'.csv"');
-    $output=fopen('php://output','w');
-
-    fputcsv($output,['Sales Report']);
-    fputcsv($output,['Period',date('d-m-Y',strtotime($fromDate)).' to '.date('d-m-Y',strtotime($toDate))]);
-    fputcsv($output,[]);
-    fputcsv($output,[
-        '#','Bill No','Date','Customer','Mobile','Bill Type','Method','Subtotal','Discount','Taxable',
-        'CGST','SGST','IGST','Round Off','Grand Total','Paid','Balance','Status'
-    ]);
-
-    foreach($rows as $index=>$row){
-        fputcsv($output,[
-            $index+1,$row['bill_no'],$row['bill_date_display'],$row['customer_name'],$row['customer_mobile'],
-            $row['bill_type'],$row['method_name'],$row['subtotal'],$row['discount_amount'],$row['taxable_amount'],
-            $row['cgst_amount'],$row['sgst_amount'],$row['igst_amount'],$row['round_off'],$row['grand_total'],
-            $row['paid_amount'],$row['balance_amount'],$row['payment_status']
-        ]);
-    }
-
-    fputcsv($output,[]);
-    fputcsv($output,['Total Bills',$summary['total_bills']??0]);
-    fputcsv($output,['Grand Total',$summary['grand_total']??0]);
-    fputcsv($output,['Paid Amount',$summary['paid_amount']??0]);
-    fputcsv($output,['Balance Amount',$summary['balance_amount']??0]);
-
-    fclose($output);
-    exit;
+if (!$summary) {
+    $summary = array();
 }
 
-respond(true,'Sales report loaded successfully.',[
-    'period'=>[
-        'from'=>$fromDate,
-        'to'=>$toDate,
-        'from_display'=>date('d-m-Y',strtotime($fromDate)),
-        'to_display'=>date('d-m-Y',strtotime($toDate)),
-    ],
-    'summary'=>$summary,
-    'rows'=>$rows,
-]);
+out(true, 'Sales report loaded.', array(
+    'rows' => $rows,
+    'summary' => $summary,
+    'period' => array(
+        'from' => $fromDate,
+        'to' => $toDate,
+        'from_display' => date('d-m-Y', strtotime($fromDate)),
+        'to_display' => date('d-m-Y', strtotime($toDate))
+    )
+));

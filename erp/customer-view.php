@@ -52,7 +52,7 @@ if (te($conn, 'customer_services')) {
 }
 $invoices = [];
 if (te($conn, 'sales')) {
-    $s = $conn->prepare("SELECT s.*,COALESCE((SELECT SUM(si.quantity) FROM sale_items si WHERE si.sale_id=s.id),0) item_count FROM sales s WHERE s.customer_id=? AND s.business_id=? ORDER BY s.invoice_date DESC,s.id DESC");
+    $s = $conn->prepare("SELECT s.*,COALESCE((SELECT SUM(si.quantity) FROM sale_items si WHERE si.sale_id=s.id),0) item_count FROM sales s WHERE s.customer_id=? AND s.business_id=? AND COALESCE(s.workflow_status,'Posted') <> 'Cancelled' ORDER BY s.invoice_date DESC,s.id DESC");
     $s->bind_param('ii', $customerId, $bid);
     $s->execute();
     $r = $s->get_result();

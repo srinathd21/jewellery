@@ -412,7 +412,31 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
     }
 
     function renderReport(result){
-        const s=result.summary||{};
+        const sourceRows=Array.isArray(result.rows)?result.rows:[];
+        const rows=sourceRows.filter(row=>{
+            const workflow=String(row.workflow_status||row.sale_status||row.status||'').trim().toLowerCase();
+            return workflow!=='cancelled' && workflow!=='canceled';
+        });
+
+        /*
+         * Never use API summary blindly here because older API versions can
+         * include cancelled invoices in totals. Rebuild every report total
+         * from the non-cancelled rows that are actually displayed.
+         */
+        const s=rows.reduce((sum,row)=>{
+            sum.total_bills+=1;
+            sum.grand_total+=Number(row.grand_total||0);
+            sum.paid_amount+=Number(row.paid_amount||0);
+            sum.balance_amount+=Number(row.balance_amount||0);
+            sum.subtotal+=Number(row.subtotal||0);
+            sum.discount_amount+=Number(row.discount_amount||0);
+            sum.taxable_amount+=Number(row.taxable_amount||0);
+            sum.cgst_amount+=Number(row.cgst_amount||0);
+            sum.sgst_amount+=Number(row.sgst_amount||0);
+            sum.igst_amount+=Number(row.igst_amount||0);
+            return sum;
+        },{total_bills:0,grand_total:0,paid_amount:0,balance_amount:0,subtotal:0,discount_amount:0,taxable_amount:0,cgst_amount:0,sgst_amount:0,igst_amount:0});
+
         document.getElementById('totalBills').textContent=Number(s.total_bills||0);
         document.getElementById('grandTotal').textContent='₹'+money(s.grand_total);
         document.getElementById('paidAmount').textContent='₹'+money(s.paid_amount);
@@ -426,7 +450,6 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
         document.getElementById('periodLabel').textContent='Period: '+result.period.from_display+' to '+result.period.to_display;
 
         loading.classList.add('d-none');
-        const rows=Array.isArray(result.rows)?result.rows:[];
 
         if(!rows.length){
             tableWrap.classList.add('d-none');

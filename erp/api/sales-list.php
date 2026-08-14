@@ -172,6 +172,12 @@ if ($action === 'list') {
     $types = 'i';
     $params = [$businessId];
 
+    // Default Sales List shows only active/posted invoices. Cancelled invoices
+    // are available only when the user explicitly selects Cancelled status.
+    if ($status === '') {
+        $where .= " AND COALESCE(s.workflow_status,'Posted') <> 'Cancelled'";
+    }
+
     if ($fromDate !== '') {
         $where .= ' AND s.invoice_date >= ?';
         $types .= 's';
@@ -247,14 +253,14 @@ if ($action === 'list') {
     $stmt->close();
 
     $statsSql = "SELECT
-        COUNT(*) AS total_bills,
+        COALESCE(SUM(CASE WHEN workflow_status <> 'Cancelled' THEN 1 ELSE 0 END),0) AS total_bills,
         COALESCE(SUM(CASE WHEN workflow_status <> 'Cancelled' THEN grand_total ELSE 0 END),0) AS sales_total,
         COALESCE(SUM(CASE WHEN workflow_status <> 'Cancelled' THEN paid_amount ELSE 0 END),0) AS paid_total,
         COALESCE(SUM(CASE WHEN workflow_status <> 'Cancelled' THEN balance_amount ELSE 0 END),0) AS balance_total
         FROM sales
-        WHERE business_id = ?";
+        WHERE business_id = ? AND branch_id = ?";
     $stmt = $conn->prepare($statsSql);
-    $stmt->bind_param('i', $businessId);
+    $stmt->bind_param('ii', $businessId, $branchId);
     $stmt->execute();
     $stats = $stmt->get_result()->fetch_assoc() ?: [];
     $stmt->close();
