@@ -1,3 +1,4 @@
+
 <?php
 header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
 header('Pragma: no-cache');
@@ -23,28 +24,72 @@ require __DIR__ . '/_common.php';
         .stat-grid {
             display: grid;
             grid-template-columns: repeat(5, minmax(0, 1fr));
-            gap: 10px;
-            margin-bottom: 12px
+            gap: 8px;
+            margin-bottom: 10px
         }
 
         .stat-box {
-            padding: 13px;
+            min-height: 82px;
+            padding: 11px 13px;
             border: 1px solid var(--line);
-            border-radius: var(--radius);
-            background: var(--card-bg)
+            border-radius: 14px;
+            background: var(--card-bg);
+            display: flex;
+            align-items: center;
+            gap: 11px;
+            min-width: 0;
+            overflow: hidden;
+            box-shadow: 0 1px 2px rgba(15, 23, 42, .02)
         }
 
-        .stat-box span {
+        .stat-icon {
+            width: 44px;
+            height: 44px;
+            flex: 0 0 44px;
+            border-radius: 12px;
+            display: grid;
+            place-items: center;
+            background: #fff4df;
+            color: #c97800;
+            font-size: 17px
+        }
+
+        .stat-content {
+            min-width: 0
+        }
+
+        .stat-box .stat-label {
             display: block;
-            font-size: 9px;
-            color: var(--muted);
-            text-transform: uppercase
+            font-size: 10px;
+            font-weight: 500;
+            color: #718096;
+            text-transform: none;
+            letter-spacing: 0;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis
         }
 
         .stat-box strong {
             display: block;
-            margin-top: 3px;
-            font-size: 22px
+            margin-top: 2px;
+            font-size: 22px;
+            line-height: 1.05;
+            font-weight: 800;
+            color: var(--text);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis
+        }
+
+        .stat-box .stat-sub {
+            display: block;
+            margin-top: 2px;
+            font-size: 9px;
+            color: var(--muted);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis
         }
 
         .pawn-table {
@@ -53,16 +98,17 @@ require __DIR__ . '/_common.php';
         }
 
         .pawn-table th {
-            font-size: 9px;
+            font-size: 8px;
             text-transform: uppercase;
             color: var(--muted);
             white-space: nowrap;
-            padding: 10px
+            padding: 7px 8px
         }
 
         .pawn-table td {
-            padding: 10px;
-            vertical-align: middle
+            padding: 7px 8px;
+            vertical-align: middle;
+            line-height: 1.25
         }
 
         .status-pill {
@@ -110,11 +156,12 @@ require __DIR__ . '/_common.php';
         }
 
         .mini-btn {
-            width: 32px;
-            height: 32px;
+            width: 28px;
+            height: 28px;
             border: 1px solid var(--line);
-            border-radius: 8px;
+            border-radius: 7px;
             background: var(--card-bg);
+            font-size: 10px;
             display: grid;
             place-items: center;
             text-decoration: none;
@@ -160,6 +207,21 @@ require __DIR__ . '/_common.php';
             background: #c0392b
         }
 
+        .content-wrap { padding-top: 10px; }
+        .page-card.mb-3 { margin-bottom: 10px !important; }
+        .page-head { padding: 12px 16px; }
+        .page-title { font-size: 20px; line-height: 1.1; }
+        .page-head .small { font-size: 10px; }
+        .page-head .btn-theme,
+        .page-head .btn-soft { min-height: 34px; padding: 7px 12px; font-size: 10px; }
+        .card-body-x { padding: 10px 12px; }
+        .manage-toolbar { gap: 6px; }
+        .manage-toolbar .form-control,
+        .manage-toolbar .form-select,
+        .manage-toolbar .btn-soft { min-height: 34px; height: 34px; padding-top: 5px; padding-bottom: 5px; font-size: 10px; }
+        .status-pill { padding: 3px 6px; font-size: 8px; }
+        .action-btns { gap: 4px; flex-wrap: nowrap; }
+
         @media(max-width:1100px) {
             .manage-toolbar {
                 grid-template-columns: 1fr 1fr
@@ -184,7 +246,7 @@ require __DIR__ . '/_common.php';
             }
 
             .stat-grid {
-                grid-template-columns: 1fr 1fr
+                grid-template-columns: 1fr
             }
         }
     </style>
@@ -198,19 +260,32 @@ require __DIR__ . '/_common.php';
                 <div class="page-head">
                     <div>
                         <div class="page-title">Pawn Management</div>
-                        <div class="small text-muted">View, edit and safely remove pawn entries.</div>
+                        <div class="small text-muted">Manage pawn status, customer interest cycle, bank pledge state and
+                            re-registration.</div>
                     </div>
-                    <div class="d-flex gap-2"><a href="pawn-entry.php" class="btn-theme"><i
-                                class="fa-solid fa-plus"></i> New Pawn</a><a href="pawn-collections.php"
-                            class="btn-soft">Collections</a></div>
+                    <div class="d-flex gap-2"><a href="pawn-entry.php" class="btn-theme"><i class="fa-solid fa-plus"></i> New Pawn</a></div>
                 </div>
             </div>
             <div class="stat-grid">
-                <div class="stat-box"><span>Total Pawns</span><strong id="stTotal">0</strong></div>
-                <div class="stat-box"><span>Active</span><strong id="stActive">0</strong></div>
-                <div class="stat-box"><span>Partially Paid</span><strong id="stPartial">0</strong></div>
-                <div class="stat-box"><span>Closed</span><strong id="stClosed">0</strong></div>
-                <div class="stat-box"><span>Outstanding</span><strong>₹<span id="stOutstanding">0.00</span></strong>
+                <div class="stat-box">
+                    <div class="stat-icon"><i class="fa-solid fa-scale-balanced"></i></div>
+                    <div class="stat-content"><span class="stat-label">Total Pawns</span><strong id="stTotal">0</strong><span class="stat-sub">All registrations</span></div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-icon"><i class="fa-solid fa-circle-check"></i></div>
+                    <div class="stat-content"><span class="stat-label">Active</span><strong id="stActive">0</strong><span class="stat-sub">Currently running</span></div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-icon"><i class="fa-solid fa-wallet"></i></div>
+                    <div class="stat-content"><span class="stat-label">Partially Paid</span><strong id="stPartial">0</strong><span class="stat-sub">Principal reduced</span></div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-icon"><i class="fa-solid fa-lock"></i></div>
+                    <div class="stat-content"><span class="stat-label">Closed</span><strong id="stClosed">0</strong><span class="stat-sub">Completed pawns</span></div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-icon"><i class="fa-solid fa-indian-rupee-sign"></i></div>
+                    <div class="stat-content"><span class="stat-label">Outstanding</span><strong>₹<span id="stOutstanding">0.00</span></strong><span class="stat-sub">Principal balance</span></div>
                 </div>
             </div>
             <div class="page-card mb-3">
@@ -242,8 +317,9 @@ require __DIR__ . '/_common.php';
                                 <th>Principal</th>
                                 <th>Paid</th>
                                 <th>Balance</th>
-                                <th>Interest Rate</th>
-                                <th>Interest Value</th>
+                                <th>Interest</th>
+                                <th>Next Due / Grace</th>
+                                <th>Bank</th>
                                 <th>Status</th>
                                 <th class="text-end">Actions</th>
                             </tr>
@@ -257,153 +333,258 @@ require __DIR__ . '/_common.php';
         </div>
     </main><?php include('includes/script.php'); ?>
     <script src="assets/js/script.js"></script>
-    <script>(() => { 'use strict'; const api = 'api/pawn-manage.php', csrf = <?= json_encode($csrfToken) ?>, $ = id => document.getElementById(id); let rows = [], timer = null; function esc(v) { return String(v ?? '').replace(/[&<>'"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#039;', '"': '&quot;' }[c])) } function money(v) {
-    return Number(v || 0).toLocaleString('en-IN', {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2
-    });
-}
+    <script>
+        (() => {
+            'use strict';
 
-function interestBase(r) {
-    return String(r.interest_method || '').toLowerCase() === 'flat'
-        ? Number(r.principal_amount || 0)
-        : Number(r.balance_principal || 0);
-}
+            const api = 'api/pawn-manage.php';
+            const csrf = <?= json_encode($csrfToken) ?>;
+            const $ = id => document.getElementById(id);
+            let rows = [];
+            let timer = null;
 
-function interestMultiplier(r) {
-    const period = String(r.interest_period || 'Monthly');
-    const cycle = String(r.interest_collection_cycle || 'Monthly');
-    const custom = Math.max(1, Number(r.interest_cycle_months || 1));
+            function esc(v) {
+                return String(v ?? '').replace(/[&<>'"]/g, c => ({
+                    '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#039;', '"': '&quot;'
+                }[c]));
+            }
 
-    if (cycle === 'At Closure') {
-        return 1;
-    }
+            function money(v) {
+                return Number(v || 0).toLocaleString('en-IN', {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2
+                });
+            }
 
-    const months = {
-        'Monthly': 1,
-        'Quarterly': 3,
-        'Half-Yearly': 6,
-        'Yearly': 12,
-        'Custom': custom
-    }[cycle] || 1;
+            function note(type, message) {
+                const x = document.createElement('div');
+                x.className = 'theme-toast theme-toast-' + (type === 'ok' ? 'success' : 'error');
+                x.textContent = message || (type === 'ok' ? 'Done' : 'Something went wrong');
+                document.body.appendChild(x);
+                setTimeout(() => x.remove(), 3200);
+            }
 
-    if (period === 'Daily') {
-        return months * 30;
-    }
+            async function req(data) {
+                const f = new FormData();
+                Object.entries(data).forEach(([k, v]) => f.append(k, v == null ? '' : v));
+                f.append('csrf_token', csrf);
+                const response = await fetch(api, {
+                    method: 'POST',
+                    body: f,
+                    credentials: 'same-origin',
+                    headers: { 'Accept': 'application/json' }
+                });
+                const raw = await response.text();
+                let json;
+                try {
+                    json = JSON.parse(raw);
+                } catch (e) {
+                    const clean = raw.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+                    throw new Error(clean.slice(0, 300) || 'Invalid response from Pawn Manage API.');
+                }
+                if (!response.ok || !json.success) throw new Error(json.message || 'Request failed.');
+                return json;
+            }
 
-    if (period === 'Yearly') {
-        return months / 12;
-    }
+            function badge(status) {
+                const s = String(status || 'Draft');
+                const cls = {
+                    'Active': 'st-active',
+                    'Partially Paid': 'st-partial',
+                    'Closed': 'st-closed',
+                    'Auctioned': 'st-auctioned',
+                    'Draft': 'st-draft',
+                    'Cancelled': 'st-cancelled'
+                }[s] || 'st-draft';
+                return `<span class="status-pill ${cls}">${esc(s)}</span>`;
+            }
 
-    return months;
-}
+            function whatsappNumber(value) {
+                let number = String(value || '').replace(/\D+/g, '');
+                if (number.length === 10) number = '91' + number;
+                else if (number.length === 11 && number.startsWith('0')) number = '91' + number.slice(1);
+                return number;
+            }
 
-function calculatedInterest(r) {
-    const base = interestBase(r);
-    const rate = Math.max(0, Number(r.interest_percent || 0));
-    return base * (rate / 100) * interestMultiplier(r);
-}
+            function currentRate(r) {
+                return Number(r.current_interest_percent || r.interest_percent || 0);
+            }
 
-function interestLabel(r) {
-    const cycle = String(r.interest_collection_cycle || '');
+            function dueCycleLabel(r) {
+                const type = String(r.interest_due_cycle_type || '').trim();
+                const value = Math.max(1, Number(r.interest_due_cycle_value || 1));
+                if (type === 'Days') return value + ' day' + (value === 1 ? '' : 's');
+                if (type === 'Months') return value + ' month' + (value === 1 ? '' : 's');
+                if (type === 'Calendar Month') return value === 1 ? 'Calendar month' : value + ' calendar months';
+                return String(r.interest_collection_cycle || r.interest_period || '—');
+            }
 
-    if (cycle === 'At Closure') {
-        return String(r.interest_period || 'Period') + ' estimate';
-    }
+            function nextDueText(r) {
+                const due = String(r.next_interest_due_date || '');
+                if (!due) return 'At Closure';
+                const graceUntil = String(r.grace_until || '');
+                if (graceUntil && graceUntil !== due) return 'Due ' + due + ' · Grace ' + graceUntil;
+                return 'Due ' + due;
+            }
 
-    return cycle || String(r.interest_period || 'Period');
-} function note(t, m) { const x = document.createElement('div'); x.className = 'theme-toast theme-toast-' + (t === 'ok' ? 'success' : 'error'); x.textContent = m; document.body.appendChild(x); setTimeout(() => x.remove(), 3200) } async function req(data) { const f = new FormData(); Object.entries(data).forEach(([k, v]) => f.append(k, v)); f.append('csrf_token', csrf); const r = await fetch(api, { method: 'POST', body: f, credentials: 'same-origin', headers: { Accept: 'application/json' } }), raw = await r.text(); let j; try { j = JSON.parse(raw) } catch (e) { throw new Error(raw.replace(/<[^>]*>/g, ' ').slice(0, 260)) } if (!r.ok || !j.success) throw new Error(j.message || 'Request failed'); return j } function badge(s) { const cls = { 'Active': 'st-active', 'Partially Paid': 'st-partial', 'Closed': 'st-closed', 'Auctioned': 'st-auctioned', 'Draft': 'st-draft', 'Cancelled': 'st-cancelled' }[s] || 'st-draft'; return `<span class="status-pill ${cls}">${esc(s)}</span>` } function whatsappNumber(value) {
-    let number = String(value || '').replace(/\D+/g, '');
-    if (number.length === 10) number = '91' + number;
-    else if (number.length === 11 && number.startsWith('0')) number = '91' + number.slice(1);
-    return number;
-}
+            function bankBadge(r) {
+                const s = String(r.bank_pledge_status || 'Not Pledged');
+                const cls = s === 'Pledged' ? 'st-auctioned'
+                    : (s === 'Partially Pledged' ? 'st-partial'
+                    : (s === 'Released' ? 'st-closed' : 'st-draft'));
+                return `<span class="status-pill ${cls}">${esc(s)}</span>`;
+            }
 
-function receiptUrl(r) {
-    const base = window.location.href.substring(0, window.location.href.lastIndexOf('/') + 1);
-    const file = String(r.status || '') === 'Closed'
-        ? 'pawn-closed-receipt.php'
-        : 'pawn-receipt.php';
+            function receiptUrl(r) {
+                const base = window.location.href.substring(0, window.location.href.lastIndexOf('/') + 1);
+                const file = String(r.status || '') === 'Closed' ? 'pawn-closed-receipt.php' : 'pawn-receipt.php';
+                return base + file + '?id=' + encodeURIComponent(r.id) + '&ref=' + encodeURIComponent(r.pawn_no || '');
+            }
 
-    return base + file
-        + '?id=' + encodeURIComponent(r.id)
-        + '&ref=' + encodeURIComponent(r.pawn_no || '');
-}
+            function whatsappUrl(r) {
+                const mobile = whatsappNumber(r.mobile);
+                if (!mobile) return '';
+                const url = receiptUrl(r);
+                const closed = String(r.status || '') === 'Closed';
+                const message =
+                    'Dear ' + (r.customer_name || 'Customer') + ',\n\n' +
+                    (closed ? 'Your pawn is closed successfully.\n' : 'Your pawn receipt is ready.\n') +
+                    'Pawn No: ' + (r.pawn_no || '') + '\n' +
+                    'Principal: ₹' + money(r.principal_amount) + '\n' +
+                    'Paid: ₹' + money(r.total_principal_paid) + '\n' +
+                    'Balance: ₹' + money(r.balance_principal) + '\n' +
+                    (closed ? 'Status: Closed\n' : '') + '\n' +
+                    (closed ? 'View closed pawn receipt:\n' : 'View receipt:\n') + url + '\n\nThank you.';
+                return 'https://wa.me/' + mobile + '?text=' + encodeURIComponent(message);
+            }
 
-function whatsappUrl(r) {
-    const mobile = whatsappNumber(r.mobile);
-    if (!mobile) return '';
+            function render() {
+                $('tableBody').innerHTML = rows.map(r => {
+                    const receipt = receiptUrl(r);
+                    const wa = whatsappUrl(r);
+                    return `<tr>
+                        <td><strong>${esc(r.pawn_no)}</strong><div class="text-muted">#${Number(r.id || 0)}</div></td>
+                        <td><strong>${esc(r.customer_name)}</strong><div class="text-muted">${esc(r.customer_code || '')} · ${esc(r.mobile || '')}</div></td>
+                        <td>${esc(r.category_name || '—')}</td>
+                        <td>${esc(r.pawn_date || '—')}<div class="text-muted">${r.due_date ? 'Closure ' + esc(r.due_date) : 'No fixed closure'}</div></td>
+                        <td>₹${money(r.principal_amount)}</td>
+                        <td>₹${money(r.total_principal_paid)}</td>
+                        <td><strong>₹${money(r.balance_principal)}</strong></td>
+                        <td>
+                            <strong>${currentRate(r).toFixed(3)}%</strong>
+                            <div class="text-muted">${esc(dueCycleLabel(r))}</div>
+                            ${Number(r.rate_escalation_count || 0) > 0 ? `<div class="text-danger">Escalated ${Number(r.rate_escalation_count)} time(s)</div>` : ''}
+                        </td>
+                        <td><strong>${esc(nextDueText(r))}</strong><div class="text-muted">Missed: ${Number(r.missed_interest_cycles || 0)}</div></td>
+                        <td>${bankBadge(r)}</td>
+                        <td>${badge(r.status)}</td>
+                        <td>
+    <div class="action-btns">
 
-    const url = receiptUrl(r);
-    const closed = String(r.status || '') === 'Closed';
-    const message =
-        'Dear ' + (r.customer_name || 'Customer') + ',\n\n' +
-        (closed ? 'Your pawn is closed successfully.\n' : 'Your pawn receipt is ready.\n') +
-        'Pawn No: ' + (r.pawn_no || '') + '\n' +
-        'Principal: ₹' + money(r.principal_amount) + '\n' +
-        'Paid: ₹' + money(r.total_principal_paid) + '\n' +
-        'Balance: ₹' + money(r.balance_principal) + '\n' +
-        (closed ? 'Status: Closed\n' : '') + '\n' +
-        (closed ? 'View closed pawn receipt:\n' : 'View receipt:\n') + url + '\n\n' +
-        'Thank you.';
+        <a class="mini-btn"
+           href="pawn-view.php?id=${Number(r.id)}"
+           title="View">
+            <i class="fa-solid fa-eye"></i>
+        </a>
 
-    return 'https://wa.me/' + mobile + '?text=' + encodeURIComponent(message);
-}
+        ${String(r.status || '') !== 'Closed'
+            && String(r.status || '') !== 'Cancelled'
+            && String(r.status || '') !== 'Auctioned'
+            ? `
+                <a class="mini-btn"
+                   href="pawn-entry.php?id=${Number(r.id)}"
+                   title="Edit">
+                    <i class="fa-solid fa-pen-to-square"></i>
+                </a>
 
-function render() {
-    $('tableBody').innerHTML = rows.map(r => {
-        const receipt = receiptUrl(r);
-        const wa = whatsappUrl(r);
+                <a class="mini-btn"
+                   href="pawn-interest.php?pawn_id=${Number(r.id)}"
+                   title="Pawn Interest">
+                    <i class="fa-solid fa-indian-rupee-sign"></i>
+                </a>
+              `
+            : ''
+        }
 
-        return `<tr>
-            <td>
-                <strong>${esc(r.pawn_no)}</strong>
-                <div class="text-muted">${esc(r.category_name || '')}</div>
-            </td>
-            <td>
-                <strong>${esc(r.customer_name)}</strong>
-                <div class="text-muted">${esc(r.customer_code || '')} · ${esc(r.mobile || '')}</div>
-            </td>
-            <td>${esc(r.category_name || '—')}</td>
-            <td>
-                ${esc(r.pawn_date)}
-                <div class="text-muted">${r.due_date ? 'Due ' + esc(r.due_date) : 'At Closure'}</div>
-            </td>
-            <td>₹${money(r.principal_amount)}</td>
-            <td>₹${money(r.total_principal_paid)}</td>
-            <td><strong>₹${money(r.balance_principal)}</strong></td>
-            <td>
-                <strong>${Number(r.interest_percent || 0).toFixed(3)}%</strong>
-                <div class="text-muted">${esc(r.interest_period || '')} · ${esc(r.interest_method || '')}</div>
-            </td>
-            <td>
-                <strong>₹${money(calculatedInterest(r))}</strong>
-                <div class="text-muted">${esc(interestLabel(r))}</div>
-            </td>
-            <td>${badge(r.status)}</td>
-            <td>
-                <div class="action-btns">
-                    <a class="mini-btn" href="pawn-view.php?id=${r.id}" title="View">
-                        <i class="fa-solid fa-eye"></i>
-                    </a>
-                    <a class="mini-btn" href="${receipt}" target="_blank" rel="noopener"
-                       title="${String(r.status || '') === 'Closed' ? 'Closed Pawn Receipt' : 'Receipt'}">
-                        <i class="fa-solid fa-receipt"></i>
-                    </a>
-                    ${wa ? `<a class="mini-btn whatsapp" href="${wa}" target="_blank" rel="noopener" title="Share receipt on WhatsApp"><i class="fa-brands fa-whatsapp"></i></a>` : ''}
-                    <a class="mini-btn" href="pawn-edit.php?id=${r.id}" title="Edit">
-                        <i class="fa-solid fa-pen"></i>
-                    </a>
-                    <button class="mini-btn danger delete-btn" data-id="${r.id}" data-no="${esc(r.pawn_no)}" title="Delete">
-                        <i class="fa-solid fa-trash"></i>
-                    </button>
-                </div>
-            </td>
-        </tr>`;
-    }).join('');
+        <a class="mini-btn"
+           href="${receipt}"
+           target="_blank"
+           rel="noopener"
+           title="Receipt">
+            <i class="fa-solid fa-receipt"></i>
+        </a>
 
-    $('emptyState').classList.toggle('d-none', rows.length > 0);
-} async function load() { try { const j = await req({ action: 'list', search: $('search').value.trim(), status: $('statusFilter').value, from_date: $('fromDate').value, to_date: $('toDate').value }); rows = j.rows || []; render(); const s = j.stats || {}; $('stTotal').textContent = Number(s.total || 0); $('stActive').textContent = Number(s.active || 0); $('stPartial').textContent = Number(s.partial || 0); $('stClosed').textContent = Number(s.closed || 0); $('stOutstanding').textContent = money(s.outstanding || 0) } catch (e) { note('bad', e.message) } } document.addEventListener('click', async e => { const d = e.target.closest('.delete-btn'); if (!d) return; if (!confirm('Delete pawn ' + d.dataset.no + '? This is allowed only when no collections, payments, release or auction records exist.')) return; try { const j = await req({ action: 'delete', id: d.dataset.id }); note('ok', j.message); load() } catch (x) { note('bad', x.message) } }); $('search').addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(load, 300) });['statusFilter', 'fromDate', 'toDate'].forEach(id => $(id).addEventListener('change', load)); $('resetBtn').onclick = () => { $('search').value = ''; $('statusFilter').value = ''; $('fromDate').value = ''; $('toDate').value = ''; load() }; load() })();</script>
+        ${wa
+            ? `
+                <a class="mini-btn whatsapp"
+                   href="${wa}"
+                   target="_blank"
+                   rel="noopener"
+                   title="WhatsApp">
+                    <i class="fa-brands fa-whatsapp"></i>
+                </a>
+              `
+            : ''
+        }
+
+        ${String(r.status || '') === 'Closed'
+            ? `
+                <a class="mini-btn"
+                   href="pawn-entry.php?reregister_from=${Number(r.id)}"
+                   title="Re-Register">
+                    <i class="fa-solid fa-rotate"></i>
+                </a>
+              `
+            : ''
+        }
+
+    </div>
+</td>
+                    </tr>`;
+                }).join('');
+                $('emptyState').classList.toggle('d-none', rows.length > 0);
+            }
+
+            async function load() {
+                try {
+                    const j = await req({
+                        action: 'list',
+                        search: $('search').value.trim(),
+                        status: $('statusFilter').value,
+                        from_date: $('fromDate').value,
+                        to_date: $('toDate').value
+                    });
+                    rows = Array.isArray(j.rows) ? j.rows : [];
+                    render();
+                    const s = j.stats || {};
+                    $('stTotal').textContent = Number(s.total || 0);
+                    $('stActive').textContent = Number(s.active || 0);
+                    $('stPartial').textContent = Number(s.partial || 0);
+                    $('stClosed').textContent = Number(s.closed || 0);
+                    $('stOutstanding').textContent = money(s.outstanding || 0);
+                } catch (e) {
+                    rows = [];
+                    render();
+                    note('bad', e.message);
+                }
+            }
+
+            $('search').addEventListener('input', () => {
+                clearTimeout(timer);
+                timer = setTimeout(load, 300);
+            });
+            ['statusFilter', 'fromDate', 'toDate'].forEach(id => $(id).addEventListener('change', load));
+            $('resetBtn').addEventListener('click', () => {
+                $('search').value = '';
+                $('statusFilter').value = '';
+                $('fromDate').value = '';
+                $('toDate').value = '';
+                load();
+            });
+
+            load();
+        })();
+    </script>
 </body>
 
 </html>

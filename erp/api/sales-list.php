@@ -123,15 +123,15 @@ function bindDynamic(mysqli_stmt $stmt, string $types, array &$params): void
     call_user_func_array([$stmt, 'bind_param'], $bind);
 }
 
-function auditCancel(mysqli $conn, int $businessId, int $branchId, int $userId, int $saleId, string $invoiceNo, string $reason): void
+function auditSaleDelete(mysqli $conn, int $businessId, int $branchId, int $userId, int $saleId, string $invoiceNo, string $reason, array $restocked = []): void
 {
     $stmt = $conn->prepare("INSERT INTO audit_logs
         (business_id,branch_id,user_id,module_code,action_type,reference_table,reference_id,description,new_values_json,ip_address,user_agent)
-        VALUES (?,?,?,'sales.list','Cancel','sales',?,?,?,?,?,?)");
+        VALUES (?,?,?,'sales.list','Delete','sales',?,?,?,?,?,?)");
     if (!$stmt) return;
 
-    $description = 'Cancelled invoice ' . $invoiceNo;
-    $json = json_encode(['invoice_no' => $invoiceNo, 'reason' => $reason], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    $description = 'Deleted invoice ' . $invoiceNo . ' and restored sold stock';
+    $json = json_encode(['invoice_no' => $invoiceNo, 'reason' => $reason, 'restocked_items' => $restocked], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     $ip = (string)($_SERVER['REMOTE_ADDR'] ?? '');
     $ua = (string)($_SERVER['HTTP_USER_AGENT'] ?? '');
 
@@ -322,16 +322,16 @@ if ($action === 'view') {
     respond(true, 'Sale loaded.', ['sale' => $sale, 'items' => $items, 'payments' => $payments]);
 }
 
-if ($action === 'cancel') {
-    if (!permission($conn, 'delete') && !permission($conn, 'update')) {
-        respond(false, 'You do not have permission to cancel sales.', [], 403);
+if ($action === 'delete' || $action === 'cancel') {
+    if (!permission($conn, 'delete')) {
+        respond(false, 'You do not have permission to delete sales.', [], 403);
     }
 
     $saleId = (int)($_POST['sale_id'] ?? 0);
     $reason = trim((string)($_POST['cancel_reason'] ?? ''));
 
     if ($saleId <= 0) respond(false, 'Invalid sale selected.');
-    if ($reason === '') respond(false, 'Cancellation reason is required.');
+    if ($reason === '') respond(false, 'Delete reason is required.');
 
     $conn->begin_transaction();
 
@@ -348,11 +348,12 @@ if ($action === 'cancel') {
         $stmt->close();
 
         if (!$sale) throw new Exception('Sale not found.');
-        if ($sale['workflow_status'] === 'Cancelled') throw new Exception('This sale is already cancelled.');
+        if ($sale['workflow_status'] === 'Cancelled') throw new Exception('This invoice is already deleted/cancelled.');
         $saleBranchId = (int)$sale['branch_id'];
 
         $items = [];
-        $stmt = $conn->prepare('SELECT product_id, quantity, gross_weight, net_weight, metal_rate, line_total FROM sale_items WHERE sale_id = ? AND business_id = ?');
+        $restocked = [];
+        $stmt = $conn->prepare('SELECT product_id, item_name, quantity, gross_weight, net_weight, metal_rate, line_total FROM sale_items WHERE sale_id = ? AND business_id = ?');
         $stmt->bind_param('ii', $saleId, $businessId);
         $stmt->execute();
         $result = $stmt->get_result();
@@ -392,7 +393,7 @@ if ($action === 'cancel') {
             if (!$stmt->execute()) throw new Exception('Unable to restore product stock: ' . $stmt->error);
             $stmt->close();
 
-            $remarks = 'Cancelled invoice ' . $sale['invoice_no'];
+            $remarks = 'Deleted invoice ' . $sale['invoice_no'] . ' - stock restored';
             $stmt = $conn->prepare("INSERT INTO stock_movements
                 (business_id,branch_id,product_id,movement_type,reference_table,reference_id,quantity_in,quantity_out,weight_in,weight_out,rate,value_amount,remarks,created_by)
                 VALUES (?,?,?,'Adjustment In','sales',?,?,0,?,0,?,?,?,?)");
@@ -400,12 +401,20 @@ if ($action === 'cancel') {
             $stmt->bind_param('iiiiddddsi', $businessId, $saleBranchId, $productId, $saleId, $quantity, $netWeight, $rate, $value, $remarks, $userId);
             if (!$stmt->execute()) throw new Exception('Unable to add stock movement: ' . $stmt->error);
             $stmt->close();
+
+            $restocked[] = [
+                'product_id' => $productId,
+                'item_name' => (string)($item['item_name'] ?? ''),
+                'quantity' => $quantity,
+                'gross_weight' => $grossWeight,
+                'net_weight' => $netWeight
+            ];
         }
 
-        auditCancel($conn, $businessId, $saleBranchId, $userId, $saleId, (string)$sale['invoice_no'], $reason);
+        auditSaleDelete($conn, $businessId, $saleBranchId, $userId, $saleId, (string)$sale['invoice_no'], $reason, $restocked);
         $conn->commit();
 
-        respond(true, 'Sale cancelled successfully and stock restored.');
+        respond(true, 'Invoice deleted successfully. Product stock restored and Activity Log updated.', ['restocked_items' => count($restocked)]);
     } catch (Throwable $e) {
         $conn->rollback();
         respond(false, $e->getMessage(), [], 500);

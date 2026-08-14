@@ -302,7 +302,7 @@ $proofIsPdf = false;
 if ($uploadedProof !== '') {
     $proofIsPdf = strtolower((string) pathinfo(parse_url($uploadedProof, PHP_URL_PATH) ?: $uploadedProof, PATHINFO_EXTENSION)) === 'pdf';
 
-    if (preg_match('~^https?://~i', $uploadedProof) || str_starts_with($uploadedProof, 'data:')) {
+    if (preg_match('~^https?://~i', $uploadedProof) || substr($uploadedProof, 0, 5) === 'data:') {
         $proofUrl = $uploadedProof;
     } else {
         $cleanProofPath = ltrim(str_replace('\\', '/', $uploadedProof), '/');
@@ -316,10 +316,55 @@ if ($uploadedProof !== '') {
     }
 }
 
-$calculatedInterest = pawnViewCalculatedInterest($pawn);
-$interestLabel = ($pawn['interest_collection_cycle'] ?? '') === 'At Closure'
-    ? (($pawn['interest_period'] ?? 'Monthly') . ' estimate')
-    : (($pawn['interest_collection_cycle'] ?? 'Monthly') . ' cycle');
+$currentInterestPercent = isset($pawn['current_interest_percent']) && $pawn['current_interest_percent'] !== null
+    ? (float) $pawn['current_interest_percent']
+    : (float) ($pawn['interest_percent'] ?? 0);
+$initialInterestPercent = isset($pawn['initial_interest_percent']) && $pawn['initial_interest_percent'] !== null
+    ? (float) $pawn['initial_interest_percent']
+    : (float) ($pawn['interest_percent'] ?? 0);
+$interestCycleType = (string) ($pawn['interest_due_cycle_type'] ?? '');
+$interestCycleValue = max(1, (int) ($pawn['interest_due_cycle_value'] ?? 1));
+$interestGraceDays = isset($pawn['interest_grace_days']) ? (int) $pawn['interest_grace_days'] : (int) ($pawn['grace_days'] ?? 0);
+$nextDueDate = (string) ($pawn['next_interest_due_date'] ?? '');
+$graceUntil = '';
+if ($nextDueDate !== '') {
+    try {
+        $graceDate = new DateTime($nextDueDate);
+        if ($interestGraceDays > 0) $graceDate->modify('+' . $interestGraceDays . ' days');
+        $graceUntil = $graceDate->format('Y-m-d');
+    } catch (Throwable $ignore) {
+        $graceUntil = $nextDueDate;
+    }
+}
+$cycleLabel = '—';
+if ($interestCycleType === 'Calendar Month') $cycleLabel = $interestCycleValue === 1 ? 'Calendar month' : $interestCycleValue . ' calendar months';
+elseif ($interestCycleType === 'Days') $cycleLabel = $interestCycleValue . ' day' . ($interestCycleValue === 1 ? '' : 's');
+elseif ($interestCycleType === 'Months') $cycleLabel = $interestCycleValue . ' month' . ($interestCycleValue === 1 ? '' : 's');
+elseif (!empty($pawn['interest_collection_cycle'])) $cycleLabel = (string) $pawn['interest_collection_cycle'];
+
+$calculatedInterest = pawnViewRoundInterest(
+    (float) ($pawn['balance_principal'] ?? 0) * ($currentInterestPercent / 100),
+    (string) ($pawn['interest_rounding_method'] ?? 'Nearest Rupee')
+);
+$interestLabel = $cycleLabel . ' estimate';
+
+$schemeName = '';
+$currentRateLevel = '';
+$nextInterestPercent = null;
+if (pawnViewTableExists($conn, 'pawn_interest_schemes') && !empty($pawn['interest_scheme_id'])) {
+    $s = $conn->prepare('SELECT scheme_name FROM pawn_interest_schemes WHERE id=? AND business_id=? LIMIT 1');
+    if ($s) { $sid=(int)$pawn['interest_scheme_id']; $s->bind_param('ii',$sid,$businessId); $s->execute(); $r=$s->get_result()->fetch_assoc(); $schemeName=(string)($r['scheme_name']??''); $s->close(); }
+}
+if (pawnViewTableExists($conn, 'pawn_interest_rate_steps') && !empty($pawn['current_rate_step_id'])) {
+    $s = $conn->prepare('SELECT level_no,next_level_no FROM pawn_interest_rate_steps WHERE id=? AND business_id=? LIMIT 1');
+    if ($s) { $rid=(int)$pawn['current_rate_step_id']; $s->bind_param('ii',$rid,$businessId); $s->execute(); $r=$s->get_result()->fetch_assoc(); if($r){$currentRateLevel=(string)$r['level_no']; if($r['next_level_no']!==null && !empty($pawn['interest_scheme_id'])){ $n=$conn->prepare('SELECT rate_percent FROM pawn_interest_rate_steps WHERE scheme_id=? AND level_no=? AND business_id=? LIMIT 1'); if($n){$sid=(int)$pawn['interest_scheme_id']; $nl=(int)$r['next_level_no']; $n->bind_param('iii',$sid,$nl,$businessId); $n->execute(); $nr=$n->get_result()->fetch_assoc(); if($nr)$nextInterestPercent=(float)$nr['rate_percent']; $n->close(); } } } $s->close(); }
+}
+
+$bankCollateral = array();
+if (pawnViewTableExists($conn, 'pawn_bank_loan_items') && pawnViewTableExists($conn, 'pawn_bank_loans') && pawnViewTableExists($conn, 'pawn_banks')) {
+    $bs = $conn->prepare("SELECT pbli.*, pbl.bank_loan_no, pbl.principal_amount AS bank_principal_amount, pbl.balance_principal AS bank_balance_principal, pbl.bank_interest_percent, pbl.interest_payment_cycle, pbl.status AS bank_loan_status, pb.bank_name, pb.branch_name AS bank_branch_name FROM pawn_bank_loan_items pbli INNER JOIN pawn_bank_loans pbl ON pbl.id=pbli.bank_loan_id INNER JOIN pawn_banks pb ON pb.id=pbl.bank_id WHERE pbli.pawn_entry_id=? AND pbli.business_id=? ORDER BY pbli.id DESC");
+    if($bs){$bs->bind_param('ii',$pawnEntryId,$businessId);$bs->execute();$br=$bs->get_result();while($rr=$br->fetch_assoc())$bankCollateral[]=$rr;$bs->close();}
+}
 
 $receiptRelativeUrl = 'pawn-receipt.php?id=' . $pawnEntryId
     . '&ref=' . rawurlencode((string) ($pawn['pawn_no'] ?? ''));
@@ -350,15 +395,15 @@ $whatsappUrl = $whatsappNumber !== ''
     <title><?= e($businessName) ?> - <?= e($pawn['pawn_no']) ?></title>
     <?php include('includes/links.php'); require __DIR__ . '/_style.php'; ?>
     <style>
-        .detail-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
-        .detail-box{padding:11px;border:1px solid var(--line);border-radius:10px;background:var(--card-bg)}
+        .detail-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}
+        .detail-box{padding:8px 9px;border:1px solid var(--line);border-radius:9px;background:var(--card-bg);min-height:58px}
         .detail-box span{display:block;font-size:9px;color:var(--muted);text-transform:uppercase}
-        .detail-box strong{display:block;margin-top:3px;font-size:12px;word-break:break-word}
+        .detail-box strong{display:block;margin-top:2px;font-size:11px;word-break:break-word}
         .detail-box.highlight{background:var(--primary-soft);border-color:color-mix(in srgb,var(--primary-dark) 22%,var(--line))}
-        .detail-box.highlight strong{font-size:18px;color:var(--primary-dark)}
+        .detail-box.highlight strong{font-size:15px;color:var(--primary-dark)}
         .status-pill{display:inline-flex;padding:5px 9px;border-radius:999px;background:var(--primary-soft);color:var(--primary-dark);font-size:10px;font-weight:800}
-        .compact-table{font-size:10px;margin:0}
-        .compact-table th{font-size:9px;text-transform:uppercase;color:var(--muted);white-space:nowrap}
+        .compact-table{font-size:9px;margin:0}
+        .compact-table th{font-size:8px;text-transform:uppercase;color:var(--muted);white-space:nowrap;padding:7px 8px}.compact-table td{padding:7px 8px}
         .empty-row{text-align:center;color:var(--muted);padding:24px!important}
         .btn-receipt{display:inline-flex;align-items:center;gap:6px}
         .btn-whatsapp{display:inline-flex;align-items:center;gap:6px;background:#25D366!important;color:#fff!important;border-color:#25D366!important}
@@ -367,7 +412,7 @@ $whatsappUrl = $whatsappNumber !== ''
         .proof-card{grid-column:1/-1;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--card-bg)}
         .proof-card .proof-label{display:block;font-size:9px;color:var(--muted);text-transform:uppercase;margin-bottom:8px}
         .proof-preview{display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap}
-        .proof-preview img{width:min(100%,360px);max-height:240px;object-fit:contain;border:1px solid var(--line);border-radius:10px;background:#fff;padding:4px}
+        .proof-preview img{width:min(100%,280px);max-height:180px;object-fit:contain;border:1px solid var(--line);border-radius:10px;background:#fff;padding:4px}
         .proof-file-link{display:inline-flex;align-items:center;gap:6px;text-decoration:none;padding:8px 11px;border-radius:8px;border:1px solid var(--line);background:var(--primary-soft);color:var(--primary-dark);font-size:10px;font-weight:800}
         .proof-empty{font-size:11px;color:var(--muted)}
         @media(max-width:1000px){.detail-grid{grid-template-columns:repeat(2,1fr)}}
@@ -396,7 +441,7 @@ $whatsappUrl = $whatsappNumber !== ''
                     </a>
                 <?php endif; ?>
                 <a href="pawn-interest.php?pawn_id=<?= $pawnEntryId ?>" class="btn-soft">Collect Interest</a>
-                <a href="pawn-payment.php?pawn_id=<?= $pawnEntryId ?>" class="btn-soft">Payment</a>
+               
                 <a href="pawn-edit.php?id=<?= $pawnEntryId ?>" class="btn-theme"><i class="fa-solid fa-pen"></i> Edit</a>
             </div>
         </div>
@@ -414,10 +459,10 @@ $whatsappUrl = $whatsappNumber !== ''
                 <div class="detail-box"><span>Principal Paid</span><strong>₹<?= pawnViewMoney($pawn['total_principal_paid']) ?></strong></div>
                 <div class="detail-box highlight"><span>Balance Principal</span><strong>₹<?= pawnViewMoney($pawn['balance_principal']) ?></strong></div>
                 <div class="detail-box"><span>Interest Collected</span><strong>₹<?= pawnViewMoney($pawn['total_interest_collected']) ?></strong></div>
-                <div class="detail-box"><span>Interest Rate</span><strong><?= number_format((float) $pawn['interest_percent'], 3) ?>% <?= e($pawn['interest_period']) ?></strong></div>
-                <div class="detail-box highlight"><span>Calculated Interest</span><strong>₹<?= pawnViewMoney($calculatedInterest) ?></strong><small class="text-muted"><?= e($interestLabel) ?></small></div>
-                <div class="detail-box"><span>Interest Method</span><strong><?= e($pawn['interest_method']) ?></strong></div>
-                <div class="detail-box"><span>Collection Cycle</span><strong><?= e($pawn['interest_collection_cycle']) ?></strong></div>
+                <div class="detail-box"><span>Current Interest</span><strong><?= number_format($currentInterestPercent, 3) ?>%</strong><small class="text-muted"><?= e($cycleLabel) ?></small></div>
+                <div class="detail-box highlight"><span>Cycle Interest Estimate</span><strong>₹<?= pawnViewMoney($calculatedInterest) ?></strong><small class="text-muted"><?= e($interestLabel) ?></small></div>
+                <div class="detail-box"><span>Interest Scheme</span><strong><?= e($schemeName ?: 'Legacy / Manual') ?></strong></div>
+                <div class="detail-box"><span>Rate Level</span><strong><?= e($currentRateLevel !== '' ? 'Level ' . $currentRateLevel : '—') ?></strong><small class="text-muted"><?= $nextInterestPercent !== null ? 'Next: ' . number_format($nextInterestPercent,3) . '%' : 'Final level' ?></small></div>
             </div>
         </div>
     </div>
@@ -492,25 +537,51 @@ $whatsappUrl = $whatsappNumber !== ''
         </div>
     </div>
 
-    <div class="page-card mb-3">
-        <div class="page-head"><div class="section-title">Interest Configuration</div></div>
+    <div class="page-card mb-2">
+        <div class="page-head"><div class="section-title">Interest Rule & Escalation</div></div>
         <div class="card-body-x">
             <div class="detail-grid">
-                <div class="detail-box"><span>Cycle Months</span><strong><?= e($pawn['interest_cycle_months']) ?></strong></div>
-                <div class="detail-box"><span>Minimum Interest Days</span><strong><?= e($pawn['minimum_interest_days']) ?></strong></div>
-                <div class="detail-box"><span>Rounding Method</span><strong><?= e($pawn['interest_rounding_method']) ?></strong></div>
-                <div class="detail-box"><span>Tenure</span><strong><?= e($pawn['tenure_months']) ?> month(s)</strong></div>
-                <div class="detail-box"><span>Last Interest Paid Upto</span><strong><?= e(pawnViewDate($pawn['last_interest_paid_upto'])) ?></strong></div>
-                <div class="detail-box"><span>Next Interest Due</span><strong><?= e(pawnViewDate($pawn['next_interest_due_date'])) ?></strong></div>
-                <div class="detail-box"><span>Grace Days</span><strong><?= e($pawn['grace_days']) ?></strong></div>
-                <div class="detail-box"><span>Overdue Type</span><strong><?= e($pawn['overdue_charge_type']) ?></strong></div>
-                <div class="detail-box"><span>Overdue Value</span><strong><?= pawnViewMoney($pawn['overdue_charge_value']) ?></strong></div>
-                <div class="detail-box"><span>Maximum Overdue</span><strong><?= $pawn['maximum_overdue_charge'] !== null ? '₹' . pawnViewMoney($pawn['maximum_overdue_charge']) : '—' ?></strong></div>
-                <div class="detail-box"><span>Auction Eligible Date</span><strong><?= e(pawnViewDate($pawn['auction_eligible_date'])) ?></strong></div>
-                <div class="detail-box"><span>Closure Date</span><strong><?= e(pawnViewDate($pawn['closure_date'])) ?></strong></div>
+                <div class="detail-box"><span>Initial Rate</span><strong><?= number_format($initialInterestPercent, 3) ?>%</strong></div>
+                <div class="detail-box highlight"><span>Current Rate</span><strong><?= number_format($currentInterestPercent, 3) ?>%</strong></div>
+                <div class="detail-box"><span>Due Cycle</span><strong><?= e($cycleLabel) ?></strong></div>
+                <div class="detail-box"><span>Grace Days</span><strong><?= e($interestGraceDays) ?></strong></div>
+                <div class="detail-box"><span>Last Paid Upto</span><strong><?= e(pawnViewDate($pawn['last_interest_paid_upto'] ?? '')) ?></strong></div>
+                <div class="detail-box"><span>Next Interest Due</span><strong><?= e(pawnViewDate($nextDueDate)) ?></strong></div>
+                <div class="detail-box"><span>Grace Until</span><strong><?= e(pawnViewDate($graceUntil)) ?></strong></div>
+                <div class="detail-box"><span>Missed Cycles</span><strong><?= e($pawn['missed_interest_cycles'] ?? 0) ?></strong></div>
+                <div class="detail-box"><span>Escalations</span><strong><?= e($pawn['rate_escalation_count'] ?? 0) ?></strong></div>
+                <div class="detail-box"><span>Escalated At</span><strong><?= e(pawnViewDate($pawn['rate_escalated_at'] ?? '')) ?></strong></div>
+                <div class="detail-box"><span>Next Rate</span><strong><?= $nextInterestPercent !== null ? number_format($nextInterestPercent,3).'%' : 'Final level' ?></strong></div>
+                <div class="detail-box"><span>Bank Pledge</span><strong><?= e($pawn['bank_pledge_status'] ?? 'Not Pledged') ?></strong></div>
             </div>
         </div>
     </div>
+
+    <?php if (!empty($bankCollateral)): ?>
+    <div class="page-card mb-2">
+        <div class="page-head"><div class="section-title">Bank Pledge Tracking</div></div>
+        <div class="table-responsive">
+            <table class="table compact-table align-middle">
+                <thead><tr><th>Bank</th><th>Loan No</th><th>Collateral</th><th>Allocated Principal</th><th>Bank Principal</th><th>Bank Balance</th><th>Bank Interest</th><th>Pay Cycle</th><th>Status</th></tr></thead>
+                <tbody>
+                <?php foreach ($bankCollateral as $bc): ?>
+                    <tr>
+                        <td><strong><?= e($bc['bank_name'] ?? '—') ?></strong><div class="text-muted"><?= e($bc['bank_branch_name'] ?? '') ?></div></td>
+                        <td><?= e($bc['bank_loan_no'] ?? '—') ?></td>
+                        <td><?= number_format((float)($bc['pledged_net_weight'] ?? 0),3) ?> g</td>
+                        <td>₹<?= pawnViewMoney($bc['allocated_bank_principal'] ?? 0) ?></td>
+                        <td>₹<?= pawnViewMoney($bc['bank_principal_amount'] ?? 0) ?></td>
+                        <td>₹<?= pawnViewMoney($bc['bank_balance_principal'] ?? 0) ?></td>
+                        <td><?= number_format((float)($bc['bank_interest_percent'] ?? 0),3) ?>%</td>
+                        <td><?= e($bc['interest_payment_cycle'] ?? '—') ?></td>
+                        <td><?= e($bc['status'] ?? $bc['bank_loan_status'] ?? '—') ?></td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+    </div>
+    <?php endif; ?>
 
     <div class="page-card mb-3">
         <div class="page-head"><div class="section-title">Pawn Items</div></div>

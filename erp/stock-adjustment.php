@@ -122,6 +122,7 @@ $prodHasBarcode = hasColumn($conn, 'products', 'barcode');
 $prodHasPurity = hasColumn($conn, 'products', 'purity');
 $prodHasUnitId = hasColumn($conn, 'products', 'unit_id');
 $prodHasCurrentStockQty = hasColumn($conn, 'products', 'current_stock_qty');
+$prodHasNetWeight = hasColumn($conn, 'products', 'net_weight');
 $prodHasIsActive = hasColumn($conn, 'products', 'is_active');
 $prodHasUpdatedAt = hasColumn($conn, 'products', 'updated_at');
 $prodHasTaxType = hasColumn($conn, 'products', 'tax_type');
@@ -326,6 +327,10 @@ if ($prodHasCurrentStockQty) {
     $productSql .= ", current_stock_qty";
 }
 
+if ($prodHasNetWeight) {
+    $productSql .= ", net_weight";
+}
+
 if ($prodHasTaxType) {
     $productSql .= ", tax_type";
 } elseif ($prodHasTaxPercent) {
@@ -393,6 +398,65 @@ if ($stmt) {
     $stmt->close();
 }
 
+/*
+ * Load current branch stock for every product once.
+ * These values are embedded into the product dropdown so Quantity and
+ * Net Weight can be filled immediately without reloading the page.
+ */
+$productStockMap = [];
+
+if (!empty($products) && tableExists($conn, 'product_stock')) {
+    $productIds = [];
+    foreach ($products as $productRow) {
+        $pid = (int)($productRow['id'] ?? 0);
+        if ($pid > 0) {
+            $productIds[$pid] = $pid;
+        }
+    }
+
+    if (!empty($productIds)) {
+        $idList = implode(',', array_map('intval', array_values($productIds)));
+        $stockSql = "SELECT product_id,
+                            COALESCE(quantity,0) AS quantity,
+                            COALESCE(net_weight,0) AS net_weight,
+                            COALESCE(gross_weight,0) AS gross_weight
+                     FROM product_stock
+                     WHERE business_id=" . (int)$businessId . "
+                       AND branch_id=" . (int)$branchId . "
+                       AND product_id IN ({$idList})";
+
+        $stockRes = $conn->query($stockSql);
+        while ($stockRes && $stockRow = $stockRes->fetch_assoc()) {
+            $productStockMap[(int)$stockRow['product_id']] = [
+                'quantity' => (float)($stockRow['quantity'] ?? 0),
+                'net_weight' => (float)($stockRow['net_weight'] ?? 0),
+                'gross_weight' => (float)($stockRow['gross_weight'] ?? 0),
+            ];
+        }
+    }
+}
+
+foreach ($products as &$productRow) {
+    $pid = (int)($productRow['id'] ?? 0);
+    $stock = $productStockMap[$pid] ?? [
+        'quantity' => (float)($productRow['current_stock_qty'] ?? 0),
+        'net_weight' => 0.0,
+        'gross_weight' => 0.0,
+    ];
+
+    $productRow['_stock_quantity'] = (float)$stock['quantity'];
+
+    // Product master net_weight is NET WEIGHT PER QUANTITY.
+    $productRow['_stock_net_weight'] = $prodHasNetWeight
+        ? (float)($productRow['net_weight'] ?? 0)
+        : 0.0;
+
+    // Total/Gross stock weight = Quantity x Net Weight per Qty.
+    $productRow['_stock_gross_weight'] =
+        (float)$productRow['_stock_quantity'] * (float)$productRow['_stock_net_weight'];
+}
+unset($productRow);
+
 /* -------------------------------------------------------
    FORM DEFAULTS - GET ONLY AFTER REDIRECT
 ------------------------------------------------------- */
@@ -426,12 +490,22 @@ if ($selectedProductId > 0) {
             : ($prodHasTaxPercent ? " AND COALESCE(p.tax_percent,0)<=0" : " AND 1=0");
     }
 
-    $stmt = $conn->prepare("SELECT p.id,p.product_name,p.product_code,p.barcode,p.purity,{$selectedTaxSelect},COALESCE(u.unit_name,'pcs') AS unit,COALESCE(ps.quantity,0) AS quantity,COALESCE(ps.gross_weight,0) AS gross_weight,COALESCE(ps.net_weight,0) AS net_weight FROM products p LEFT JOIN units u ON u.id=p.unit_id LEFT JOIN product_stock ps ON ps.product_id=p.id AND ps.business_id=p.business_id AND ps.branch_id=? WHERE p.id=? AND p.business_id=? AND p.is_active=1 {$selectedTaxWhere} LIMIT 1");
+    $selectedNetWeightSelect = $prodHasNetWeight
+        ? "COALESCE(p.net_weight,0) AS net_weight"
+        : "0 AS net_weight";
+
+    $stmt = $conn->prepare("SELECT p.id,p.product_name,p.product_code,p.barcode,p.purity,{$selectedTaxSelect},COALESCE(u.unit_name,'pcs') AS unit,COALESCE(ps.quantity,0) AS quantity,{$selectedNetWeightSelect} FROM products p LEFT JOIN units u ON u.id=p.unit_id LEFT JOIN product_stock ps ON ps.product_id=p.id AND ps.business_id=p.business_id AND ps.branch_id=? WHERE p.id=? AND p.business_id=? AND p.is_active=1 {$selectedTaxWhere} LIMIT 1");
     if ($stmt) {
         $stmt->bind_param('iii', $branchId, $selectedProductId, $businessId);
         $stmt->execute();
         $selectedProduct = $stmt->get_result()->fetch_assoc() ?: null;
         $stmt->close();
+
+        if ($selectedProduct) {
+            $selectedProduct['gross_weight'] =
+                (float)($selectedProduct['quantity'] ?? 0) *
+                (float)($selectedProduct['net_weight'] ?? 0);
+        }
     }
 }
 
@@ -565,6 +639,7 @@ unset($adjustmentRow);
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <title><?php echo h($businessName); ?> - Stock Adjustment</title><?php include('includes/links.php'); ?>
+    <link href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" rel="stylesheet">
     <style>
         :root {
             --primary: <?php echo h($theme['primary_color']); ?>;
@@ -617,6 +692,60 @@ unset($adjustmentRow);
             min-height: 36px;
             border-radius: 9px;
             border-color: var(--border-color)
+        }
+
+        .select2-container {
+            width: 100% !important
+        }
+
+        .select2-container .select2-selection--single {
+            height: 36px;
+            min-height: 36px;
+            border: 1px solid var(--border-color);
+            border-radius: 9px;
+            background: var(--card-bg)
+        }
+
+        .select2-container .select2-selection--single .select2-selection__rendered {
+            line-height: 34px;
+            padding-left: 12px;
+            padding-right: 30px;
+            color: var(--text-color);
+            font-size: 11px
+        }
+
+        .select2-container .select2-selection--single .select2-selection__arrow {
+            height: 34px;
+            right: 5px
+        }
+
+        .select2-dropdown {
+            border-color: var(--border-color);
+            font-size: 11px;
+            z-index: 21000
+        }
+
+        .select2-container--open {
+            z-index: 21000
+        }
+
+        .select2-container .select2-selection--single:focus,
+        .select2-container--default.select2-container--focus .select2-selection--single {
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 18%, transparent);
+            outline: 0
+        }
+
+        .select2-search--dropdown .select2-search__field {
+            border: 1px solid var(--border-color);
+            border-radius: 7px;
+            padding: 7px 9px;
+            outline: 0
+        }
+
+        .select2-results__option--highlighted.select2-results__option--selectable {
+            background: var(--primary) !important;
+            color: #fff !important
         }
 
         .btn-theme {
@@ -814,7 +943,8 @@ unset($adjustmentRow);
                             <div class="panel-title">Adjustment Entry</div>
                             <form id="adjustmentForm"
                                 data-current-qty="<?php echo h((string) ($selectedProduct['quantity'] ?? 0)); ?>"
-                                data-current-weight="<?php echo h((string) ($selectedProduct['net_weight'] ?? 0)); ?>"><input
+                                data-current-weight="<?php echo h((string) ($selectedProduct['gross_weight'] ?? 0)); ?>"
+                                data-unit-net-weight="<?php echo h((string) ($selectedProduct['net_weight'] ?? 0)); ?>"><input
                                     type="hidden" name="csrf_token" value="<?php echo h($csrfToken); ?>"><input
                                     type="hidden" name="action" value="save">
                                 <div class="row g-3">
@@ -822,7 +952,12 @@ unset($adjustmentRow);
                                             id="product_id" class="form-select" required>
                                             <option value="0">Select Product</option>
                                             <?php foreach ($products as $product): ?>
-                                                <option value="<?php echo (int) $product['id']; ?>" <?php echo $selectedProductId === (int) $product['id'] ? 'selected' : ''; ?>>
+                                                <option
+                                                    value="<?php echo (int) $product['id']; ?>"
+                                                    data-stock-qty="<?php echo h(number_format((float)($product['_stock_quantity'] ?? 0), 3, '.', '')); ?>"
+                                                    data-stock-net="<?php echo h(number_format((float)($product['_stock_net_weight'] ?? 0), 3, '.', '')); ?>"
+                                                    data-stock-gross="<?php echo h(number_format((float)($product['_stock_gross_weight'] ?? 0), 3, '.', '')); ?>"
+                                                    <?php echo $selectedProductId === (int) $product['id'] ? 'selected' : ''; ?>>
                                                     <?php
                                                     $label = $product['product_name']
                                                         . (!empty($product['product_code']) ? ' - ' . $product['product_code'] : '');
@@ -842,9 +977,11 @@ unset($adjustmentRow);
                                     <div class="col-md-4"><label class="form-label">Quantity *</label><input type="number"
                                             step="0.001" min="0" name="adjustment_qty" id="adjustment_qty"
                                             class="form-control" placeholder="0.000"></div>
-                                    <div class="col-md-4"><label class="form-label">Net Weight *</label><input type="number"
-                                            step="0.001" min="0" name="adjustment_weight" id="adjustment_weight"
-                                            class="form-control" placeholder="0.000"></div>
+                                    <div class="col-md-4"><label class="form-label">Net Weight / Qty *</label><input type="number"
+                                            step="0.001" min="0" id="unit_net_weight"
+                                            class="form-control" placeholder="0.000" readonly>
+                                        <input type="hidden" name="adjustment_weight" id="adjustment_weight" value="0">
+                                    </div>
                                     <div class="col-md-4"><label class="form-label">Reason Type *</label><select
                                             name="reason_type" class="form-select" required>
                                             <option value="Physical Count Correction">Physical Count Correction</option>
@@ -863,17 +1000,17 @@ unset($adjustmentRow);
                                             class="form-control"
                                             value="<?php echo h((string) ($_SESSION['full_name'] ?? $_SESSION['username'] ?? 'Current User')); ?>"
                                             readonly></div>
-                                    <div class="col-12"><label class="form-label">Clear Reason / Remarks *</label><textarea
+                                    <div class="col-12"><label class="form-label">Clear Reason / Remarks <span class="muted">(Optional)</span></label><textarea
                                             name="remarks" maxlength="500" rows="2" class="form-control"
-                                            placeholder="Explain why this stock is being adjusted" required></textarea>
+                                            placeholder="Optional: explain why this stock is being adjusted"></textarea>
                                     </div>
                                     <div class="col-12">
                                         <div class="adjust-preview">
-                                            <div class="preview-box"><span>Previous Stock</span><b
+                                            <div class="preview-box"><span>Previous Qty / Total Weight</span><b
                                                     id="previewPrevious">0.000 / 0.000</b></div>
-                                            <div class="preview-box"><span>Adjustment</span><b id="previewChange">+0.000 /
+                                            <div class="preview-box"><span>Adjustment Qty / Total Weight</span><b id="previewChange">+0.000 /
                                                     +0.000</b></div>
-                                            <div class="preview-box"><span>Resulting Stock</span><b id="previewResult">0.000
+                                            <div class="preview-box"><span>Resulting Qty / Total Weight</span><b id="previewResult">0.000
                                                     / 0.000</b></div>
                                         </div>
                                     </div>
@@ -885,7 +1022,27 @@ unset($adjustmentRow);
                     </div>
                     <div class="col-lg-5">
                         <div class="panel">
-                            <div class="panel-title">Selected Product Stock</div><?php if ($selectedProduct): ?>
+                            <div class="panel-title">Selected Product Stock</div>
+                            <div id="selectedProductDynamic" class="<?php echo $selectedProduct ? '' : 'd-none'; ?>">
+                                <div class="mb-3">
+                                    <b id="selectedProductName"><?php echo h($selectedProduct['product_name'] ?? ''); ?></b>
+                                    <div class="muted" id="selectedProductMeta">
+                                        <?php if ($selectedProduct): ?>
+                                            <?php echo h($selectedProduct['product_code'] ?? ''); ?>
+                                            <?php if (!empty($selectedProduct['barcode'])): ?> · <?php echo h($selectedProduct['barcode']); ?><?php endif; ?>
+                                            <?php if (!empty($selectedProduct['purity'])): ?> · Purity <?php echo h($selectedProduct['purity']); ?>%<?php endif; ?>
+                                        <?php endif; ?>
+                                    </div>
+                                </div>
+                                <div class="stock-detail">
+                                    <div class="detail"><span class="muted">Current Quantity</span><b id="selectedCurrentQty"><?php echo number_format((float)($selectedProduct['quantity'] ?? 0), 3); ?></b></div>
+                                    <div class="detail"><span class="muted">Net Weight / Qty</span><b id="selectedCurrentNet"><?php echo number_format((float)($selectedProduct['net_weight'] ?? 0), 3); ?></b></div>
+                                    <div class="detail"><span class="muted">Total Weight (Qty x Net)</span><b id="selectedCurrentGross"><?php echo number_format((float)($selectedProduct['gross_weight'] ?? 0), 3); ?></b></div>
+                                    <div class="detail"><span class="muted">Product</span><b id="selectedProductShort"><?php echo h($selectedProduct['product_name'] ?? '-'); ?></b></div>
+                                </div>
+                            </div>
+                            <div id="selectedProductEmpty" class="muted <?php echo $selectedProduct ? 'd-none' : ''; ?>">Select a product to see current stock details.</div>
+                            <div class="d-none"><?php if ($selectedProduct): ?>
                                 <div class="mb-3"><b><?php echo h($selectedProduct['product_name']); ?></b>
                                     <div class="muted">
                                         <?php echo h($selectedProduct['product_code'] ?? ''); ?>        <?php if (!empty($selectedProduct['barcode'])): ?>
@@ -914,7 +1071,7 @@ unset($adjustmentRow);
                                 <div class="alert alert-light border mt-3 mb-0 muted"><i
                                         class="fa-solid fa-circle-info me-1"></i>The saved record will include previous stock,
                                     adjustment amount, resulting stock, reason, date, branch and user.</div><?php else: ?>
-                                <div class="muted">Select a product to see current stock details.</div><?php endif; ?>
+                                <div class="muted">Select a product to see current stock details.</div><?php endif; ?></div>
                         </div>
                     </div>
                 </div>
@@ -976,7 +1133,20 @@ unset($adjustmentRow);
                 </div><?php endif; ?><?php include('includes/footer.php'); ?>
         </div>
     </main><?php include('includes/script.php'); ?>
+
+    <script>
+        /*
+         * Select2 requires jQuery. Some ERP layouts do not load jQuery from
+         * includes/script.php, so load it only when it is missing.
+         */
+        if (typeof window.jQuery === 'undefined') {
+            document.write('<script src="https://code.jquery.com/jquery-3.7.1.min.js"><\/script>');
+        }
+    </script>
+
+    <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
     <script src="assets/js/script.js"></script>
+
     <script>
         (function () {
             'use strict';
@@ -984,7 +1154,8 @@ unset($adjustmentRow);
             const product = document.getElementById('product_id');
             const mode = document.getElementById('adjustment_mode');
             const qtyInput = document.getElementById('adjustment_qty');
-            const weightInput = document.getElementById('adjustment_weight');
+            const unitNetInput = document.getElementById('unit_net_weight');
+            const weightInput = document.getElementById('adjustment_weight'); // hidden total weight sent to API
             const saveButton = document.getElementById('saveButton');
 
             function toast(type, msg) {
@@ -1004,6 +1175,22 @@ unset($adjustmentRow);
                 return Number.isFinite(value) ? value : 0;
             }
 
+            function unitNetWeight() {
+                return numberValue(unitNetInput);
+            }
+
+            function syncAdjustmentWeight() {
+                const qty = numberValue(qtyInput);
+                const unitNet = unitNetWeight();
+                const totalWeight = Math.max(0, qty * unitNet);
+
+                if (weightInput) {
+                    weightInput.value = totalWeight.toFixed(3);
+                }
+
+                return totalWeight;
+            }
+
             function currentStock() {
                 return {
                     qty: Number(form?.dataset.currentQty || 0),
@@ -1012,8 +1199,32 @@ unset($adjustmentRow);
             }
 
             function updatePreview() {
-                if (!form) return; const stock = currentStock(); const q = numberValue(qtyInput), w = numberValue(weightInput); let nq = stock.qty, nw = stock.weight, cq = q, cw = w;
-                if (mode.value === 'add') { nq = stock.qty + q; nw = stock.weight + w; } else if (mode.value === 'subtract') { cq = -q; cw = -w; nq = stock.qty - q; nw = stock.weight - w; } else { cq = q - stock.qty; cw = w - stock.weight; nq = q; nw = w; }
+                if (!form) return;
+
+                const stock = currentStock();
+                const q = numberValue(qtyInput);
+                const w = syncAdjustmentWeight();
+
+                let nq = stock.qty;
+                let nw = stock.weight;
+                let cq = q;
+                let cw = w;
+
+                if (mode.value === 'add') {
+                    nq = stock.qty + q;
+                    nw = stock.weight + w;
+                } else if (mode.value === 'subtract') {
+                    cq = -q;
+                    cw = -w;
+                    nq = stock.qty - q;
+                    nw = stock.weight - w;
+                } else {
+                    cq = q - stock.qty;
+                    cw = w - stock.weight;
+                    nq = q;
+                    nw = w;
+                }
+
                 const sign = v => (v >= 0 ? '+' : '') + v.toFixed(3);
                 document.getElementById('previewPrevious').textContent = stock.qty.toFixed(3) + ' / ' + stock.weight.toFixed(3);
                 document.getElementById('previewChange').textContent = sign(cq) + ' / ' + sign(cw);
@@ -1027,14 +1238,10 @@ unset($adjustmentRow);
 
                 if (subtract) {
                     qtyInput.max = String(Math.max(0, stock.qty));
-                    weightInput.max = String(Math.max(0, stock.weight));
                     qtyInput.placeholder = 'Maximum ' + stock.qty.toFixed(3);
-                    weightInput.placeholder = 'Maximum ' + stock.weight.toFixed(3);
                 } else {
                     qtyInput.removeAttribute('max');
-                    weightInput.removeAttribute('max');
                     qtyInput.placeholder = '0.000';
-                    weightInput.placeholder = '0.000';
                 }
                 updatePreview();
             }
@@ -1045,7 +1252,7 @@ unset($adjustmentRow);
                 }
 
                 const qty = numberValue(qtyInput);
-                const weight = numberValue(weightInput);
+                const weight = syncAdjustmentWeight();
 
                 if (qty < 0 || weight < 0) {
                     return 'Quantity and weight cannot be negative.';
@@ -1074,22 +1281,160 @@ unset($adjustmentRow);
                 return '';
             }
 
+            function selectedProductOption() {
+                if (!product || !product.options || product.selectedIndex < 0) return null;
+                return product.options[product.selectedIndex] || null;
+            }
+
+            function productOptionNumber(option, key) {
+                if (!option) return 0;
+                const value = Number(option.dataset[key] || 0);
+                return Number.isFinite(value) ? value : 0;
+            }
+
+            function updateSelectedProductCard(option) {
+                const wrapper = document.getElementById('selectedProductDynamic');
+                const empty = document.getElementById('selectedProductEmpty');
+
+                if (!option || !option.value || option.value === '0') {
+                    wrapper?.classList.add('d-none');
+                    empty?.classList.remove('d-none');
+                    return;
+                }
+
+                const qty = productOptionNumber(option, 'stockQty');
+                const net = productOptionNumber(option, 'stockNet');
+                const gross = qty * net;
+                const label = (option.textContent || '').trim();
+
+                const nameEl = document.getElementById('selectedProductName');
+                const shortEl = document.getElementById('selectedProductShort');
+                const qtyEl = document.getElementById('selectedCurrentQty');
+                const netEl = document.getElementById('selectedCurrentNet');
+                const grossEl = document.getElementById('selectedCurrentGross');
+
+                if (nameEl) nameEl.textContent = label;
+                if (shortEl) shortEl.textContent = label;
+                if (qtyEl) qtyEl.textContent = qty.toFixed(3);
+                if (netEl) netEl.textContent = net.toFixed(3);
+                if (grossEl) grossEl.textContent = gross.toFixed(3);
+
+                wrapper?.classList.remove('d-none');
+                empty?.classList.add('d-none');
+            }
+
+            function applySelectedProductStock(fillInputs = true) {
+                if (!form || !product) return;
+
+                const option = selectedProductOption();
+
+                if (!option || !option.value || option.value === '0') {
+                    form.dataset.currentQty = '0';
+                    form.dataset.currentWeight = '0';
+
+                    if (fillInputs) {
+                        qtyInput.value = '';
+                        if (unitNetInput) unitNetInput.value = '';
+                        weightInput.value = '0';
+                    }
+
+                    updateSelectedProductCard(null);
+                    updateInputLimits();
+                    return;
+                }
+
+                const qty = productOptionNumber(option, 'stockQty');
+                const net = productOptionNumber(option, 'stockNet');
+                const totalWeight = qty * net;
+
+                form.dataset.currentQty = String(qty);
+                form.dataset.currentWeight = String(totalWeight);
+                form.dataset.unitNetWeight = String(net);
+
+                if (unitNetInput) {
+                    unitNetInput.value = net.toFixed(3);
+                }
+
+                if (fillInputs) {
+                    qtyInput.value = mode && mode.value === 'set' ? qty.toFixed(3) : '0.000';
+                    syncAdjustmentWeight();
+                }
+
+                updateSelectedProductCard(option);
+                updateInputLimits();
+            }
+
+            function initSelect2() {
+                if (!window.jQuery) {
+                    console.error('Stock Adjustment: jQuery is not loaded.');
+                    return false;
+                }
+
+                const $ = window.jQuery;
+
+                if (!$.fn || !$.fn.select2) {
+                    console.error('Stock Adjustment: Select2 library is not loaded.');
+                    return false;
+                }
+
+                $('select.form-select').each(function () {
+                    const $select = $(this);
+
+                    if ($select.data('select2')) {
+                        $select.select2('destroy');
+                    }
+
+                    const config = {
+                        width: '100%',
+                        minimumResultsForSearch: 0
+                    };
+
+                    if (this.id === 'product_id') {
+                        config.placeholder = 'Search / Select Product';
+                        config.allowClear = true;
+                    }
+
+                    $select.select2(config);
+                });
+
+                $('#product_id')
+                    .off('.stockAdjustment')
+                    .on('select2:select.stockAdjustment select2:clear.stockAdjustment change.stockAdjustment', function () {
+                        applySelectedProductStock(true);
+                    });
+
+                return true;
+            }
+
             if (product) {
                 product.addEventListener('change', () => {
-                    const params = new URLSearchParams();
-                    if (product.value !== '0') {
-                        params.set('product_id', product.value);
-                    }
-                    <?php if ($nonGstModeActive): ?>
-                    params.set('tax_type', <?php echo json_encode($taxTypeFilter); ?>);
-                    <?php endif; ?>
-                    location.href = 'stock-adjustment.php' + (params.toString() ? '?' + params.toString() : '');
+                    applySelectedProductStock(true);
                 });
             }
 
-            mode?.addEventListener('change', updateInputLimits);
+            function bootSelect2() {
+                initSelect2();
+
+                // Keep existing selected product values when page loads.
+                // Future selections auto-fill quantity and net weight.
+                updateSelectedProductCard(selectedProductOption());
+            }
+
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', bootSelect2);
+            } else {
+                bootSelect2();
+            }
+
+            mode?.addEventListener('change', () => {
+                const option = selectedProductOption();
+                if (option && option.value && option.value !== '0') {
+                    const currentQty = productOptionNumber(option, 'stockQty');
+                    qtyInput.value = mode.value === 'set' ? currentQty.toFixed(3) : '0.000';
+                }
+                updateInputLimits();
+            });
             qtyInput?.addEventListener('input', updatePreview);
-            weightInput?.addEventListener('input', updatePreview);
             updateInputLimits();
 
             if (form) {
@@ -1107,6 +1452,7 @@ unset($adjustmentRow);
                     saveButton.innerHTML = '<i class="fa-solid fa-spinner fa-spin me-2"></i>Saving...';
 
                     try {
+                        syncAdjustmentWeight();
                         const r = await fetch('api/stock-adjustment-save.php', {
                             method: 'POST',
                             body: new FormData(form),

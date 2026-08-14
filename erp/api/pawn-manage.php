@@ -143,16 +143,39 @@ if ($action === 'list') {
                 p.balance_principal,
                 p.total_interest_collected,
                 p.interest_percent,
+                COALESCE(p.current_interest_percent,p.interest_percent,0) AS current_interest_percent,
+                COALESCE(p.initial_interest_percent,p.interest_percent,0) AS initial_interest_percent,
                 p.interest_period,
                 p.interest_method,
                 p.interest_collection_cycle,
                 p.interest_cycle_months,
+                p.interest_scheme_id,
+                p.initial_rate_step_id,
+                p.current_rate_step_id,
+                p.interest_due_cycle_type,
+                p.interest_due_cycle_value,
+                p.interest_grace_days,
+                p.last_interest_paid_upto,
+                p.next_interest_due_date,
+                p.missed_interest_cycles,
+                p.rate_escalation_count,
+                p.rate_escalated_at,
+                p.interest_rule_locked,
+                p.re_registered_from_pawn_id,
+                p.re_registered_to_pawn_id,
+                p.bank_pledge_status,
                 p.status,
                 COALESCE(c.customer_name,'') AS customer_name,
                 COALESCE(c.customer_code,'') AS customer_code,
                 COALESCE(c.mobile,'') AS mobile,
                 COALESCE(pc.category_name,'') AS category_name,
-                COALESCE(b.branch_name,'') AS branch_name
+                COALESCE(b.branch_name,'') AS branch_name,
+                COALESCE(pis.scheme_code,'') AS interest_scheme_code,
+                COALESCE(pis.scheme_name,'') AS interest_scheme_name,
+                COALESCE(prs.level_no,1) AS current_rate_level,
+                prs.next_level_no AS next_rate_level,
+                nrs.rate_percent AS next_interest_percent,
+                COALESCE(prs.grace_days,p.interest_grace_days,0) AS effective_grace_days
             FROM pawn_entries p
             LEFT JOIN customers c
                 ON c.id=p.customer_id
@@ -163,6 +186,16 @@ if ($action === 'list') {
             LEFT JOIN branches b
                 ON b.id=p.branch_id
                AND b.business_id=p.business_id
+            LEFT JOIN pawn_interest_schemes pis
+                ON pis.id=p.interest_scheme_id
+               AND pis.business_id=p.business_id
+            LEFT JOIN pawn_interest_rate_steps prs
+                ON prs.id=p.current_rate_step_id
+               AND prs.business_id=p.business_id
+            LEFT JOIN pawn_interest_rate_steps nrs
+                ON nrs.scheme_id=prs.scheme_id
+               AND nrs.level_no=prs.next_level_no
+               AND nrs.business_id=p.business_id
             WHERE " . implode(' AND ', $where) . "
             ORDER BY p.id DESC
             LIMIT 1000";
@@ -176,6 +209,32 @@ if ($action === 'list') {
     $result = $stmt->get_result();
     $rows = array();
     while ($row = $result->fetch_assoc()) {
+        $row['grace_until'] = null;
+        $nextDue = isset($row['next_interest_due_date']) ? (string)$row['next_interest_due_date'] : '';
+        $graceDays = isset($row['effective_grace_days']) ? (int)$row['effective_grace_days'] : 0;
+        if ($nextDue !== '') {
+            try {
+                $dt = new DateTime($nextDue);
+                if ($graceDays > 0) {
+                    $dt->modify('+' . $graceDays . ' days');
+                }
+                $row['grace_until'] = $dt->format('Y-m-d');
+            } catch (Throwable $ignore) {
+                $row['grace_until'] = $nextDue;
+            }
+        }
+        $row['active_bank_collateral_count'] = 0;
+        if (tableExists($conn, 'pawn_bank_loan_items')) {
+            $bc = $conn->prepare("SELECT COUNT(*) cnt FROM pawn_bank_loan_items WHERE pawn_entry_id=? AND business_id=? AND status='Pledged'");
+            if ($bc) {
+                $pid = (int)$row['id'];
+                $bc->bind_param('ii', $pid, $businessId);
+                $bc->execute();
+                $br = $bc->get_result()->fetch_assoc();
+                $row['active_bank_collateral_count'] = (int)($br['cnt'] ?? 0);
+                $bc->close();
+            }
+        }
         $rows[] = $row;
     }
     $stmt->close();
@@ -205,99 +264,7 @@ if ($action === 'list') {
 }
 
 if ($action === 'delete') {
-    $pawnId = (int) ($_POST['id'] ?? 0);
-    if ($pawnId <= 0) {
-        respond(false, 'Invalid pawn entry.', array(), 422);
-    }
-
-    $stmt = $conn->prepare('SELECT * FROM pawn_entries WHERE id=? AND business_id=? LIMIT 1');
-    if (!$stmt) {
-        respond(false, 'Unable to validate pawn entry.', array(), 500);
-    }
-    $stmt->bind_param('ii', $pawnId, $businessId);
-    $stmt->execute();
-    $pawn = $stmt->get_result()->fetch_assoc();
-    $stmt->close();
-
-    if (!$pawn) {
-        respond(false, 'Pawn entry not found.', array(), 404);
-    }
-
-    $pawnBranchId = (int) ($pawn['branch_id'] ?? 0);
-    $dependencies = array(
-        'pawn_interest_collections' => 'Interest collections exist for this pawn.',
-        'pawn_payments' => 'Pawn payments exist for this pawn.',
-        'pawn_releases' => 'A release record exists for this pawn.',
-        'pawn_notices' => 'A notice record exists for this pawn.',
-        'pawn_auctions' => 'An auction record exists for this pawn.',
-        'pawn_auction_settlements' => 'An auction settlement exists for this pawn.',
-        'pawn_interest_accruals' => 'Interest accrual records exist for this pawn.',
-    );
-
-    foreach ($dependencies as $table => $message) {
-        if (!tableExists($conn, $table)) {
-            continue;
-        }
-        $check = $conn->prepare("SELECT id FROM `{$table}` WHERE pawn_entry_id=? AND business_id=? LIMIT 1");
-        if (!$check) {
-            continue;
-        }
-        $check->bind_param('ii', $pawnId, $businessId);
-        $check->execute();
-        $found = $check->get_result()->fetch_assoc();
-        $check->close();
-        if ($found) {
-            respond(false, $message . ' Delete is blocked.', array(), 409);
-        }
-    }
-
-    $conn->begin_transaction();
-    try {
-        if (tableExists($conn, 'pawn_action_history')) {
-            $historyStmt = $conn->prepare('DELETE FROM pawn_action_history WHERE pawn_entry_id=? AND business_id=?');
-            if ($historyStmt) {
-                $historyStmt->bind_param('ii', $pawnId, $businessId);
-                $historyStmt->execute();
-                $historyStmt->close();
-            }
-        }
-
-        $itemStmt = $conn->prepare('DELETE FROM pawn_items WHERE pawn_entry_id=? AND business_id=?');
-        if (!$itemStmt) {
-            throw new RuntimeException('Unable to prepare pawn item deletion.');
-        }
-        $itemStmt->bind_param('ii', $pawnId, $businessId);
-        if (!$itemStmt->execute()) {
-            throw new RuntimeException('Unable to delete pawn items: ' . $itemStmt->error);
-        }
-        $itemStmt->close();
-
-        $deleteStmt = $conn->prepare('DELETE FROM pawn_entries WHERE id=? AND business_id=?');
-        if (!$deleteStmt) {
-            throw new RuntimeException('Unable to prepare pawn deletion.');
-        }
-        $deleteStmt->bind_param('ii', $pawnId, $businessId);
-        if (!$deleteStmt->execute() || $deleteStmt->affected_rows === 0) {
-            throw new RuntimeException('Unable to delete pawn entry.');
-        }
-        $deleteStmt->close();
-
-        writeAudit(
-            $conn,
-            $businessId,
-            $pawnBranchId,
-            $userId,
-            $pawnId,
-            'Deleted pawn entry ' . (string) ($pawn['pawn_no'] ?? ''),
-            $pawn
-        );
-
-        $conn->commit();
-        respond(true, 'Pawn entry deleted successfully.');
-    } catch (Throwable $error) {
-        $conn->rollback();
-        respond(false, $error->getMessage(), array(), 500);
-    }
+    respond(false, 'Direct pawn deletion is disabled in Pawn Broking V2. Use cancellation/closure workflow so interest, bank pledge and audit history remain intact.', array(), 409);
 }
 
 respond(false, 'Invalid action: ' . ($action === '' ? '(empty)' : $action), array(), 400);

@@ -30,7 +30,7 @@ function billingPermission(mysqli $conn, string $action): bool
 {
     if (($_SESSION['user_type'] ?? '') === 'Platform Admin')
         return true;
-    $map = ['open' => 'can_open', 'create' => 'can_create', 'value' => 'can_view_value'];
+    $map = ['open' => 'can_open', 'create' => 'can_create', 'update' => 'can_update', 'value' => 'can_view_value'];
     $field = $map[$action] ?? '';
     if ($field === '')
         return false;
@@ -52,7 +52,7 @@ function billingPermission(mysqli $conn, string $action): bool
     $stmt->close();
     return (int) ($row[$field] ?? 0) === 1;
 }
-if (!billingPermission($conn, 'open') && !billingPermission($conn, 'create')) {
+if (!billingPermission($conn, 'open') && !billingPermission($conn, 'create') && !billingPermission($conn, 'update')) {
     http_response_code(403);
     die('You do not have permission to create bills.');
 }
@@ -262,10 +262,83 @@ function previewNextBillingNumber(mysqli $conn, int $businessId, int $branchId, 
     return renderBillingNumber($setting, $next, $date);
 }
 
-$pageTitle = 'Billing';
+$editSaleId = isset($_GET['edit_sale_id']) ? max(0, (int) $_GET['edit_sale_id']) : 0;
+$editData = null;
+if ($editSaleId > 0) {
+    if (!billingPermission($conn, 'update') && !billingPermission($conn, 'create')) {
+        http_response_code(403);
+        die('You do not have permission to edit bills.');
+    }
+    $s = $conn->prepare("SELECT * FROM sales WHERE id=? AND business_id=? AND branch_id=? LIMIT 1");
+    if (!$s) die('Unable to prepare invoice edit.');
+    $s->bind_param('iii', $editSaleId, $businessId, $branchId);
+    $s->execute();
+    $saleEdit = $s->get_result()->fetch_assoc();
+    $s->close();
+    if (!$saleEdit) die('Invoice was not found.');
+    if ((string)($saleEdit['workflow_status'] ?? '') === 'Cancelled') die('Cancelled invoices cannot be edited.');
+
+    $editItems = [];
+    $s = $conn->prepare("SELECT * FROM sale_items WHERE sale_id=? AND business_id=? ORDER BY sort_order,id");
+    if ($s) {
+        $s->bind_param('ii', $editSaleId, $businessId);
+        $s->execute();
+        $r = $s->get_result();
+        while ($x = $r->fetch_assoc()) $editItems[] = $x;
+        $s->close();
+    }
+
+    $editItemDiscountTotal = 0.0;
+    foreach ($editItems as $editItemRow) $editItemDiscountTotal += (float)($editItemRow['discount_amount'] ?? 0);
+
+    $editPayments = [];
+    $s = $conn->prepare("SELECT * FROM sale_payments WHERE sale_id=? AND business_id=? ORDER BY id");
+    if ($s) {
+        $s->bind_param('ii', $editSaleId, $businessId);
+        $s->execute();
+        $r = $s->get_result();
+        while ($x = $r->fetch_assoc()) $editPayments[] = $x;
+        $s->close();
+    }
+
+    $editExchange = [];
+    if (billingColumnExists($conn, 'sale_exchange_items', 'sale_id')) {
+        $s = $conn->prepare("SELECT * FROM sale_exchange_items WHERE sale_id=? AND business_id=? ORDER BY id");
+        if ($s) {
+            $s->bind_param('ii', $editSaleId, $businessId);
+            $s->execute();
+            $r = $s->get_result();
+            while ($x = $r->fetch_assoc()) $editExchange[] = $x;
+            $s->close();
+        }
+    }
+
+    $editClaims = [];
+    if (billingColumnExists($conn, 'sales_chit_claims', 'sale_id')) {
+        $s = $conn->prepare("SELECT * FROM sales_chit_claims WHERE sale_id=? AND business_id=? AND status='Posted' ORDER BY id");
+        if ($s) {
+            $s->bind_param('ii', $editSaleId, $businessId);
+            $s->execute();
+            $r = $s->get_result();
+            while ($x = $r->fetch_assoc()) $editClaims[] = $x;
+            $s->close();
+        }
+    }
+
+    $editData = [
+        'sale' => $saleEdit,
+        'items' => $editItems,
+        'overall_discount' => max(0, (float)($saleEdit['discount_amount'] ?? 0) - $editItemDiscountTotal),
+        'payments' => $editPayments,
+        'exchange_items' => $editExchange,
+        'claims' => $editClaims
+    ];
+}
+
+$pageTitle = $editSaleId > 0 ? 'Edit Billing' : 'Billing';
 $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
 $defaultDocumentType = $nonGstModeActive ? 'Non GST Invoice' : 'Invoice';
-$defaultBillNo = previewNextBillingNumber($conn, $businessId, $branchId, $defaultDocumentType, date('Y-m-d'));
+$defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNextBillingNumber($conn, $businessId, $branchId, $defaultDocumentType, date('Y-m-d'));
 // The API locks and increments the same sequence during save.
 ?>
 <!doctype html>
@@ -1028,14 +1101,14 @@ $defaultBillNo = previewNextBillingNumber($conn, $businessId, $branchId, $defaul
 <body>
     <div class="standalone-wrap">
         <form id="billingForm" autocomplete="off"><input type="hidden" name="csrf_token"
-                value="<?= e($csrfToken) ?>"><input type="hidden" name="action" value="save"><input type="hidden"
+                value="<?= e($csrfToken) ?>"><input type="hidden" name="action" value="<?= $editSaleId > 0 ? 'update' : 'save' ?>"><input type="hidden" name="edit_sale_id" value="<?= (int)$editSaleId ?>"><input type="hidden"
                 name="document_mode" id="documentMode"
                 value="<?= $nonGstModeActive ? 'Non GST Invoice' : 'Invoice' ?>"><input type="hidden"
                 name="chit_claims_json" id="chitClaimsJson" value="[]"><input type="hidden" name="exchange_items_json"
                 id="exchangeItemsJson" value="[]">
             <div class="bill-card">
                 <div class="bill-head top-bill-head">
-                    <div class="bill-title">Create Bill</div>
+                    <div class="bill-title"><?= $editSaleId > 0 ? 'Edit Bill' : 'Create Bill' ?></div>
                     <div class="top-barcode-wrap">
                         <input type="text" id="barcodeScan" class="form-control scan-input"
                             placeholder="Scan barcode and press Enter" autocomplete="off">
@@ -1064,10 +1137,10 @@ $defaultBillNo = previewNextBillingNumber($conn, $businessId, $branchId, $defaul
                                         value="<?= e($defaultBillNo) ?>" readonly></div>
                                 <div class="c3"><label class="field-label">Bill Date *</label><input type="date"
                                         name="invoice_date" id="invoiceDate" class="form-control"
-                                        value="<?= date('Y-m-d') ?>" required>
+                                        value="<?= e($editData ? $editData['sale']['invoice_date'] : date('Y-m-d')) ?>" required>
                                 </div>
                                 <div class="c3"><label class="field-label">Bill Time *</label><input type="time"
-                                        name="invoice_time" class="form-control" value="<?= date('H:i') ?>" required>
+                                        name="invoice_time" id="invoiceTime" class="form-control" value="<?= e($editData ? substr((string)$editData['sale']['invoice_time'],0,5) : date('H:i')) ?>" required>
                                 </div>
                                 <div class="c3"><label class="field-label">Bill Type</label><select name="bill_type"
                                         id="billType" class="form-select select2-static">
@@ -1102,8 +1175,8 @@ $defaultBillNo = previewNextBillingNumber($conn, $businessId, $branchId, $defaul
                                         </button>
                                     </div>
                                 </div>
-                                <div class="c12"><label class="field-label">Notes</label><input name="notes"
-                                        class="form-control" placeholder="Bill notes"></div>
+                                <div class="c12"><label class="field-label">Notes</label><input name="notes" id="billNotes"
+                                        class="form-control" placeholder="Bill notes" value="<?= e($editData ? $editData['sale']['notes'] : '') ?>"></div>
                             </div>
                         </div>
                     </div>
@@ -1198,9 +1271,9 @@ $defaultBillNo = previewNextBillingNumber($conn, $businessId, $branchId, $defaul
                         </div>
                         <div class="bill-body"><label class="field-label">Overall Discount</label><input type="number"
                                 min="0" step="0.01" name="overall_discount" id="overallDiscount"
-                                class="form-control mb-2" value="0"><label class="field-label">Round Off</label><input
+                                class="form-control mb-2" value="<?= e($editData ? $editData['overall_discount'] : 0) ?>"><label class="field-label">Round Off</label><input
                                 type="number" step="0.01" name="round_off" id="roundOff" class="form-control mb-2"
-                                value="0"><label class="field-label">Paid Amount</label><input type="number" min="0"
+                                value="<?= e($editData ? $editData['sale']['round_off'] : 0) ?>"><label class="field-label">Paid Amount</label><input type="number" min="0"
                                 step="0.01" name="paid_amount" id="paidAmount" class="form-control mb-3" value="0"
                                 readonly>
                             <div class="summary-row"><span>Subtotal</span><strong>₹<span
@@ -1321,6 +1394,8 @@ $defaultBillNo = previewNextBillingNumber($conn, $businessId, $branchId, $defaul
             const exchangeMetals = <?= json_encode($exchangeMetals, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
             const csrfToken = <?= json_encode($csrfToken) ?>;
             const nonGstModeActive = <?= $nonGstModeActive ? 'true' : 'false' ?>;
+            const editData = <?= json_encode($editData, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
+            const editMode = !!(editData && editData.sale && Number(editData.sale.id || 0) > 0);
             const billTypeSelect = document.getElementById('billType');
             const invoiceDateInput = document.getElementById('invoiceDate');
             const documentNumberPreview = document.getElementById('documentNumberPreview');
@@ -1330,6 +1405,14 @@ $defaultBillNo = previewNextBillingNumber($conn, $businessId, $branchId, $defaul
             let documentNumberRequestId = 0;
 
             async function refreshDocumentNumber() {
+                if (editMode) {
+                    if (documentNumberPreview) documentNumberPreview.value = String(editData.sale.invoice_no || '');
+                    if (documentNumberLabel) documentNumberLabel.textContent = 'Bill No';
+                    if (saveButtonText) saveButtonText.textContent = 'Update Bill';
+                    const saveButton = document.getElementById('saveBtn');
+                    if (saveButton) { saveButton.title = 'Update Bill'; saveButton.setAttribute('aria-label', 'Update Bill'); }
+                    return;
+                }
                 const selectedBillType = String(billTypeSelect ? billTypeSelect.value : 'Retail').trim();
                 const normalizedBillType = selectedBillType.toLowerCase();
                 const isEstimate = !nonGstModeActive && normalizedBillType === 'estimate';
@@ -1597,7 +1680,7 @@ $defaultBillNo = previewNextBillingNumber($conn, $businessId, $branchId, $defaul
                     calc();
                 }
 
-                function addPay() {
+                function addPay(existing = null) {
                     pays.insertAdjacentHTML('beforeend', `
                     <tr class="payment-row">
                         <td><select name="payment_method_id[]" class="form-select payment-method">${paymentOptions()}</select></td>
@@ -1605,8 +1688,87 @@ $defaultBillNo = previewNextBillingNumber($conn, $businessId, $branchId, $defaul
                         <td><input name="payment_reference[]" class="form-control" placeholder="UPI / Txn / Ref"></td>
                         <td><button type="button" class="btn btn-sm btn-outline-danger remove-row"><i class="fa-solid fa-xmark"></i></button></td>
                     </tr>`);
-                    enhanceRow(pays.lastElementChild);
+                    const row = pays.lastElementChild;
+                    enhanceRow(row);
+                    if (existing) {
+                        const method = row.querySelector('.payment-method');
+                        method.value = String(existing.payment_method_id || '');
+                        row.querySelector('.pay-amount').value = Number(existing.amount || 0).toFixed(2);
+                        row.querySelector('[name="payment_reference[]"]').value = existing.reference_no || '';
+                        method.disabled = true;
+                        row.querySelector('.pay-amount').disabled = true;
+                        row.querySelector('[name="payment_reference[]"]').disabled = true;
+                        row.querySelector('.remove-row').disabled = true;
+                    }
                     calc();
+                }
+
+                function loadEditData() {
+                    if (!editMode) return false;
+                    const sale = editData.sale || {};
+                    customer.value = String(sale.customer_id || '');
+                    if (billTypeSelect) billTypeSelect.value = String(sale.bill_type || 'Retail');
+                    if (invoiceDateInput) invoiceDateInput.value = String(sale.invoice_date || '');
+                    const timeInput = document.getElementById('invoiceTime');
+                    if (timeInput) timeInput.value = String(sale.invoice_time || '').substring(0, 5);
+                    const notesInput = document.getElementById('billNotes');
+                    if (notesInput) notesInput.value = String(sale.notes || '');
+                    document.getElementById('overallDiscount').value = Number(editData.overall_discount || 0).toFixed(2);
+                    document.getElementById('roundOff').value = Number(sale.round_off || 0).toFixed(2);
+                    if (documentNumberPreview) documentNumberPreview.value = String(sale.invoice_no || '');
+
+                    const addPaymentButton = document.getElementById('addPayment');
+                    if (addPaymentButton) addPaymentButton.disabled = true;
+                    const addExchangeButton = document.getElementById('addExchange');
+                    if (addExchangeButton) addExchangeButton.disabled = true;
+                    const claimButton = document.getElementById('openClaimModal');
+                    if (claimButton) claimButton.disabled = true;
+
+                    items.innerHTML = '';
+                    (editData.items || []).forEach(existing => {
+                        const product = products.find(x => String(x.id) === String(existing.product_id));
+                        if (!product) return;
+                        addItem(product, Number(existing.quantity || 1));
+                        const row = items.lastElementChild;
+                        row.querySelector('.rate').value = Number(existing.metal_rate || 0).toFixed(2);
+                        row.querySelector('.wastage').value = Number(existing.wastage_percent || 0).toFixed(3);
+                        row.querySelector('.gst').value = Number(existing.tax_percent || 0).toFixed(2);
+                        row.querySelector('.making').value = Number(existing.making_charge || 0).toFixed(2);
+                        row.querySelector('.stone').value = Number(existing.stone_amount || 0).toFixed(2);
+                        row.querySelector('.other').value = Number(existing.other_charge || 0).toFixed(2);
+                        row.querySelector('.discount').value = Number(existing.discount_amount || 0).toFixed(2);
+                    });
+                    if (!items.querySelector('.item-row')) addItem();
+
+                    pays.innerHTML = '';
+                    (editData.payments || []).forEach(existing => addPay(existing));
+                    if (!(editData.payments || []).length) {
+                        addPay({payment_method_id:'', amount:Number(sale.paid_amount || 0), reference_no:'Existing received amount'});
+                    }
+
+                    exchangeItems = (editData.exchange_items || []).map(x => ({
+                        item_name: x.item_name || '',
+                        metal_id: x.metal_id || '',
+                        gross_weight: Number(x.gross_weight || 0),
+                        wastage_percent: Number(x.wastage_percent || 0),
+                        eligible_weight: Number(x.eligible_weight || 0),
+                        rate_per_gram: Number(x.rate_per_gram || 0),
+                        exchange_value: Number(x.exchange_value || 0)
+                    }));
+                    renderExchangeItems();
+                    document.querySelectorAll('#exchangeItems input,#exchangeItems select,#exchangeItems button').forEach(el => el.disabled = true);
+
+                    appliedClaims = (editData.claims || []).map(x => ({
+                        chit_member_id: Number(x.chit_member_id || 0),
+                        chit_group_id: Number(x.chit_group_id || 0),
+                        product_id: Number(x.product_id || 0),
+                        claim_grams: Number(x.claim_grams || 0),
+                        rate_per_gram: Number(x.rate_per_gram || 0),
+                        claim_amount: Number(x.claim_amount || 0)
+                    }));
+                    calc();
+                    refreshDocumentNumber();
+                    return true;
                 }
 
                 function addByBarcode() {
@@ -2223,7 +2385,7 @@ $defaultBillNo = previewNextBillingNumber($conn, $businessId, $branchId, $defaul
                             if (data.document_type === 'Estimate') {
                                 location.href = 'estimates-list.php?msg=created&estimate_id=' + encodeURIComponent(data.estimate_id);
                             } else {
-                                location.href = 'sales-list.php?msg=created&sale_id=' + encodeURIComponent(data.sale_id);
+                                location.href = 'sales-list.php?msg=' + (editMode ? 'updated' : 'created') + '&sale_id=' + encodeURIComponent(data.sale_id);
                             }
                         }, 700);
                     } catch (error) {
@@ -2234,11 +2396,13 @@ $defaultBillNo = previewNextBillingNumber($conn, $businessId, $branchId, $defaul
                     }
                 });
 
-                addItem();
-                addPay();
-                calc();
-                refreshDocumentNumber();
-                scan.focus();
+                if (!loadEditData()) {
+                    addItem();
+                    addPay();
+                    calc();
+                    refreshDocumentNumber();
+                    scan.focus();
+                }
 
                 ensureSelect2().then(ready => {
                     select2Ready = ready;
@@ -2248,6 +2412,12 @@ $defaultBillNo = previewNextBillingNumber($conn, $businessId, $branchId, $defaul
                     }
                     initSelect2('.select2-customer', 'Select customer');
                     initSelect2('.select2-static', 'Select');
+                    if (editMode && window.jQuery) {
+                        window.jQuery(customer).val(String(editData.sale.customer_id || '')).trigger('change.select2');
+                        if (billTypeSelect) window.jQuery(billTypeSelect).val(String(editData.sale.bill_type || '')).trigger('change.select2');
+                        items.querySelectorAll('.item-row').forEach(enhanceRow);
+                        pays.querySelectorAll('.payment-row').forEach(enhanceRow);
+                    }
                     bindDocumentModeControls();
                     items.querySelectorAll('.item-row').forEach(enhanceRow);
                     pays.querySelectorAll('.payment-row').forEach(enhanceRow);

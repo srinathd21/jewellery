@@ -249,11 +249,11 @@ function permission(mysqli $c, string $action): bool
 {
     if (($_SESSION['user_type'] ?? '') === 'Platform Admin')
         return true;
-    $map = ['create' => 'can_create', 'open' => 'can_open'];
+    $map = ['create' => 'can_create', 'open' => 'can_open', 'update' => 'can_update'];
     $field = $map[$action] ?? '';
     if (!$field)
         return false;
-    foreach (['perm.billing.create', 'perm.billing'] as $code) {
+    foreach (['perm.billing.create', 'perm.billing', 'perm.sales', 'perm.sales.list'] as $code) {
         if (isset($_SESSION['permissions'][$code][$field]))
             return (int) $_SESSION['permissions'][$code][$field] === 1;
     }
@@ -270,7 +270,7 @@ function permission(mysqli $c, string $action): bool
     $s->close();
     return (int) ($x[$field] ?? 0) === 1;
 }
-if (!permission($conn, 'create') && !permission($conn, 'open'))
+if (!permission($conn, 'create') && !permission($conn, 'open') && !permission($conn, 'update'))
     respond(false, 'You do not have permission to create bills.', [], 403);
 function bindDynamic(mysqli_stmt $stmt, string $types, array &$params): void
 {
@@ -496,6 +496,113 @@ if ($action === 'create_customer') {
         respond(false, 'Unable to create customer: ' . $e->getMessage(), [], 500);
     }
 }
+if ($action === 'update') {
+    if (!permission($conn, 'update') && !permission($conn, 'create'))
+        respond(false, 'You do not have permission to edit bills.', [], 403);
+
+    $saleId = max(0, (int)($_POST['edit_sale_id'] ?? 0));
+    if ($saleId <= 0) respond(false, 'Invalid invoice selected.', [], 422);
+    $invoiceDate = trim((string)($_POST['invoice_date'] ?? ''));
+    $invoiceTime = trim((string)($_POST['invoice_time'] ?? ''));
+    $customerId = max(0, (int)($_POST['customer_id'] ?? 0));
+    $billType = trim((string)($_POST['bill_type'] ?? 'Retail'));
+    $overall = max(0, (float)($_POST['overall_discount'] ?? 0));
+    $round = (float)($_POST['round_off'] ?? 0);
+    $notes = trim((string)($_POST['notes'] ?? ''));
+    $productIds = $_POST['product_id'] ?? [];
+    $qtys = $_POST['quantity'] ?? [];
+    $rates = $_POST['metal_rate'] ?? [];
+    $wastages = $_POST['wastage_percent'] ?? [];
+    $taxPercents = $_POST['tax_percent'] ?? [];
+    $makings = $_POST['making_charge'] ?? [];
+    $stones = $_POST['stone_amount'] ?? [];
+    $others = $_POST['other_charge'] ?? [];
+    $discounts = $_POST['item_discount'] ?? [];
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $invoiceDate)) respond(false, 'Valid invoice date is required.', [], 422);
+    if (!preg_match('/^\d{2}:\d{2}/', $invoiceTime)) respond(false, 'Valid invoice time is required.', [], 422);
+    if (!is_array($productIds) || count($productIds) < 1) respond(false, 'Add at least one product.', [], 422);
+
+    $conn->begin_transaction();
+    try {
+        $s = prepareOrFail($conn, 'SELECT * FROM sales WHERE id=? AND business_id=? AND branch_id=? LIMIT 1 FOR UPDATE', 'Unable to load invoice for edit');
+        $s->bind_param('iii', $saleId, $businessId, $branchId);
+        $s->execute();
+        $oldSale = $s->get_result()->fetch_assoc();
+        $s->close();
+        if (!$oldSale) throw new RuntimeException('Invoice was not found.');
+        if ((string)$oldSale['workflow_status'] === 'Cancelled') throw new RuntimeException('Cancelled invoices cannot be edited.');
+        if ($customerId !== (int)$oldSale['customer_id']) throw new RuntimeException('Customer cannot be changed while editing a posted invoice.');
+        if ($billType !== (string)$oldSale['bill_type']) throw new RuntimeException('Bill type cannot be changed while editing a posted invoice.');
+
+        $oldItems = [];
+        $s = prepareOrFail($conn, 'SELECT si.*,p.track_stock FROM sale_items si LEFT JOIN products p ON p.id=si.product_id AND p.business_id=si.business_id WHERE si.sale_id=? AND si.business_id=? ORDER BY si.id FOR UPDATE', 'Unable to load existing invoice items');
+        $s->bind_param('ii', $saleId, $businessId);
+        $s->execute();
+        $r = $s->get_result();
+        while ($x = $r->fetch_assoc()) $oldItems[] = $x;
+        $s->close();
+
+        $restore = prepareOrFail($conn, "INSERT INTO product_stock (business_id,branch_id,product_id,quantity,gross_weight,net_weight,average_cost,stock_value) VALUES (?,?,?,?,?,?,0,0) ON DUPLICATE KEY UPDATE quantity=quantity+VALUES(quantity),gross_weight=gross_weight+VALUES(gross_weight),net_weight=net_weight+VALUES(net_weight)", 'Unable to prepare edit stock restoration');
+        $movementIn = prepareOrFail($conn, "INSERT INTO stock_movements(business_id,branch_id,product_id,movement_date,movement_type,reference_table,reference_id,quantity_in,quantity_out,weight_in,weight_out,rate,value_amount,remarks,created_by) VALUES(?,?,?,?,'Adjustment In','sales',?,?,0,?,0,?,?,?,?)", 'Unable to prepare edit restoration movement');
+        $movementDate = $invoiceDate . ' ' . substr($invoiceTime,0,5) . ':00';
+        foreach ($oldItems as $old) {
+            if ((int)($old['track_stock'] ?? 0) !== 1 || (int)$old['product_id'] <= 0) continue;
+            $pid=(int)$old['product_id']; $q=(float)$old['quantity']; $g=(float)$old['gross_weight']; $n=(float)$old['net_weight'];
+            $restore->bind_param('iiiddd', $businessId,$branchId,$pid,$q,$g,$n);
+            if (!$restore->execute()) throw new RuntimeException('Unable to restore old stock before invoice edit: '.$restore->error);
+            $rate=(float)$old['metal_rate']; $value=(float)$old['line_total']; $remarks='Invoice edit restore '.$oldSale['invoice_no'];
+            $movementIn->bind_param('iiisiddddsi', $businessId,$branchId,$pid,$movementDate,$saleId,$q,$n,$rate,$value,$remarks,$userId);
+            if (!$movementIn->execute()) throw new RuntimeException('Unable to log edit stock restoration: '.$movementIn->error);
+        }
+        $restore->close(); $movementIn->close();
+
+        $items=[]; $subtotal=0.0; $itemDiscount=0.0; $taxable=0.0; $taxTotal=0.0;
+        $productStmt = prepareOrFail($conn, 'SELECT p.*,COALESCE(ps.quantity,0) stock_qty,COALESCE(ps.gross_weight,0) stock_gross,COALESCE(ps.net_weight,0) stock_net,COALESCE(mr.rate_per_gram,p.sale_rate,0) live_metal_rate FROM products p LEFT JOIN product_stock ps ON ps.product_id=p.id AND ps.business_id=p.business_id AND ps.branch_id=? LEFT JOIN metal_rates mr ON mr.id=(SELECT mr2.id FROM metal_rates mr2 WHERE mr2.business_id=p.business_id AND mr2.metal_id=p.metal_id AND mr2.is_current=1 AND (mr2.branch_id=? OR mr2.branch_id IS NULL) ORDER BY (mr2.branch_id=?) DESC,mr2.effective_from DESC,mr2.id DESC LIMIT 1) WHERE p.id=? AND p.business_id=? AND p.is_active=1 LIMIT 1 FOR UPDATE', 'Unable to prepare edit product lookup');
+        foreach ($productIds as $i=>$pidRaw) {
+            $pid=(int)$pidRaw; if ($pid<=0) continue;
+            $qty=round((float)($qtys[$i]??0),3); if ($qty<=0) throw new RuntimeException('Quantity must be greater than zero.');
+            $productStmt->bind_param('iiiii',$branchId,$branchId,$branchId,$pid,$businessId); $productStmt->execute(); $p=$productStmt->get_result()->fetch_assoc();
+            if (!$p) throw new RuntimeException('A selected product is invalid.');
+            if ((int)$p['track_stock']===1 && (float)$p['stock_qty']+0.0001<$qty) throw new RuntimeException($p['product_name'].' has only '.number_format((float)$p['stock_qty'],3).' stock available after restoring the original invoice.');
+            $rate=max(0,(float)($rates[$i]??0)); if ($rate<=0) $rate=max(0,(float)($p['live_metal_rate']??$p['sale_rate']??0));
+            $w=max(0,(float)($wastages[$i]??$p['wastage_percent']));
+            $makingRate=max(0,(float)($makings[$i]??$p['making_charge']));
+            $stone=max(0,(float)($stones[$i]??0)); $other=max(0,(float)($others[$i]??0)); $disc=max(0,(float)($discounts[$i]??0));
+            $taxPercent=$nonGstModeActive?0.0:max(0,min(100,(float)($taxPercents[$i]??$p['tax_percent']??0)));
+            $gross=(float)$p['gross_weight']*$qty; $stoneWeight=(float)$p['stone_weight']*$qty; $net=(float)$p['net_weight']*$qty;
+            $metal=$gross>0?$gross*$rate:$qty*$rate; $makingAmount=$gross>0?$gross*$makingRate:$qty*$makingRate; $base=$metal+$makingAmount; $wamt=$base*$w/100;
+            $rowSub=$base+$wamt+$stone+$other; $rowTaxable=max(0,$rowSub-$disc); $tax=$rowTaxable*$taxPercent/100; $line=$rowTaxable+$tax;
+            $items[]=['p'=>$p,'qty'=>$qty,'gross'=>$gross,'stone_weight'=>$stoneWeight,'net'=>$net,'rate'=>$rate,'w'=>$w,'wamt'=>$wamt,'making'=>$makingAmount,'stone'=>$stone,'other'=>$other,'disc'=>$disc,'tax_percent'=>$taxPercent,'tax'=>$tax,'line'=>$line];
+            $subtotal+=$rowSub; $itemDiscount+=$disc; $taxable+=$rowTaxable; $taxTotal+=$tax;
+        }
+        $productStmt->close();
+        if (!$items) throw new RuntimeException('Add at least one valid product.');
+        $taxable=max(0,$taxable-$overall); $discountTotal=$itemDiscount+$overall; $cgst=$nonGstModeActive?0.0:$taxTotal/2; $sgst=$nonGstModeActive?0.0:$taxTotal/2;
+        $beforeAdjustments=max(0,$taxable+$cgst+$sgst+$round);
+        $exchangeTotal=max(0,(float)($oldSale['exchange_amount']??0)); $claimTotal=max(0,(float)($oldSale['chit_claim_amount']??0));
+        if ($exchangeTotal+$claimTotal>$beforeAdjustments+0.01) throw new RuntimeException('Edited invoice total is below the existing exchange/chit adjustment.');
+        $netPayable=max(0,$beforeAdjustments-$exchangeTotal-$claimTotal);
+        $paid=max(0,(float)$oldSale['paid_amount']);
+        if ($paid>$netPayable+0.01) throw new RuntimeException('Edited invoice total cannot be lower than the amount already received (Rs. '.number_format($paid,2).').');
+        $balance=round(max(0,$netPayable-$paid),2); $paymentStatus=$balance<=0.01?'Paid':($paid>0?'Partial':'Unpaid');
+
+        $del=prepareOrFail($conn,'DELETE FROM sale_items WHERE sale_id=? AND business_id=?','Unable to replace old invoice items'); $del->bind_param('ii',$saleId,$businessId); $del->execute(); $del->close();
+        $itemStmt=prepareOrFail($conn,'INSERT INTO sale_items(business_id,branch_id,sale_id,product_id,item_name,hsn_code,quantity,gross_weight,stone_weight,net_weight,metal_rate,wastage_percent,wastage_amount,making_charge,stone_amount,other_charge,discount_amount,tax_percent,tax_amount,line_total,cost_amount,sort_order) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)','Unable to prepare edited sale item');
+        $stockDown=prepareOrFail($conn,'UPDATE product_stock SET quantity=quantity-?,gross_weight=GREATEST(0,gross_weight-?),net_weight=GREATEST(0,net_weight-?) WHERE business_id=? AND branch_id=? AND product_id=?','Unable to prepare edited stock deduction');
+        $movementOut=prepareOrFail($conn,"INSERT INTO stock_movements(business_id,branch_id,product_id,movement_date,movement_type,reference_table,reference_id,quantity_in,quantity_out,weight_in,weight_out,rate,value_amount,remarks,created_by) VALUES(?,?,?,?,'Sale','sales',?,0,?,0,?,?,?,?,?)",'Unable to prepare edited stock movement');
+        foreach($items as $idx=>$it){$p=$it['p'];$cost=(float)$p['purchase_rate']*$it['net'];$sort=$idx+1;$itemStmt->bind_param('iiiissdddddddddddddddi',$businessId,$branchId,$saleId,$p['id'],$p['product_name'],$p['hsn_code'],$it['qty'],$it['gross'],$it['stone_weight'],$it['net'],$it['rate'],$it['w'],$it['wamt'],$it['making'],$it['stone'],$it['other'],$it['disc'],$it['tax_percent'],$it['tax'],$it['line'],$cost,$sort);if(!$itemStmt->execute())throw new RuntimeException('Unable to save edited item: '.$itemStmt->error);if((int)$p['track_stock']===1){$stockDown->bind_param('dddiii',$it['qty'],$it['gross'],$it['net'],$businessId,$branchId,$p['id']);if(!$stockDown->execute()||$stockDown->affected_rows<1)throw new RuntimeException('Unable to deduct edited stock for '.$p['product_name']);$value=$it['line'];$remarks='Edited invoice '.$oldSale['invoice_no'];$movementOut->bind_param('iiisiddddsi',$businessId,$branchId,$p['id'],$movementDate,$saleId,$it['qty'],$it['net'],$it['rate'],$value,$remarks,$userId);if(!$movementOut->execute())throw new RuntimeException('Unable to log edited sale stock: '.$movementOut->error);}}
+        $itemStmt->close();$stockDown->close();$movementOut->close();
+
+        $u=prepareOrFail($conn,"UPDATE sales SET invoice_date=?,invoice_time=?,subtotal=?,discount_amount=?,taxable_amount=?,cgst_amount=?,sgst_amount=?,round_off=?,grand_total=?,net_payable_amount=?,balance_amount=?,payment_status=?,notes=? WHERE id=? AND business_id=? AND branch_id=?",'Unable to prepare invoice update');
+        $u->bind_param('ssdddddddddssiii',$invoiceDate,$invoiceTime,$subtotal,$discountTotal,$taxable,$cgst,$sgst,$round,$beforeAdjustments,$netPayable,$balance,$paymentStatus,$notes,$saleId,$businessId,$branchId);
+        if(!$u->execute()) throw new RuntimeException('Unable to update invoice: '.$u->error); $u->close();
+
+        billingAuditLog($conn,$businessId,$branchId,$userId,'billing.sales','Update','sales',$saleId,'Updated bill '.$oldSale['invoice_no'],['invoice_no'=>$oldSale['invoice_no'],'invoice_date'=>$oldSale['invoice_date'],'subtotal'=>(float)$oldSale['subtotal'],'grand_total'=>(float)$oldSale['grand_total'],'net_payable_amount'=>(float)($oldSale['net_payable_amount']??0),'balance_amount'=>(float)$oldSale['balance_amount'],'item_count'=>count($oldItems)],['invoice_no'=>$oldSale['invoice_no'],'invoice_date'=>$invoiceDate,'subtotal'=>round($subtotal,2),'grand_total'=>round($beforeAdjustments,2),'net_payable_amount'=>round($netPayable,2),'balance_amount'=>round($balance,2),'item_count'=>count($items)]);
+        $conn->commit();
+        respond(true,'Bill '.$oldSale['invoice_no'].' updated successfully.',['document_type'=>'Invoice','sale_id'=>$saleId,'invoice_no'=>$oldSale['invoice_no'],'net_payable_amount'=>$netPayable,'received_amount'=>$paid,'balance_amount'=>$balance,'payment_status'=>$paymentStatus]);
+    } catch(Throwable $e) { $conn->rollback(); respond(false,$e->getMessage(),[],422); }
+}
+
 if ($action !== 'save')
     respond(false, 'Invalid action.', [], 400);
 $invoiceDate = (string) ($_POST['invoice_date'] ?? date('Y-m-d'));

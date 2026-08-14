@@ -94,7 +94,8 @@ if (!salesPermission($conn, 'open') && !salesPermission($conn, 'view')) {
 }
 
 $canCreate = salesPermission($conn, 'create');
-$canCancel = salesPermission($conn, 'delete') || salesPermission($conn, 'update');
+$canEdit = salesPermission($conn, 'update');
+$canDelete = salesPermission($conn, 'delete');
 $canValue = salesPermission($conn, 'value') || salesPermission($conn, 'view');
 
 $businessId = (int)($_SESSION['business_id'] ?? 0);
@@ -391,7 +392,8 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
     'use strict';
 
     const csrfToken = <?= json_encode($csrfToken) ?>;
-    const canCancel = <?= $canCancel ? 'true' : 'false' ?>;
+    const canEdit = <?= $canEdit ? 'true' : 'false' ?>;
+    const canDelete = <?= $canDelete ? 'true' : 'false' ?>;
     const canValue = <?= $canValue ? 'true' : 'false' ?>;
     const apiUrl = 'api/sales-list.php';
 
@@ -481,8 +483,9 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
                         <div class="action-group">
                             <a class="action-btn" href="sales-view.php?id=${row.id}" title="Full details"><i class="fa-regular fa-eye"></i></a>
                             <button type="button" class="action-btn print-action print-sale" data-id="${row.id}" data-no="${esc(row.invoice_no)}" data-mobile="${esc(row.customer_mobile || '')}" title="Print / Share invoice"><i class="fa-solid fa-print"></i></button>
+                            ${canEdit && row.workflow_status !== 'Cancelled' ? `<a class="action-btn" href="billing.php?edit_sale_id=${row.id}" title="Edit invoice"><i class="fa-solid fa-pen-to-square"></i></a>` : ''}
                             ${Number(row.balance_amount || 0) > 0 && row.workflow_status !== 'Cancelled' ? `<a class="action-btn pay-action" href="sale-make-payment.php?id=${row.id}" title="Make balance payment"><i class="fa-solid fa-indian-rupee-sign"></i></a>` : ''}
-                            ${canCancel && row.workflow_status !== 'Cancelled' ? `<button type="button" class="action-btn cancel-sale" data-id="${row.id}" data-no="${esc(row.invoice_no)}" title="Cancel"><i class="fa-solid fa-ban"></i></button>` : ''}
+                            ${canDelete && row.workflow_status !== 'Cancelled' ? `<button type="button" class="action-btn delete-sale" data-id="${row.id}" data-no="${esc(row.invoice_no)}" title="Delete invoice and restock"><i class="fa-solid fa-trash"></i></button>` : ''}
                         </div>
                     </td>
                 </tr>`).join('');
@@ -627,37 +630,24 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
         }
     });
 
-    async function cancelSale(id, invoiceNo) {
-        const reason = prompt('Enter cancellation reason for ' + invoiceNo + ':', 'Cancelled from sales list');
+    async function deleteSale(id, invoiceNo) {
+        const reason = prompt('Enter delete reason for ' + invoiceNo + ':', 'Deleted from sales list');
         if (reason === null) return;
         if (!reason.trim()) {
-            toast('error', 'Cancellation reason is required.');
+            toast('error', 'Delete reason is required.');
             return;
         }
+
+        if (!confirm('Delete invoice ' + invoiceNo + '? Product stock will be restored and the action will be recorded in Activity Log.')) {
+            return;
+        }
+
         try {
-            const form = new FormData();
-            form.append('sale_id', id);
-            form.append('cancel_reason', reason.trim());
-            form.append('csrf_token', csrfToken);
-
-            const response = await fetch('api/sale-cancel.php', {
-                method: 'POST',
-                body: form,
-                credentials: 'same-origin',
-                headers: {'X-Requested-With':'XMLHttpRequest'}
+            const result = await request({
+                action:'delete',
+                sale_id:id,
+                cancel_reason:reason.trim()
             });
-
-            const raw = await response.text();
-            let result;
-            try {
-                result = JSON.parse(raw);
-            } catch (parseError) {
-                throw new Error('Sale cancellation API did not return JSON.');
-            }
-
-            if (!response.ok || !result.success) {
-                throw new Error(result.message || 'Unable to cancel sale.');
-            }
 
             toast(
                 'success',
@@ -690,8 +680,8 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
                 printButton.dataset.mobile || ''
             );
         }
-        const cancelButton = e.target.closest('.cancel-sale');
-        if (cancelButton) cancelSale(cancelButton.dataset.id, cancelButton.dataset.no);
+        const deleteButton = e.target.closest('.delete-sale');
+        if (deleteButton) deleteSale(deleteButton.dataset.id, deleteButton.dataset.no);
     });
 
     loadSales();

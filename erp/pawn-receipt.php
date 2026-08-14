@@ -194,6 +194,13 @@ $sql = "SELECT
             COALESCE(pc.category_code, '') AS category_code,
             COALESCE(br.branch_name, '') AS branch_name,
             COALESCE(pm.method_name, '') AS disbursement_method,
+            COALESCE(pis.scheme_code, '') AS interest_scheme_code,
+            COALESCE(pis.scheme_name, '') AS interest_scheme_name,
+            COALESCE(prs.level_no, 1) AS current_rate_level,
+            prs.next_level_no AS next_rate_level,
+            nrs.rate_percent AS next_interest_percent,
+            COALESCE(prs.grace_days, p.interest_grace_days, 0) AS effective_grace_days,
+            COALESCE(p.bank_pledge_status, 'Not Pledged') AS bank_pledge_status,
             COALESCE(b.business_name, '') AS business_name,
             COALESCE(b.legal_name, '') AS legal_name,
             COALESCE(b.mobile, '') AS business_mobile,
@@ -221,6 +228,16 @@ $sql = "SELECT
         LEFT JOIN payment_methods pm
             ON pm.id = p.disbursement_payment_method_id
            AND pm.business_id = p.business_id
+        LEFT JOIN pawn_interest_schemes pis
+            ON pis.id = p.interest_scheme_id
+           AND pis.business_id = p.business_id
+        LEFT JOIN pawn_interest_rate_steps prs
+            ON prs.id = p.current_rate_step_id
+           AND prs.business_id = p.business_id
+        LEFT JOIN pawn_interest_rate_steps nrs
+            ON nrs.scheme_id = prs.scheme_id
+           AND nrs.level_no = prs.next_level_no
+           AND nrs.business_id = p.business_id
         LEFT JOIN businesses b
             ON b.id = p.business_id
         WHERE p.id = ?
@@ -291,33 +308,40 @@ $disbursement = isset($pawn['disbursement_amount'])
 
 $paid = (float)($pawn['total_principal_paid'] ?? 0);
 $balance = (float)($pawn['balance_principal'] ?? max(0, $principal - $paid));
-$interestRate = (float)($pawn['interest_percent'] ?? 0);
-$interestPeriod = (string)($pawn['interest_period'] ?? 'Monthly');
+$interestRate = (float)($pawn['current_interest_percent'] ?? $pawn['interest_percent'] ?? 0);
+$initialInterestRate = (float)($pawn['initial_interest_percent'] ?? $pawn['interest_percent'] ?? 0);
 $interestMethod = (string)($pawn['interest_method'] ?? 'Simple');
-
-$baseForInterest = strtolower($interestMethod) === 'flat' ? $principal : $balance;
-$cycle = (string)($pawn['interest_collection_cycle'] ?? 'Monthly');
-$cycleMonths = max(1, (int)($pawn['interest_cycle_months'] ?? 1));
-$monthsMap = [
-    'Monthly' => 1,
-    'Quarterly' => 3,
-    'Half-Yearly' => 6,
-    'Yearly' => 12,
-    'Custom' => $cycleMonths
-];
-$months = $monthsMap[$cycle] ?? 1;
-
-if ($cycle === 'At Closure') {
-    $multiplier = 1;
-} elseif ($interestPeriod === 'Daily') {
-    $multiplier = $months * 30;
-} elseif ($interestPeriod === 'Yearly') {
-    $multiplier = $months / 12;
-} else {
-    $multiplier = $months;
+$schemeName = (string)($pawn['interest_scheme_name'] ?? '');
+$schemeCode = (string)($pawn['interest_scheme_code'] ?? '');
+$currentRateLevel = max(1, (int)($pawn['current_rate_level'] ?? 1));
+$nextInterestRate = isset($pawn['next_interest_percent']) && $pawn['next_interest_percent'] !== null
+    ? (float)$pawn['next_interest_percent']
+    : null;
+$dueCycleType = (string)($pawn['interest_due_cycle_type'] ?? 'Calendar Month');
+$dueCycleValue = max(1, (int)($pawn['interest_due_cycle_value'] ?? 1));
+$effectiveGraceDays = max(0, (int)($pawn['effective_grace_days'] ?? $pawn['interest_grace_days'] ?? 0));
+$nextInterestDue = (string)($pawn['next_interest_due_date'] ?? '');
+$graceUntil = '';
+if ($nextInterestDue !== '') {
+    try {
+        $gdt = new DateTime($nextInterestDue);
+        if ($effectiveGraceDays > 0) {
+            $gdt->modify('+' . $effectiveGraceDays . ' days');
+        }
+        $graceUntil = $gdt->format('Y-m-d');
+    } catch (Throwable $e) {
+        $graceUntil = $nextInterestDue;
+    }
 }
-
-$estimatedInterest = $baseForInterest * ($interestRate / 100) * $multiplier;
+if ($dueCycleType === 'Days') {
+    $cycleLabel = $dueCycleValue . ' Day' . ($dueCycleValue === 1 ? '' : 's');
+} elseif ($dueCycleType === 'Months') {
+    $cycleLabel = $dueCycleValue . ' Month' . ($dueCycleValue === 1 ? '' : 's');
+} else {
+    $cycleLabel = $dueCycleValue === 1 ? 'Calendar Month' : $dueCycleValue . ' Calendar Months';
+}
+$baseForInterest = strtolower($interestMethod) === 'flat' ? $principal : $balance;
+$estimatedInterest = $baseForInterest * ($interestRate / 100);
 
 class PawnReceiptPDF extends FPDF
 {
@@ -601,7 +625,7 @@ $y = $pdf->info(
     $y,
     93,
     'Due Date',
-    !empty($pawn['due_date']) ? dateOut($pawn['due_date']) : 'At Closure'
+    $nextInterestDue !== '' ? dateOut($nextInterestDue) : (!empty($pawn['due_date']) ? dateOut($pawn['due_date']) : 'At Closure')
 );
 
 $pdf->SetY(92);
@@ -639,16 +663,34 @@ $pdf->Cell($W, 7, txt('INTEREST DETAILS'), 1, 1, 'L', true);
 $pdf->SetTextColor(36);
 $pdf->SetFont('Arial', '', 7);
 
-$interestText = number_format($interestRate, 3) . '% ' . $interestPeriod;
-$pdf->Cell(48, 6, txt('Interest Rate'), 1, 0, 'L');
-$pdf->Cell(49, 6, txt($interestText), 1, 0, 'L');
+$interestText = number_format($interestRate, 3) . '%';
+$pdf->Cell(48, 6, txt('Current Interest Rate'), 1, 0, 'L');
+$pdf->Cell(49, 6, txt($interestText . ' / Level ' . $currentRateLevel), 1, 0, 'L');
+$pdf->Cell(48, 6, txt('Initial Rate'), 1, 0, 'L');
+$pdf->Cell(49, 6, txt(number_format($initialInterestRate, 3) . '%'), 1, 1, 'L');
+
+$pdf->Cell(48, 6, txt('Interest Scheme'), 1, 0, 'L');
+$pdf->Cell(49, 6, txt($schemeName !== '' ? $schemeName : ($schemeCode !== '' ? $schemeCode : '-')), 1, 0, 'L');
+$pdf->Cell(48, 6, txt('Interest Cycle'), 1, 0, 'L');
+$pdf->Cell(49, 6, txt($cycleLabel), 1, 1, 'L');
+
+$pdf->Cell(48, 6, txt('Next Interest Due'), 1, 0, 'L');
+$pdf->Cell(49, 6, txt($nextInterestDue !== '' ? dateOut($nextInterestDue) : 'At Closure'), 1, 0, 'L');
+$pdf->Cell(48, 6, txt('Grace Until'), 1, 0, 'L');
+$pdf->Cell(49, 6, txt($graceUntil !== '' ? dateOut($graceUntil) : '-'), 1, 1, 'L');
+
+$pdf->Cell(48, 6, txt('Missed Cycles'), 1, 0, 'L');
+$pdf->Cell(49, 6, txt((string)((int)($pawn['missed_interest_cycles'] ?? 0))), 1, 0, 'L');
+$pdf->Cell(48, 6, txt('Rate Escalations'), 1, 0, 'L');
+$pdf->Cell(49, 6, txt((string)((int)($pawn['rate_escalation_count'] ?? 0))), 1, 1, 'L');
+
+$pdf->Cell(48, 6, txt('Next Rate If Missed'), 1, 0, 'L');
+$pdf->Cell(49, 6, txt($nextInterestRate !== null ? number_format($nextInterestRate, 3) . '%' : 'Final Level'), 1, 0, 'L');
+
+$pdf->Cell(48, 6, txt('Est. Current Cycle Interest'), 1, 0, 'L');
+$pdf->Cell(49, 6, txt('Rs. ' . number_format($estimatedInterest, 2)), 1, 0, 'R');
 $pdf->Cell(48, 6, txt('Interest Method'), 1, 0, 'L');
 $pdf->Cell(49, 6, txt($interestMethod), 1, 1, 'L');
-
-$pdf->Cell(48, 6, txt('Collection Cycle'), 1, 0, 'L');
-$pdf->Cell(49, 6, txt($cycle), 1, 0, 'L');
-$pdf->Cell(48, 6, txt('Est. Cycle Interest'), 1, 0, 'L');
-$pdf->Cell(49, 6, txt('Rs. ' . number_format($estimatedInterest, 2)), 1, 1, 'R');
 
 $pdf->Ln(4);
 
@@ -726,10 +768,13 @@ $notes = [
     'Loan Type: ' . (($pawn['loan_type'] ?? '') ?: 'General'),
     'Category: ' . (($pawn['category_name'] ?? '') ?: '-') .
         (!empty($pawn['category_code']) ? ' (' . $pawn['category_code'] . ')' : ''),
-    'Interest: ' . number_format($interestRate, 3) . '% ' . $interestPeriod,
+    'Interest Scheme: ' . ($schemeName !== '' ? $schemeName : ($schemeCode !== '' ? $schemeCode : '-')),
+    'Current Rate: ' . number_format($interestRate, 3) . '% (Level ' . $currentRateLevel . ')',
+    'Initial Rate: ' . number_format($initialInterestRate, 3) . '%',
     'Interest Method: ' . $interestMethod,
-    'Cycle: ' . $cycle,
-    'Due Date: ' . (!empty($pawn['due_date']) ? dateOut($pawn['due_date']) : 'At Closure')
+    'Cycle: ' . $cycleLabel,
+    'Next Due: ' . ($nextInterestDue !== '' ? dateOut($nextInterestDue) : 'At Closure'),
+    'Grace Until: ' . ($graceUntil !== '' ? dateOut($graceUntil) : '-'),
 ];
 
 if (!empty($pawn['id_proof_type']) || !empty($pawn['id_proof_number'])) {

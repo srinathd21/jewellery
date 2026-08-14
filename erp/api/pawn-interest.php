@@ -1,878 +1,733 @@
 <?php
-if (session_status() === PHP_SESSION_NONE) {
+if (session_status() === PHP_SESSION_NONE)
     session_start();
-}
-
+date_default_timezone_set((string) ($_SESSION['timezone'] ?? 'Asia/Kolkata'));
 header('Content-Type: application/json; charset=utf-8');
 mysqli_report(MYSQLI_REPORT_OFF);
 ini_set('display_errors', '0');
 
-function respond(
-    bool $success,
-    string $message,
-    array $extra = [],
-    int $status = 200
-): void {
-    http_response_code($status);
-
-    echo json_encode(
-        array_merge(
-            ['success' => $success, 'message' => $message],
-            $extra
-        ),
-        JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
-    );
-
+function out($ok, $message = '', $extra = array(), $code = 200)
+{
+    http_response_code($code);
+    echo json_encode(array_merge(array('success' => (bool) $ok, 'message' => (string) $message), $extra), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     exit;
 }
-
-register_shutdown_function(static function (): void {
-    $error = error_get_last();
-
-    if (
-        !$error ||
-        !in_array(
-            $error['type'],
-            [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR],
-            true
-        )
-    ) {
-        return;
-    }
-
-    if (!headers_sent()) {
-        http_response_code(500);
-        header('Content-Type: application/json; charset=utf-8');
-    }
-
-    echo json_encode(
-        [
-            'success' => false,
-            'message' => 'Fatal API error: ' . $error['message'],
-        ],
-        JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
-    );
-});
-
-foreach ([
-    dirname(__DIR__) . '/config/config.php',
-    dirname(__DIR__) . '/config.php',
-    dirname(__DIR__) . '/includes/config.php',
-    dirname(__DIR__) . '/super-admin/includes/config.php',
-] as $configFile) {
-    if (is_file($configFile)) {
-        require_once $configFile;
+register_shutdown_function(function () {
+    $e = error_get_last();
+    if ($e && in_array($e['type'], array(E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR), true))
+        out(false, 'Fatal API error: ' . $e['message'], array(), 500); });
+foreach (array(dirname(__DIR__) . '/config/config.php', dirname(__DIR__) . '/config.php', dirname(__DIR__) . '/includes/config.php', dirname(__DIR__) . '/super-admin/includes/config.php') as $f) {
+    if (is_file($f)) {
+        require_once $f;
         break;
     }
 }
-
-if (!isset($conn) || !($conn instanceof mysqli)) {
-    respond(false, 'Database configuration is not available.', [], 500);
-}
-
+if (!isset($conn) || !($conn instanceof mysqli))
+    out(false, 'Database configuration is not available.', array(), 500);
 $conn->set_charset('utf8mb4');
+if (empty($_SESSION['user_id']))
+    out(false, 'Session expired.', array(), 401);
+if ($_SERVER['REQUEST_METHOD'] !== 'POST')
+    out(false, 'Invalid request method.', array(), 405);
+if (!hash_equals((string) ($_SESSION['pawn_csrf'] ?? ''), (string) ($_POST['csrf_token'] ?? '')))
+    out(false, 'Invalid request token. Refresh the page.', array(), 419);
+$businessId = (int) ($_SESSION['business_id'] ?? 0);
+$branchId = (int) ($_SESSION['branch_id'] ?? ($_SESSION['default_branch_id'] ?? 0));
+$userId = (int) ($_SESSION['user_id'] ?? 0);
+$action = trim((string) ($_POST['action'] ?? ''));
+if ($businessId <= 0 || $branchId <= 0)
+    out(false, 'Select a valid business and branch.', array(), 403);
 
-if (empty($_SESSION['user_id'])) {
-    respond(false, 'Your session has expired. Please log in again.', [], 401);
-}
-
-if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-    respond(false, 'Invalid request method.', [], 405);
-}
-
-if (
-    !hash_equals(
-        (string)($_SESSION['pawn_interest_csrf'] ?? ''),
-        (string)($_POST['csrf_token'] ?? '')
-    )
-) {
-    respond(false, 'Invalid or expired request token. Refresh the page.', [], 419);
-}
-
-function tableExists(mysqli $conn, string $table): bool
+function tableExists($c, $t)
 {
-    $safe = $conn->real_escape_string($table);
-    $result = $conn->query("SHOW TABLES LIKE '{$safe}'");
-
-    return $result && $result->num_rows > 0;
+    static $x = array();
+    $k = strtolower($t);
+    if (isset($x[$k]))
+        return $x[$k];
+    $s = $c->real_escape_string($t);
+    $r = $c->query("SHOW TABLES LIKE '{$s}'");
+    return $x[$k] = (bool) ($r && $r->num_rows > 0);
 }
-
-function hasColumn(
-    mysqli $conn,
-    string $table,
-    string $column
-): bool {
-    $tableSafe = $conn->real_escape_string($table);
-    $columnSafe = $conn->real_escape_string($column);
-
-    $result = $conn->query(
-        "SHOW COLUMNS FROM `{$tableSafe}` LIKE '{$columnSafe}'"
-    );
-
-    return $result && $result->num_rows > 0;
+function colExists($c, $t, $n)
+{
+    static $x = array();
+    $k = strtolower($t . '.' . $n);
+    if (isset($x[$k]))
+        return $x[$k];
+    $a = $c->real_escape_string($t);
+    $b = $c->real_escape_string($n);
+    $r = $c->query("SHOW COLUMNS FROM `{$a}` LIKE '{$b}'");
+    return $x[$k] = (bool) ($r && $r->num_rows > 0);
 }
-
-function bindDynamic(
-    mysqli_stmt $stmt,
-    string $types,
-    array &$values
-): void {
-    if ($types === '') {
+function validDate($d)
+{
+    $x = DateTime::createFromFormat('Y-m-d', $d);
+    return $x && $x->format('Y-m-d') === $d;
+}
+function bindD($s, $types, &$vals)
+{
+    if (strlen($types) !== count($vals))
+        throw new RuntimeException('Prepared statement bind mismatch.');
+    $a = array($types);
+    foreach ($vals as $k => $v)
+        $a[] =& $vals[$k];
+    call_user_func_array(array($s, 'bind_param'), $a);
+}
+function fyParts($d)
+{
+    $t = strtotime($d);
+    $y = (int) date('Y', $t);
+    $m = (int) date('n', $t);
+    $a = $m >= 4 ? $y : $y - 1;
+    return array($a, $a + 1);
+}
+function docNo($c, $b, $br, $key, $date)
+{
+    if (!tableExists($c, 'document_number_settings') || !tableExists($c, 'number_sequences'))
+        throw new RuntimeException('Document numbering tables are not available.');
+    $s = $c->prepare("SELECT * FROM document_number_settings WHERE business_id=? AND document_key=? AND is_active=1 AND (branch_id=? OR branch_id IS NULL) ORDER BY (branch_id=?) DESC,id DESC LIMIT 1");
+    if (!$s)
+        throw new RuntimeException('Unable to read document number settings.');
+    $s->bind_param('isii', $b, $key, $br, $br);
+    $s->execute();
+    $set = $s->get_result()->fetch_assoc();
+    $s->close();
+    if (!$set)
+        throw new RuntimeException('Configure ' . $key . ' in Document Number Settings.');
+    $t = strtotime($date);
+    list($f1, $f2) = fyParts($date);
+    $reset = (string) $set['reset_frequency'];
+    if ($reset === 'Monthly')
+        $period = date('Ym', $t);
+    elseif ($reset === 'Daily')
+        $period = date('Ymd', $t);
+    elseif ($reset === 'Calendar Year')
+        $period = date('Y', $t);
+    elseif ($reset === 'Never')
+        $period = 'ALL';
+    else
+        $period = $f1 . '-' . $f2;
+    $cur = 0;
+    $q = $c->prepare('SELECT current_number FROM number_sequences WHERE business_id=? AND branch_id=? AND document_type=? AND period_key=? LIMIT 1 FOR UPDATE');
+    if ($q) {
+        $q->bind_param('iiss', $b, $br, $key, $period);
+        $q->execute();
+        $r = $q->get_result()->fetch_assoc();
+        $q->close();
+        if ($r)
+            $cur = (int) $r['current_number'];
+    }
+    $next = max((int) $set['sequence_start'], $cur + 1);
+    $q = $c->prepare('INSERT INTO number_sequences (business_id,branch_id,document_type,period_key,current_number) VALUES (?,?,?,?,?) ON DUPLICATE KEY UPDATE current_number=VALUES(current_number)');
+    if (!$q)
+        throw new RuntimeException('Unable to update document sequence.');
+    $q->bind_param('iissi', $b, $br, $key, $period, $next);
+    $q->execute();
+    $q->close();
+    $seq = str_pad((string) $next, max(1, (int) $set['sequence_digits']), '0', STR_PAD_LEFT);
+    $center = strtr((string) $set['center_format'], array('{YYYY}' => date('Y', $t), '{YY}' => date('y', $t), '{MM}' => date('m', $t), '{DD}' => date('d', $t), '{FY_SHORT}' => substr((string) $f1, 2) . '-' . substr((string) $f2, 2), '{FY}' => $f1 . '-' . $f2));
+    return strtr((string) $set['format_template'], array('{PREFIX}' => (string) $set['prefix'], '{DIVIDER}' => (string) $set['divider'], '{CENTER}' => $center, '{FY_SHORT}' => substr((string) $f1, 2) . '-' . substr((string) $f2, 2), '{SEQ}' => $seq, '{SUFFIX}' => (string) $set['suffix']));
+}
+function actionLog($c, $b, $br, $pid, $type, $table, $rid, $desc, $u)
+{
+    if (!tableExists($c, 'pawn_action_history'))
         return;
-    }
-
-    if (strlen($types) !== count($values)) {
-        throw new RuntimeException(
-            'Bind parameter mismatch. Types: ' .
-            strlen($types) .
-            ', Values: ' .
-            count($values)
-        );
-    }
-
-    $bind = [$types];
-
-    foreach ($values as $key => $value) {
-        $bind[] = &$values[$key];
-    }
-
-    call_user_func_array([$stmt, 'bind_param'], $bind);
+    $s = $c->prepare('INSERT INTO pawn_action_history (business_id,branch_id,pawn_entry_id,action_type,reference_table,reference_id,description,action_by) VALUES (?,?,?,?,?,?,?,?)');
+    if (!$s)
+        return;
+    $s->bind_param('iiissisi', $b, $br, $pid, $type, $table, $rid, $desc, $u);
+    $s->execute();
+    $s->close();
 }
-
-function getPawn(
-    mysqli $conn,
-    int $businessId,
-    int $pawnId,
-    bool $lock = false
-): ?array {
-    $lockSql = $lock ? ' FOR UPDATE' : '';
-
-    $stmt = $conn->prepare(
-        "SELECT
-            pe.*,
-            c.customer_name,
-            c.mobile,
-            pc.category_name
-         FROM pawn_entries pe
-         LEFT JOIN customers c
-            ON c.id = pe.customer_id
-         LEFT JOIN pawn_categories pc
-            ON pc.id = pe.pawn_category_id
-         WHERE pe.id = ?
-           AND pe.business_id = ?
-         LIMIT 1{$lockSql}"
-    );
-
-    if (!$stmt) {
-        throw new RuntimeException(
-            'Unable to prepare pawn query: ' . $conn->error
-        );
-    }
-
-    $stmt->bind_param('ii', $pawnId, $businessId);
-    $stmt->execute();
-    $pawn = $stmt->get_result()->fetch_assoc();
-    $stmt->close();
-
-    return $pawn ?: null;
+function auditLog($c, $b, $br, $u, $type, $table, $rid, $desc, $newVals)
+{
+    if (!tableExists($c, 'audit_logs'))
+        return;
+    $s = $c->prepare("INSERT INTO audit_logs (business_id,branch_id,user_id,module_code,action_type,reference_table,reference_id,description,new_values_json,ip_address,user_agent) VALUES (?,?,?,'pawn.interest',?,?,?,?,?,?,?)");
+    if (!$s)
+        return;
+    $j = json_encode($newVals, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    $ip = (string) ($_SERVER['REMOTE_ADDR'] ?? '');
+    $ua = (string) ($_SERVER['HTTP_USER_AGENT'] ?? '');
+    $s->bind_param('iiississss', $b, $br, $u, $type, $table, $rid, $desc, $j, $ip, $ua);
+    $s->execute();
+    $s->close();
 }
-
-function calculateInterestValues(
-    array $pawn,
-    string $fromDate,
-    string $toDate
-): array {
+function getPawn($c, $b, $br, $id, $lock = false)
+{
+    $sql = "SELECT p.*,COALESCE(c.customer_name,'') customer_name,COALESCE(c.customer_code,'') customer_code,COALESCE(c.mobile,'') mobile,COALESCE(pc.category_name,'') category_name,COALESCE(s.scheme_code,'') interest_scheme_code,COALESCE(s.scheme_name,'') interest_scheme_name,COALESCE(rs.level_no,1) current_rate_level,rs.next_level_no,nrs.rate_percent next_interest_percent FROM pawn_entries p LEFT JOIN customers c ON c.id=p.customer_id AND c.business_id=p.business_id LEFT JOIN pawn_categories pc ON pc.id=p.pawn_category_id AND pc.business_id=p.business_id LEFT JOIN pawn_interest_schemes s ON s.id=p.interest_scheme_id AND s.business_id=p.business_id LEFT JOIN pawn_interest_rate_steps rs ON rs.id=p.current_rate_step_id AND rs.business_id=p.business_id LEFT JOIN pawn_interest_rate_steps nrs ON nrs.scheme_id=rs.scheme_id AND nrs.level_no=rs.next_level_no AND nrs.business_id=p.business_id WHERE p.id=? AND p.business_id=? AND p.branch_id=? LIMIT 1" . ($lock ? ' FOR UPDATE' : '');
+    $s = $c->prepare($sql);
+    if (!$s)
+        throw new RuntimeException('Unable to load pawn: ' . $c->error);
+    $s->bind_param('iii', $id, $b, $br);
+    $s->execute();
+    $r = $s->get_result()->fetch_assoc();
+    $s->close();
+    if (!$r)
+        throw new RuntimeException('Pawn entry not found.');
+    return $r;
+}
+function addCycleDate($from, $type, $value)
+{
+    $d = new DateTime($from);
+    $v = max(1, (int) $value);
+    if ($type === 'Days')
+        $d->modify('+' . $v . ' days');
+    elseif ($type === 'Months')
+        $d->modify('+' . $v . ' months');
+    else
+        $d->modify('+' . $v . ' months');
+    return $d->format('Y-m-d');
+}
+function roundInterest($v, $m)
+{
+    if ($m === 'Nearest Rupee')
+        return round($v);
+    if ($m === 'Ceil Rupee')
+        return ceil($v);
+    if ($m === 'Floor Rupee')
+        return floor($v);
+    return round($v, 2);
+}
+function calcCycleInterest($pawn, $from, $to, $rate)
+{
+    $base = strtolower((string) ($pawn['interest_method'] ?? 'Simple')) === 'flat' ? (float) $pawn['principal_amount'] : (float) $pawn['balance_principal'];
+    $days = max(0, (int) (new DateTime($from))->diff(new DateTime($to))->format('%a'));
+    $period = (string) ($pawn['interest_period'] ?? 'Monthly');
+    if ($period === 'Daily')
+        $amt = $base * ($rate / 100) * $days;
+    elseif ($period === 'Yearly')
+        $amt = $base * ($rate / 100) * ($days / 365);
+    else
+        $amt = $base * ($rate / 100) * ($days / 30);
+    return array($days, $days / 30, roundInterest($amt, (string) ($pawn['interest_rounding_method'] ?? 'Nearest Rupee')));
+}
+function graceDate($due, $days)
+{
+    $d = new DateTime($due);
+    if ((int) $days > 0)
+        $d->modify('+' . (int) $days . ' days');
+    return $d->format('Y-m-d');
+}
+function generateNextAccrual($c, $pawn, $userId, $fromDate)
+{
+    if (!tableExists($c, 'pawn_interest_accruals'))
+        return 0;
+    $pid = (int) $pawn['id'];
+    $b = (int) $pawn['business_id'];
+    $br = (int) $pawn['branch_id'];
+    $q = $c->prepare('SELECT id FROM pawn_interest_accruals WHERE pawn_entry_id=? AND business_id=? AND from_date=? AND status<>\'Cancelled\' LIMIT 1');
+    $q->bind_param('iis', $pid, $b, $fromDate);
+    $q->execute();
+    $exists = $q->get_result()->fetch_assoc();
+    $q->close();
+    if ($exists)
+        return (int) $exists['id'];
+    $type = (string) ($pawn['interest_due_cycle_type'] ?? 'Calendar Month');
+    $value = max(1, (int) ($pawn['interest_due_cycle_value'] ?? 1));
+    $to = addCycleDate($fromDate, $type, $value);
+    $grace = graceDate($to, (int) ($pawn['interest_grace_days'] ?? 0));
+    $rate = (float) ($pawn['current_interest_percent'] ?? $pawn['interest_percent'] ?? 0);
+    list($days, $months, $interest) = calcCycleInterest($pawn, $fromDate, $to, $rate);
+    $q = $c->prepare('SELECT COALESCE(MAX(schedule_no),0)+1 n FROM pawn_interest_accruals WHERE pawn_entry_id=? AND business_id=?');
+    $q->bind_param('ii', $pid, $b);
+    $q->execute();
+    $schedule = (int) $q->get_result()->fetch_assoc()['n'];
+    $q->close();
+    $total = $interest;
+    $balance = $total;
+    $step = (int) ($pawn['current_rate_step_id'] ?? 0);
+    $level = (int) ($pawn['current_rate_level'] ?? 1);
+    $principal = (float) $pawn['balance_principal'];
+    $period = (string) ($pawn['interest_period'] ?? 'Monthly');
+    $method = (string) ($pawn['interest_method'] ?? 'Simple');
+    $s = $c->prepare("INSERT INTO pawn_interest_accruals (business_id,branch_id,pawn_entry_id,schedule_no,rate_step_id,rate_level_no,from_date,to_date,due_date,grace_until,principal_balance,calculation_days,calculation_months,interest_percent,interest_period,interest_method,interest_amount,penalty_amount,other_charges,total_due,paid_amount,balance_amount,status,generated_by,generated_at,remarks) VALUES (?,?,?,?,NULLIF(?,0),?,?,?,?,?,?,?,?,?,?,?,?,0,0,?,0,?,'Pending',?,NOW(),'Scheduled customer interest due')");
+    if (!$s)
+        throw new RuntimeException('Unable to prepare next interest schedule: ' . $c->error);
+    $s->bind_param('iiiiiissssdiddssdddi', $b, $br, $pid, $schedule, $step, $level, $fromDate, $to, $to, $grace, $principal, $days, $months, $rate, $period, $method, $interest, $total, $balance, $userId);
+    if (!$s->execute())
+        throw new RuntimeException('Unable to create next interest schedule: ' . $s->error);
+    $id = (int) $s->insert_id;
+    $s->close();
+    $u = $c->prepare('UPDATE pawn_entries SET next_interest_due_date=? WHERE id=? AND business_id=?');
+    $u->bind_param('sii', $to, $pid, $b);
+    $u->execute();
+    $u->close();
+    return $id;
+}
+function processEscalation($c, $pawn, $asOf, $userId)
+{
+    if (!tableExists($c, 'pawn_interest_accruals') || !tableExists($c, 'pawn_interest_rate_steps'))
+        return $pawn;
+    $pid = (int) $pawn['id'];
+    $b = (int) $pawn['business_id'];
+    $br = (int) $pawn['branch_id'];
+    $s = $c->prepare("SELECT * FROM pawn_interest_accruals WHERE pawn_entry_id=? AND business_id=? AND status IN ('Pending','Partially Paid') AND COALESCE(grace_until,due_date)<? ORDER BY schedule_no ASC LIMIT 1 FOR UPDATE");
+    $s->bind_param('iis', $pid, $b, $asOf);
+    $s->execute();
+    $a = $s->get_result()->fetch_assoc();
+    $s->close();
+    if (!$a)
+        return $pawn;
+    $aid = (int) $a['id'];
+    if ((int) $a['missed_due'] === 0) {
+        $u = $c->prepare('UPDATE pawn_interest_accruals SET missed_due=1,missed_marked_at=NOW() WHERE id=?');
+        $u->bind_param('i', $aid);
+        $u->execute();
+        $u->close();
+        $u = $c->prepare('UPDATE pawn_entries SET missed_interest_cycles=missed_interest_cycles+1 WHERE id=? AND business_id=?');
+        $u->bind_param('ii', $pid, $b);
+        $u->execute();
+        $u->close();
+    }
+    /*
+     * Business rule: when an EMI/due schedule is already late, that SAME unpaid
+     * schedule must use the pawn's current locked rate.  This also repairs old
+     * rows where the pawn was already escalated to Level 2 but schedule #1 was
+     * still stored at the original Level 1 rate.
+     */
+    $currentRate = (float) ($pawn['current_interest_percent'] ?? $pawn['interest_percent'] ?? 0);
+    $currentStep = (int) ($pawn['current_rate_step_id'] ?? 0);
+    $currentLevel = (int) ($pawn['current_rate_level'] ?? 1);
+    if ($currentRate > 0 && abs((float) $a['interest_percent'] - $currentRate) > 0.0005 && (int) ($pawn['rate_escalation_count'] ?? 0) > 0) {
+        $repairPawn = $pawn;
+        $repairPawn['balance_principal'] = (float) $a['principal_balance'];
+        if (strtolower((string) ($repairPawn['interest_method'] ?? 'Simple')) === 'flat')
+            $repairPawn['principal_amount'] = (float) $a['principal_balance'];
+        list($rDays, $rMonths, $rInterest) = calcCycleInterest($repairPawn, (string) $a['from_date'], (string) $a['to_date'], $currentRate);
+        $rTotal = $rInterest + max(0, (float) $a['penalty_amount']) + max(0, (float) $a['other_charges']);
+        $rBalance = max(0, $rTotal - (float) $a['paid_amount']);
+        $rStatus = $rBalance <= 0.009 ? 'Paid' : ((float) $a['paid_amount'] > 0 ? 'Partially Paid' : 'Pending');
+        $u = $c->prepare('UPDATE pawn_interest_accruals SET rate_step_id=NULLIF(?,0),rate_level_no=?,interest_percent=?,calculation_days=?,calculation_months=?,interest_amount=?,total_due=?,balance_amount=?,status=?,rate_escalation_triggered=1,escalated_to_rate_step_id=NULLIF(?,0),escalated_at=COALESCE(escalated_at,NOW()) WHERE id=? AND business_id=?');
+        $u->bind_param('iididdddsiii', $currentStep, $currentLevel, $currentRate, $rDays, $rMonths, $rInterest, $rTotal, $rBalance, $rStatus, $currentStep, $aid, $b);
+        if (!$u->execute())
+            throw new RuntimeException('Unable to apply current rate to overdue EMI: ' . $u->error);
+        $u->close();
+        return getPawn($c, $b, $br, $pid, true);
+    }
+    if ((int) $a['rate_escalation_triggered'] === 1) {
+        return getPawn($c, $b, $br, $pid, true);
+    }
+    $stepId = (int) ($pawn['current_rate_step_id'] ?? 0);
+    if ($stepId <= 0)
+        return getPawn($c, $b, $br, $pid, true);
+    $q = $c->prepare('SELECT cur.level_no,cur.next_level_no,nxt.id next_id,nxt.rate_percent,nxt.interest_cycle_type,nxt.interest_cycle_value,nxt.grace_days FROM pawn_interest_rate_steps cur LEFT JOIN pawn_interest_rate_steps nxt ON nxt.scheme_id=cur.scheme_id AND nxt.level_no=cur.next_level_no AND nxt.is_active=1 WHERE cur.id=? AND cur.business_id=? LIMIT 1');
+    $q->bind_param('ii', $stepId, $b);
+    $q->execute();
+    $next = $q->get_result()->fetch_assoc();
+    $q->close();
+    if (!$next || empty($next['next_id']))
+        return getPawn($c, $b, $br, $pid, true);
+    $nextId = (int) $next['next_id'];
+    $nextRate = (float) $next['rate_percent'];
+    $cycleType = (string) $next['interest_cycle_type'];
+    $cycleValue = (int) $next['interest_cycle_value'];
+    $grace = (int) $next['grace_days'];
+    /* Business rule: once the due is missed, Level 2 applies to the unpaid due itself as well as all following cycles. */
+    $calcPawn = $pawn;
+    $calcPawn['current_interest_percent'] = $nextRate;
+    $calcPawn['interest_percent'] = $nextRate;
+    $calcPawn['balance_principal'] = (float) $a['principal_balance'];
+    if (strtolower((string) ($calcPawn['interest_method'] ?? 'Simple')) === 'flat')
+        $calcPawn['principal_amount'] = (float) $a['principal_balance'];
+    list($recalcDays, $recalcMonths, $recalcInterest) = calcCycleInterest($calcPawn, (string) $a['from_date'], (string) $a['to_date'], $nextRate);
+    $alreadyPaid = max(0, (float) $a['paid_amount']);
+    $penalty = max(0, (float) $a['penalty_amount']);
+    $other = max(0, (float) $a['other_charges']);
+    $newTotal = max(0, $recalcInterest + $penalty + $other);
+    $newBalance = max(0, $newTotal - $alreadyPaid);
+    $newStatus = $newBalance <= 0.009 ? 'Paid' : ($alreadyPaid > 0 ? 'Partially Paid' : 'Pending');
+    $u = $c->prepare('UPDATE pawn_interest_accruals SET rate_step_id=?,rate_level_no=?,interest_percent=?,calculation_days=?,calculation_months=?,interest_amount=?,total_due=?,balance_amount=?,status=?,rate_escalation_triggered=1,escalated_to_rate_step_id=?,escalated_at=NOW() WHERE id=?');
+    $newLevel = (int) ($next['next_level_no'] ?? ((int) $next['level_no'] + 1));
+    $u->bind_param('iididdddsii', $nextId, $newLevel, $nextRate, $recalcDays, $recalcMonths, $recalcInterest, $newTotal, $newBalance, $newStatus, $nextId, $aid);
+    if (!$u->execute())
+        throw new RuntimeException('Unable to update overdue interest schedule: ' . $u->error);
+    $u->close();
+    $u = $c->prepare('UPDATE pawn_entries SET current_rate_step_id=?,current_interest_percent=?,interest_percent=?,interest_due_cycle_type=?,interest_due_cycle_value=?,interest_grace_days=?,grace_days=?,rate_escalation_count=rate_escalation_count+1,rate_escalated_at=NOW() WHERE id=? AND business_id=?');
+    $u->bind_param('iddsiiiii', $nextId, $nextRate, $nextRate, $cycleType, $cycleValue, $grace, $grace, $pid, $b);
+    if (!$u->execute())
+        throw new RuntimeException('Unable to escalate pawn interest rate: ' . $u->error);
+    $u->close();
+    if (tableExists($c, 'pawn_interest_rate_history')) {
+        $h = $c->prepare("UPDATE pawn_interest_rate_history SET effective_to=? WHERE pawn_entry_id=? AND business_id=? AND effective_to IS NULL");
+        $eff = (string) $a['to_date'];
+        $h->bind_param('sii', $eff, $pid, $b);
+        $h->execute();
+        $h->close();
+        $newPawn = getPawn($c, $b, $br, $pid, true);
+        $h = $c->prepare("INSERT INTO pawn_interest_rate_history (business_id,branch_id,pawn_entry_id,scheme_id,rate_step_id,level_no,rate_percent,interest_cycle_type,interest_cycle_value,grace_days,effective_from,change_reason,trigger_accrual_id,previous_rate_percent,created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,'Missed Interest Due',?,?,?)");
+        if ($h) {
+            $scheme = (int) ($newPawn['interest_scheme_id'] ?? 0);
+            $level = (int) ($next['next_level_no'] ?? ((int) $next['level_no'] + 1));
+            $prev = (float) ($pawn['current_interest_percent'] ?? $pawn['interest_percent'] ?? 0);
+            $h->bind_param('iiiiiidsiisidi', $b, $br, $pid, $scheme, $nextId, $level, $nextRate, $cycleType, $cycleValue, $grace, $eff, $aid, $prev, $userId);
+            $h->execute();
+            $h->close();
+        }
+    }
+    actionLog($c, $b, $br, $pid, 'Rate Escalated', 'pawn_interest_accruals', $aid, 'Interest rate escalated to ' . number_format($nextRate, 3) . '% after missed due', $userId);
+    $newPawn = getPawn($c, $b, $br, $pid, true);
+    generateNextAccrual($c, $newPawn, $userId, (string) $a['to_date']);
+    return getPawn($c, $b, $br, $pid, true);
+}
+function openAccrual($c, $b, $pid)
+{
+    if (!tableExists($c, 'pawn_interest_accruals'))
+        return null;
+    $s = $c->prepare("SELECT * FROM pawn_interest_accruals WHERE pawn_entry_id=? AND business_id=? AND status IN ('Pending','Partially Paid') ORDER BY schedule_no ASC,id ASC LIMIT 1");
+    $s->bind_param('ii', $pid, $b);
+    $s->execute();
+    $r = $s->get_result()->fetch_assoc();
+    $s->close();
+    return $r ?: null;
+}
+function bankBlocked($c, $b, $pid)
+{
+    if (!tableExists($c, 'pawn_bank_loan_items'))
+        return false;
+    $s = $c->prepare("SELECT COUNT(*) n FROM pawn_bank_loan_items WHERE pawn_entry_id=? AND business_id=? AND status='Pledged'");
+    $s->bind_param('ii', $pid, $b);
+    $s->execute();
+    $n = (int) $s->get_result()->fetch_assoc()['n'];
+    $s->close();
+    return $n > 0;
+}
+function quoteInterest($c, $b, $br, $pid, $asOf, $userId, $overrideRate = null)
+{
+    $c->begin_transaction();
     try {
-        $from = new DateTimeImmutable($fromDate);
-        $to = new DateTimeImmutable($toDate);
-    } catch (Throwable $error) {
-        throw new RuntimeException('Invalid interest date selected.');
+        $pawn = getPawn($c, $b, $br, $pid, true);
+        if (!in_array($pawn['status'], array('Active', 'Partially Paid'), true))
+            throw new RuntimeException('This pawn is not open for collection.');
+        $pawn = processEscalation($c, $pawn, $asOf, $userId);
+        $a = openAccrual($c, $b, $pid);
+        if (!$a) {
+            $from = (string) ($pawn['last_interest_paid_upto'] ?: $pawn['pawn_date']);
+            generateNextAccrual($c, $pawn, $userId, $from);
+            $a = openAccrual($c, $b, $pid);
+        }
+        $c->commit();
+    } catch (Throwable $e) {
+        $c->rollback();
+        throw $e;
     }
-
-    if ($from > $to) {
-        throw new RuntimeException(
-            'Interest from date cannot be after interest to date.'
-        );
+    if (!$a)
+        throw new RuntimeException('No interest schedule is available for this pawn.');
+    $displayRate = (float) $a['interest_percent'];
+    $displayInterest = (float) $a['interest_amount'];
+    if ($overrideRate !== null) {
+        $overrideRate = (float) $overrideRate;
+        if ($overrideRate <= 0 || $overrideRate > 100)
+            throw new RuntimeException('Enter a valid due schedule interest rate.');
+        $qpawn = $pawn;
+        $qpawn['balance_principal'] = (float) $a['principal_balance'];
+        if (strtolower((string) ($qpawn['interest_method'] ?? 'Simple')) === 'flat')
+            $qpawn['principal_amount'] = (float) $a['principal_balance'];
+        list($qd, $qm, $displayInterest) = calcCycleInterest($qpawn, (string) $a['from_date'], (string) $a['to_date'], $overrideRate);
+        $displayRate = $overrideRate;
     }
-
-    $days = (int)$from->diff($to)->days + 1;
-    $principal = max(0, (float)($pawn['balance_principal'] ?? 0));
-    $rate = max(0, (float)($pawn['interest_percent'] ?? 0));
-    $period = (string)($pawn['interest_period'] ?? 'Monthly');
-
-    if ($principal <= 0) {
-        throw new RuntimeException(
-            'The pawn does not have an outstanding principal balance.'
-        );
+    $paidAgainstInterest = min((float) $a['paid_amount'], $displayInterest);
+    $interest = max(0, $displayInterest - $paidAgainstInterest);
+    $penalty = max(0, (float) $a['penalty_amount']);
+    $otherStored = max(0, (float) $a['other_charges']);
+    $remaining = max(0, $displayInterest + $penalty + $otherStored - (float) $a['paid_amount']);
+    $nextSchedule = null;
+    if (tableExists($c, 'pawn_interest_accruals')) {
+        $ns = $c->prepare("SELECT id,schedule_no,from_date,to_date,due_date,grace_until,rate_level_no,interest_percent,interest_amount,paid_amount,balance_amount,status FROM pawn_interest_accruals WHERE pawn_entry_id=? AND business_id=? AND status IN ('Pending','Partially Paid') AND schedule_no>? ORDER BY schedule_no ASC,id ASC LIMIT 1");
+        if ($ns) {
+            $curSchedule = (int) $a['schedule_no'];
+            $ns->bind_param('iii', $pid, $b, $curSchedule);
+            $ns->execute();
+            $nextSchedule = $ns->get_result()->fetch_assoc();
+            $ns->close();
+        }
     }
+    return array('pawn' => $pawn, 'accrual_id' => (int) $a['id'], 'schedule_no' => (int) $a['schedule_no'], 'from_date' => $a['from_date'], 'to_date' => $a['to_date'], 'due_date' => $a['due_date'], 'grace_until' => $a['grace_until'], 'interest_percent' => $displayRate, 'interest_due' => $interest, 'penalty_due' => $penalty, 'total_due' => $remaining, 'source' => 'Scheduled', 'is_due_now' => !empty($a['due_date']) && $a['due_date'] <= $asOf, 'next_schedule' => $nextSchedule, 'note' => (int) $a['missed_due'] === 1 ? 'This payment was delayed. The escalated/current rate is applied to this unpaid due schedule and remains locked for following cycles.' : 'Scheduled interest from the registered rule.');
+}
 
-    if ($period === 'Daily') {
-        $interest = ($principal * $rate * $days) / 100;
-    } elseif ($period === 'Yearly') {
-        $interest = ($principal * $rate * $days) / (100 * 365);
-    } else {
-        $months = $days / 30;
-        $interest = ($principal * $rate * $months) / 100;
+if ($action === 'init') {
+    /*
+     * Synchronize every open pawn before calculating dashboard statistics.
+     * This is required because an overdue EMI can change from the original
+     * Level-1 rate to the pawn's locked escalated rate.  Stats must therefore
+     * be calculated only AFTER processEscalation() has rewritten those accruals.
+     */
+    $syncDate = date('Y-m-d');
+    $syncIds = array();
+    $syncStmt = $conn->prepare("SELECT id FROM pawn_entries WHERE business_id=? AND branch_id=? AND status IN ('Active','Partially Paid') ORDER BY id ASC");
+    if ($syncStmt) {
+        $syncStmt->bind_param('ii', $businessId, $branchId);
+        $syncStmt->execute();
+        $syncRes = $syncStmt->get_result();
+        while ($syncRow = $syncRes->fetch_assoc())
+            $syncIds[] = (int) $syncRow['id'];
+        $syncStmt->close();
     }
-
-    $penalty = 0.0;
-    $dueDate = trim((string)($pawn['due_date'] ?? ''));
-
-    if ($dueDate !== '') {
-        $due = new DateTimeImmutable($dueDate);
-
-        if ($to > $due) {
-            $penalty = $interest * 0.10;
+    foreach ($syncIds as $syncPawnId) {
+        try {
+            /* quoteInterest performs the transactional overdue/rate synchronization. */
+            quoteInterest($conn, $businessId, $branchId, $syncPawnId, $syncDate, $userId);
+        } catch (Throwable $syncError) {
+            /* Do not break the entire page for one legacy pawn; its row can still be opened manually. */
         }
     }
 
-    return [
-        'days_count' => $days,
-        'interest_amount' => round($interest, 2),
-        'penalty_amount' => round($penalty, 2),
-        'interest_from_display' => $from->format('d-m-Y'),
-        'interest_to_display' => $to->format('d-m-Y'),
-    ];
+    $pawns = array();
+    $sql = "SELECT p.id,p.pawn_no,p.pawn_date,p.principal_amount,p.balance_principal,p.interest_percent,p.current_interest_percent,p.current_rate_step_id,p.rate_escalation_count,p.next_interest_due_date,p.interest_grace_days,p.status,COALESCE(c.customer_name,'') customer_name,COALESCE(c.mobile,'') mobile,COALESCE(s.scheme_code,'') interest_scheme_code,COALESCE(s.scheme_name,'') interest_scheme_name,COALESCE(rs.level_no,1) current_rate_level,nrs.rate_percent next_interest_percent FROM pawn_entries p LEFT JOIN customers c ON c.id=p.customer_id AND c.business_id=p.business_id LEFT JOIN pawn_interest_schemes s ON s.id=p.interest_scheme_id AND s.business_id=p.business_id LEFT JOIN pawn_interest_rate_steps rs ON rs.id=p.current_rate_step_id AND rs.business_id=p.business_id LEFT JOIN pawn_interest_rate_steps nrs ON nrs.scheme_id=rs.scheme_id AND nrs.level_no=rs.next_level_no AND nrs.business_id=p.business_id WHERE p.business_id=? AND p.branch_id=? AND p.status IN ('Active','Partially Paid') ORDER BY p.id DESC";
+    $s = $conn->prepare($sql);
+    $s->bind_param('ii', $businessId, $branchId);
+    $s->execute();
+    $r = $s->get_result();
+    while ($x = $r->fetch_assoc()) {
+        $x['grace_until'] = $x['next_interest_due_date'] ? graceDate($x['next_interest_due_date'], (int) $x['interest_grace_days']) : null;
+        $pawns[] = $x;
+    }
+    $s->close();
+    $methods = array();
+    $s = $conn->prepare('SELECT id,method_name,method_type FROM payment_methods WHERE business_id=? AND is_active=1 ORDER BY method_name');
+    $s->bind_param('i', $businessId);
+    $s->execute();
+    $r = $s->get_result();
+    while ($x = $r->fetch_assoc())
+        $methods[] = $x;
+    $s->close();
+    $stats = array('interest_due_count' => 0, 'overdue_count' => 0, 'escalated_count' => 0, 'interest_outstanding' => 0);
+    if (tableExists($conn, 'pawn_interest_accruals')) {
+        $today = date('Y-m-d');
+        $s = $conn->prepare("SELECT COALESCE(SUM(CASE WHEN due_date<=? THEN 1 ELSE 0 END),0) due_count,COALESCE(SUM(CASE WHEN COALESCE(grace_until,due_date)<? THEN 1 ELSE 0 END),0) overdue_count,COALESCE(SUM(CASE WHEN due_date<=? THEN balance_amount ELSE 0 END),0) outstanding FROM pawn_interest_accruals WHERE business_id=? AND branch_id=? AND status IN ('Pending','Partially Paid')");
+        $s->bind_param('sssii', $today, $today, $today, $businessId, $branchId);
+        $s->execute();
+        $z = $s->get_result()->fetch_assoc();
+        $s->close();
+        $stats['interest_due_count'] = (int) $z['due_count'];
+        $stats['overdue_count'] = (int) $z['overdue_count'];
+        $stats['interest_outstanding'] = (float) $z['outstanding'];
+    }
+    $s = $conn->prepare("SELECT COUNT(*) n FROM pawn_entries WHERE business_id=? AND branch_id=? AND status IN ('Active','Partially Paid') AND rate_escalation_count>0");
+    $s->bind_param('ii', $businessId, $branchId);
+    $s->execute();
+    $stats['escalated_count'] = (int) $s->get_result()->fetch_assoc()['n'];
+    $s->close();
+    out(true, '', array('pawns' => $pawns, 'payment_methods' => $methods, 'stats' => $stats));
 }
-
-function generateReceiptNo(
-    mysqli $conn,
-    int $businessId
-): string {
-    $next = 1;
-
-    $stmt = $conn->prepare(
-        "SELECT receipt_no
-         FROM pawn_interest_collections
-         WHERE business_id = ?
-           AND receipt_no LIKE 'INT%'
-         ORDER BY id DESC
-         LIMIT 1"
-    );
-
-    if ($stmt) {
-        $stmt->bind_param('i', $businessId);
-        $stmt->execute();
-        $row = $stmt->get_result()->fetch_assoc();
-        $stmt->close();
-
-        if ($row) {
-            $number = (int)preg_replace(
-                '/\D/',
-                '',
-                (string)$row['receipt_no']
-            );
-
-            $next = $number + 1;
-        }
-    }
-
-    return 'INT' . str_pad(
-        (string)$next,
-        6,
-        '0',
-        STR_PAD_LEFT
-    );
-}
-
-function loadHistory(
-    mysqli $conn,
-    int $businessId,
-    int $pawnId
-): array {
-    $paymentJoin = '';
-    $paymentSelect = "'' AS method_name";
-
-    if (
-        tableExists($conn, 'payment_methods') &&
-        hasColumn($conn, 'pawn_interest_collections', 'payment_method_id')
-    ) {
-        $paymentJoin =
-            ' LEFT JOIN payment_methods pm ON pm.id = pic.payment_method_id';
-
-        $paymentSelect = "COALESCE(pm.method_name,'') AS method_name";
-    }
-
-    $pawnColumn = hasColumn(
-        $conn,
-        'pawn_interest_collections',
-        'pawn_entry_id'
-    ) ? 'pawn_entry_id' : 'pawn_id';
-
-    $selects = [
-        'pic.id',
-        'pic.receipt_no',
-        'pic.collection_date',
-        hasColumn($conn, 'pawn_interest_collections', 'interest_from')
-            ? 'pic.interest_from'
-            : 'NULL AS interest_from',
-        hasColumn($conn, 'pawn_interest_collections', 'interest_to')
-            ? 'pic.interest_to'
-            : 'NULL AS interest_to',
-        hasColumn($conn, 'pawn_interest_collections', 'days_count')
-            ? 'pic.days_count'
-            : '0 AS days_count',
-        'pic.interest_amount',
-        hasColumn($conn, 'pawn_interest_collections', 'penalty_amount')
-            ? 'pic.penalty_amount'
-            : '0 AS penalty_amount',
-        hasColumn($conn, 'pawn_interest_collections', 'discount_amount')
-            ? 'pic.discount_amount'
-            : '0 AS discount_amount',
-        hasColumn($conn, 'pawn_interest_collections', 'total_amount')
-            ? 'pic.total_amount'
-            : (
-                hasColumn($conn, 'pawn_interest_collections', 'net_amount')
-                    ? 'pic.net_amount AS total_amount'
-                    : 'pic.interest_amount AS total_amount'
-            ),
-        hasColumn($conn, 'pawn_interest_collections', 'reference_no')
-            ? 'pic.reference_no'
-            : "'' AS reference_no",
-        $paymentSelect,
-    ];
-
-    $sql =
-        'SELECT ' .
-        implode(', ', $selects) .
-        ' FROM pawn_interest_collections pic' .
-        $paymentJoin .
-        " WHERE pic.business_id = ?
-            AND pic.`{$pawnColumn}` = ?
-          ORDER BY pic.collection_date DESC, pic.id DESC";
-
-    $stmt = $conn->prepare($sql);
-
-    if (!$stmt) {
-        throw new RuntimeException(
-            'Unable to prepare interest history: ' . $conn->error
-        );
-    }
-
-    $stmt->bind_param('ii', $businessId, $pawnId);
-    $stmt->execute();
-    $result = $stmt->get_result();
-
-    $rows = [];
-
-    while ($row = $result->fetch_assoc()) {
-        $row['collection_date_display'] =
-            !empty($row['collection_date'])
-                ? date('d-m-Y', strtotime($row['collection_date']))
-                : '';
-
-        $row['interest_from_display'] =
-            !empty($row['interest_from'])
-                ? date('d-m-Y', strtotime($row['interest_from']))
-                : '';
-
-        $row['interest_to_display'] =
-            !empty($row['interest_to'])
-                ? date('d-m-Y', strtotime($row['interest_to']))
-                : '';
-
-        $rows[] = $row;
-    }
-
-    $stmt->close();
-
-    return $rows;
-}
-
-function totalInterestCollected(
-    mysqli $conn,
-    int $businessId,
-    int $pawnId
-): float {
-    $pawnColumn = hasColumn(
-        $conn,
-        'pawn_interest_collections',
-        'pawn_entry_id'
-    ) ? 'pawn_entry_id' : 'pawn_id';
-
-    $stmt = $conn->prepare(
-        "SELECT COALESCE(SUM(interest_amount),0) AS total
-         FROM pawn_interest_collections
-         WHERE business_id = ?
-           AND `{$pawnColumn}` = ?"
-    );
-
-    if (!$stmt) {
-        return 0.0;
-    }
-
-    $stmt->bind_param('ii', $businessId, $pawnId);
-    $stmt->execute();
-    $total = (float)($stmt->get_result()->fetch_assoc()['total'] ?? 0);
-    $stmt->close();
-
-    return $total;
-}
-
-function defaultInterestFrom(
-    mysqli $conn,
-    int $businessId,
-    int $pawnId,
-    string $pawnDate
-): string {
-    if (!hasColumn($conn, 'pawn_interest_collections', 'interest_to')) {
-        return $pawnDate;
-    }
-
-    $pawnColumn = hasColumn(
-        $conn,
-        'pawn_interest_collections',
-        'pawn_entry_id'
-    ) ? 'pawn_entry_id' : 'pawn_id';
-
-    $stmt = $conn->prepare(
-        "SELECT MAX(interest_to) AS last_interest_to
-         FROM pawn_interest_collections
-         WHERE business_id = ?
-           AND `{$pawnColumn}` = ?"
-    );
-
-    if (!$stmt) {
-        return $pawnDate;
-    }
-
-    $stmt->bind_param('ii', $businessId, $pawnId);
-    $stmt->execute();
-    $lastDate = (string)(
-        $stmt->get_result()->fetch_assoc()['last_interest_to'] ?? ''
-    );
-    $stmt->close();
-
-    if ($lastDate === '') {
-        return $pawnDate;
-    }
-
+if ($action === 'interest_quote') {
+    $pid = (int) ($_POST['pawn_id'] ?? 0);
+    $as = trim((string) ($_POST['as_of_date'] ?? date('Y-m-d')));
+    $overrideRaw = trim((string) ($_POST['override_rate'] ?? ''));
+    $override = $overrideRaw === '' ? null : (float) $overrideRaw;
+    if ($pid <= 0 || !validDate($as))
+        out(false, 'Select a pawn and valid calculation date.', array(), 422);
     try {
-        return (new DateTimeImmutable($lastDate))
-            ->modify('+1 day')
-            ->format('Y-m-d');
-    } catch (Throwable $error) {
-        return $pawnDate;
+        $q = quoteInterest($conn, $businessId, $branchId, $pid, $as, $userId, $override);
+        out(true, '', $q);
+    } catch (Throwable $e) {
+        out(false, $e->getMessage(), array(), 422);
     }
 }
-
-$businessId = (int)($_SESSION['business_id'] ?? 0);
-$branchId = (int)($_SESSION['branch_id'] ?? ($_SESSION['default_branch_id'] ?? 0));
-$userId = (int)($_SESSION['user_id'] ?? 0);
-$action = (string)($_POST['action'] ?? '');
-
-if ($businessId <= 0 || $branchId <= 0) {
-    respond(false, 'A valid business and branch must be selected.', [], 403);
-}
-
-if (
-    !tableExists($conn, 'pawn_entries') ||
-    !tableExists($conn, 'pawn_interest_collections')
-) {
-    respond(
-        false,
-        'Required pawn tables were not found.',
-        [],
-        500
-    );
-}
-
-
-if ($action === 'list_pawns') {
-    $stmt = $conn->prepare(
-        "SELECT
-            pe.id,
-            pe.pawn_no,
-            pe.pawn_date,
-            pe.balance_principal,
-            pe.interest_percent,
-            pe.interest_period,
-            pe.status,
-            COALESCE(c.customer_name,'Unknown Customer') AS customer_name,
-            c.mobile,
-            COALESCE(pc.category_name,'Unassigned') AS category_name
-         FROM pawn_entries pe
-         LEFT JOIN customers c
-            ON c.id = pe.customer_id
-         LEFT JOIN pawn_categories pc
-            ON pc.id = pe.pawn_category_id
-         WHERE pe.business_id = ?
-           AND pe.status IN ('Active','Partially Paid')
-           AND pe.balance_principal > 0
-         ORDER BY pe.pawn_date DESC, pe.id DESC"
-    );
-
-    if (!$stmt) {
-        respond(
-            false,
-            'Unable to prepare pawn selection list: ' . $conn->error,
-            [],
-            500
-        );
-    }
-
-    $stmt->bind_param('i', $businessId);
-    $stmt->execute();
-    $result = $stmt->get_result();
-
-    $pawns = [];
-
-    while ($row = $result->fetch_assoc()) {
-        $row['pawn_date_display'] =
-            !empty($row['pawn_date'])
-                ? date('d-m-Y', strtotime($row['pawn_date']))
-                : '';
-
-        $pawns[] = $row;
-    }
-
-    $stmt->close();
-
-    respond(
-        true,
-        'Pawn entries loaded.',
-        [
-            'pawns' => $pawns,
-        ]
-    );
-}
-
-if ($action === 'load') {
-    $pawnId = (int)($_POST['pawn_id'] ?? 0);
-
-    if ($pawnId <= 0) {
-        respond(false, 'Invalid pawn selected.');
-    }
-
-    try {
-        $pawn = getPawn($conn, $businessId, $pawnId);
-
-        if (!$pawn) {
-            respond(false, 'Pawn entry not found.', [], 404);
-        }
-
-        if (!in_array($pawn['status'], ['Active', 'Partially Paid'], true)) {
-            respond(
-                false,
-                'Interest can only be collected for active or partially paid pawns.'
-            );
-        }
-
-        $pawn['pawn_date_display'] =
-            !empty($pawn['pawn_date'])
-                ? date('d-m-Y', strtotime($pawn['pawn_date']))
-                : '';
-
-        $pawn['due_date_display'] =
-            !empty($pawn['due_date'])
-                ? date('d-m-Y', strtotime($pawn['due_date']))
-                : '';
-
-        $pawn['is_overdue'] =
-            !empty($pawn['due_date']) &&
-            strtotime($pawn['due_date']) < strtotime(date('Y-m-d'));
-
-        $paymentMethods = [];
-
-        if (tableExists($conn, 'payment_methods')) {
-            $stmt = $conn->prepare(
-                "SELECT id, method_name
-                 FROM payment_methods
-                 WHERE business_id = ?
-                   AND is_active = 1
-                 ORDER BY method_name"
-            );
-
-            if ($stmt) {
-                $stmt->bind_param('i', $businessId);
-                $stmt->execute();
-                $result = $stmt->get_result();
-
-                while ($row = $result->fetch_assoc()) {
-                    $paymentMethods[] = $row;
-                }
-
-                $stmt->close();
-            }
-        }
-
-        $history = loadHistory(
-            $conn,
-            $businessId,
-            $pawnId
-        );
-
-        $totalCollected = totalInterestCollected(
-            $conn,
-            $businessId,
-            $pawnId
-        );
-
-        $defaultFrom = defaultInterestFrom(
-            $conn,
-            $businessId,
-            $pawnId,
-            (string)$pawn['pawn_date']
-        );
-
-        respond(
-            true,
-            'Pawn interest details loaded.',
-            [
-                'pawn' => $pawn,
-                'payment_methods' => $paymentMethods,
-                'history' => $history,
-                'total_interest_collected' => $totalCollected,
-                'default_interest_from' => $defaultFrom,
-                'default_interest_to' => date('Y-m-d'),
-            ]
-        );
-    } catch (Throwable $error) {
-        respond(false, $error->getMessage(), [], 500);
-    }
-}
-
-if ($action === 'calculate') {
-    $pawnId = (int)($_POST['pawn_id'] ?? 0);
-    $fromDate = trim((string)($_POST['interest_from'] ?? ''));
-    $toDate = trim((string)($_POST['interest_to'] ?? ''));
-
-    if ($pawnId <= 0 || $fromDate === '' || $toDate === '') {
-        respond(false, 'Pawn and interest dates are required.');
-    }
-
-    try {
-        $pawn = getPawn($conn, $businessId, $pawnId);
-
-        if (!$pawn) {
-            respond(false, 'Pawn entry not found.', [], 404);
-        }
-
-        $calculation = calculateInterestValues(
-            $pawn,
-            $fromDate,
-            $toDate
-        );
-
-        respond(
-            true,
-            'Interest calculated.',
-            $calculation
-        );
-    } catch (Throwable $error) {
-        respond(false, $error->getMessage());
-    }
-}
-
-if ($action === 'save') {
-    $pawnId = (int)($_POST['pawn_id'] ?? 0);
-    $collectionDate = trim((string)($_POST['collection_date'] ?? ''));
-    $interestFrom = trim((string)($_POST['interest_from'] ?? ''));
-    $interestTo = trim((string)($_POST['interest_to'] ?? ''));
-    $daysCount = max(0, (int)($_POST['days_count'] ?? 0));
-    $interestAmount = max(0, (float)($_POST['interest_amount'] ?? 0));
-    $penaltyAmount = max(0, (float)($_POST['penalty_amount'] ?? 0));
-    $discountAmount = max(0, (float)($_POST['discount_amount'] ?? 0));
-    $totalAmount = max(0, (float)($_POST['total_amount'] ?? 0));
-    $paymentMethodId = (int)($_POST['payment_method_id'] ?? 0);
-    $referenceNo = trim((string)($_POST['reference_no'] ?? ''));
-    $remarks = trim((string)($_POST['remarks'] ?? ''));
-
-    if (
-        $pawnId <= 0 ||
-        $collectionDate === '' ||
-        $interestFrom === '' ||
-        $interestTo === ''
-    ) {
-        respond(false, 'Pawn and collection dates are required.');
-    }
-
-    if ($interestAmount <= 0 || $totalAmount <= 0) {
-        respond(false, 'Interest and total amount must be greater than zero.');
-    }
-
-    $expectedTotal = max(
-        0,
-        $interestAmount + $penaltyAmount - $discountAmount
-    );
-
-    if (abs($expectedTotal - $totalAmount) > 0.02) {
-        respond(false, 'The total collection amount is incorrect.');
-    }
-
+if ($action === 'interest_collect') {
+    $pid = (int) ($_POST['pawn_id'] ?? 0);
+    $manualRate = (float) ($_POST['interest_rate'] ?? 0);
+    $aid = (int) ($_POST['accrual_id'] ?? 0);
+    $date = trim((string) ($_POST['collection_date'] ?? date('Y-m-d')));
+    $paid = max(0, (float) ($_POST['paid_amount'] ?? 0));
+    $other = max(0, (float) ($_POST['other_charges'] ?? 0));
+    $method = (int) ($_POST['payment_method_id'] ?? 0);
+    $ref = trim((string) ($_POST['reference_no'] ?? ''));
+    $remarks = trim((string) ($_POST['remarks'] ?? ''));
+    if ($pid <= 0 || $aid <= 0 || !validDate($date) || $paid <= 0 || $method <= 0)
+        out(false, 'Pawn, schedule, paid amount, date and payment method are required.', array(), 422);
     $conn->begin_transaction();
-
     try {
-        $pawn = getPawn(
-            $conn,
-            $businessId,
-            $pawnId,
-            true
-        );
-
-        if (!$pawn) {
-            throw new RuntimeException('Pawn entry not found.');
+        $pawn = getPawn($conn, $businessId, $branchId, $pid, true);
+        $a = openAccrual($conn, $businessId, $pid);
+        if (!$a || (int) $a['id'] !== $aid)
+            throw new RuntimeException('Interest schedule changed. Recalculate before collecting.');
+        if ($manualRate <= 0 || $manualRate > 100)
+            throw new RuntimeException('Enter a valid due schedule rate.');
+        $rpawn = $pawn;
+        $rpawn['balance_principal'] = (float) $a['principal_balance'];
+        if (strtolower((string) ($rpawn['interest_method'] ?? 'Simple')) === 'flat')
+            $rpawn['principal_amount'] = (float) $a['principal_balance'];
+        list($rdays, $rmonths, $recalcInterest) = calcCycleInterest($rpawn, (string) $a['from_date'], (string) $a['to_date'], $manualRate);
+        $storedPenalty = max(0, (float) $a['penalty_amount']);
+        $storedOther = max(0, (float) $a['other_charges']);
+        $newTotal = $recalcInterest + $storedPenalty + $storedOther;
+        $newBalance = max(0, $newTotal - (float) $a['paid_amount']);
+        $newStatus = $newBalance <= 0.009 ? 'Paid' : ((float) $a['paid_amount'] > 0 ? 'Partially Paid' : 'Pending');
+        $us = $conn->prepare('UPDATE pawn_interest_accruals SET interest_percent=?,calculation_days=?,calculation_months=?,interest_amount=?,total_due=?,balance_amount=?,status=? WHERE id=? AND business_id=?');
+        $us->bind_param('diddddsii', $manualRate, $rdays, $rmonths, $recalcInterest, $newTotal, $newBalance, $newStatus, $aid, $businessId);
+        if (!$us->execute())
+            throw new RuntimeException('Unable to update due schedule rate: ' . $us->error);
+        $us->close();
+        $a = openAccrual($conn, $businessId, $pid);
+        $available = max(0, (float) $a['balance_amount']) + $other;
+        if ($paid > $available + 0.01)
+            throw new RuntimeException('Paid amount cannot exceed current interest due.');
+        $receipt = docNo($conn, $businessId, $branchId, 'pawn_interest_receipt', $date);
+        $interestRemain = max(0, (float) $a['interest_amount'] - min((float) $a['paid_amount'], (float) $a['interest_amount']));
+        $interestPaid = min($paid, $interestRemain);
+        $left = $paid - $interestPaid;
+        $penaltyRemain = max(0, (float) $a['penalty_amount']);
+        $penaltyPaid = min($left, $penaltyRemain);
+        $left -= $penaltyPaid;
+        $otherPaid = min($left, $other);
+        $total = $interestPaid + $penaltyPaid + $otherPaid;
+        $ctype = 'Custom';
+        $cycle = (string) ($pawn['interest_collection_cycle'] ?? 'Monthly');
+        if (in_array($cycle, array('Monthly', 'Quarterly', 'Half-Yearly', 'Yearly', 'Custom'), true))
+            $ctype = $cycle;
+        $rateStep = (int) ($a['rate_step_id'] ?? 0);
+        $level = (int) ($a['rate_level_no'] ?? 1);
+        $wasOverdue = (int) ($a['missed_due'] ?? 0);
+        $triggered = (int) ($a['rate_escalation_triggered'] ?? 0);
+        $principal = (float) $a['principal_balance'];
+        $days = (int) $a['calculation_days'];
+        $months = (float) $a['calculation_months'];
+        $rate = (float) $a['interest_percent'];
+        $s = $conn->prepare('INSERT INTO pawn_interest_collections (business_id,branch_id,pawn_entry_id,accrual_id,rate_step_id,rate_level_no,receipt_no,collection_date,from_date,to_date,due_date,grace_until,was_overdue,triggered_rate_escalation,principal_balance,calculation_days,calculation_months,interest_percent,interest_amount,penalty_amount,other_charges,total_amount,collection_type,payment_method_id,created_by,created_at) VALUES (?,?,?,?,NULLIF(?,0),?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())');
+        if (!$s)
+            throw new RuntimeException('Unable to prepare interest receipt: ' . $conn->error);
+        $s->bind_param('iiiiiissssssiididdddddsii', $businessId, $branchId, $pid, $aid, $rateStep, $level, $receipt, $date, $a['from_date'], $a['to_date'], $a['due_date'], $a['grace_until'], $wasOverdue, $triggered, $principal, $days, $months, $rate, $interestPaid, $penaltyPaid, $otherPaid, $total, $ctype, $method, $userId);
+        if (!$s->execute())
+            throw new RuntimeException('Unable to save interest receipt: ' . $s->error);
+        $cid = (int) $s->insert_id;
+        $s->close();
+        if (tableExists($conn, 'pawn_interest_payment_splits')) {
+            $s = $conn->prepare('INSERT INTO pawn_interest_payment_splits (interest_collection_id,payment_method_id,amount,reference_no,remarks) VALUES (?,?,?,?,?)');
+            $s->bind_param('iidss', $cid, $method, $total, $ref, $remarks);
+            $s->execute();
+            $s->close();
         }
-
-        if (!in_array($pawn['status'], ['Active', 'Partially Paid'], true)) {
-            throw new RuntimeException(
-                'Interest can only be collected for active or partially paid pawns.'
-            );
+        $newPaid = (float) $a['paid_amount'] + $total;
+        $newBal = max(0, (float) $a['balance_amount'] - $total);
+        $status = $newBal <= 0.009 ? 'Paid' : 'Partially Paid';
+        $paidAt = $status === 'Paid' ? date('Y-m-d H:i:s') : null;
+        $s = $conn->prepare('UPDATE pawn_interest_accruals SET paid_amount=?,balance_amount=?,status=?,paid_at=? WHERE id=? AND business_id=?');
+        $s->bind_param('ddssii', $newPaid, $newBal, $status, $paidAt, $aid, $businessId);
+        $s->execute();
+        $s->close();
+        $s = $conn->prepare('UPDATE pawn_entries SET total_interest_collected=total_interest_collected+?,total_penalty_collected=total_penalty_collected+?,total_other_charges_collected=total_other_charges_collected+? WHERE id=? AND business_id=?');
+        $s->bind_param('dddii', $interestPaid, $penaltyPaid, $otherPaid, $pid, $businessId);
+        $s->execute();
+        $s->close();
+        if ($status === 'Paid') {
+            $to = (string) $a['to_date'];
+            $s = $conn->prepare('UPDATE pawn_entries SET last_interest_paid_upto=? WHERE id=? AND business_id=?');
+            $s->bind_param('sii', $to, $pid, $businessId);
+            $s->execute();
+            $s->close();
+            $pawn = getPawn($conn, $businessId, $branchId, $pid, true);
+            generateNextAccrual($conn, $pawn, $userId, $to);
         }
-
-        $calculation = calculateInterestValues(
-            $pawn,
-            $interestFrom,
-            $interestTo
-        );
-
-        if ($daysCount <= 0) {
-            $daysCount = (int)$calculation['days_count'];
-        }
-
-        $receiptNo = generateReceiptNo(
-            $conn,
-            $businessId
-        );
-
-        $columns = [
-            'business_id',
-            'pawn_entry_id',
-            'receipt_no',
-            'collection_date',
-            'interest_amount',
-        ];
-        $placeholders = ['?', '?', '?', '?', '?'];
-        $types = 'iissd';
-        $values = [
-            $businessId,
-            $pawnId,
-            $receiptNo,
-            $collectionDate,
-            $interestAmount,
-        ];
-
-        if (!hasColumn(
-            $conn,
-            'pawn_interest_collections',
-            'pawn_entry_id'
-        )) {
-            $columns[1] = 'pawn_id';
-        }
-
-        $optionalFields = [
-            'branch_id' => ['i', $branchId],
-            'interest_from' => ['s', $interestFrom],
-            'interest_to' => ['s', $interestTo],
-            'days_count' => ['i', $daysCount],
-            'penalty_amount' => ['d', $penaltyAmount],
-            'discount_amount' => ['d', $discountAmount],
-            'total_amount' => ['d', $totalAmount],
-            'net_amount' => ['d', $totalAmount],
-            'payment_method_id' => ['i', $paymentMethodId > 0 ? $paymentMethodId : null],
-            'reference_no' => ['s', $referenceNo],
-            'remarks' => ['s', $remarks],
-            'created_by' => ['i', $userId],
-        ];
-
-        foreach ($optionalFields as $column => [$type, $value]) {
-            if (hasColumn(
-                $conn,
-                'pawn_interest_collections',
-                $column
-            )) {
-                $columns[] = $column;
-                $placeholders[] = '?';
-                $types .= $type;
-                $values[] = $value;
-            }
-        }
-
-        if (hasColumn(
-            $conn,
-            'pawn_interest_collections',
-            'created_at'
-        )) {
-            $columns[] = 'created_at';
-            $placeholders[] = 'NOW()';
-        }
-
-        $sql =
-            'INSERT INTO pawn_interest_collections (' .
-            implode(', ', $columns) .
-            ') VALUES (' .
-            implode(', ', $placeholders) .
-            ')';
-
-        $stmt = $conn->prepare($sql);
-
-        if (!$stmt) {
-            throw new RuntimeException(
-                'Unable to prepare interest collection: ' . $conn->error
-            );
-        }
-
-        bindDynamic($stmt, $types, $values);
-
-        if (!$stmt->execute()) {
-            throw new RuntimeException(
-                'Unable to save interest collection: ' . $stmt->error
-            );
-        }
-
-        $collectionId = (int)$stmt->insert_id;
-        $stmt->close();
-
-        if (hasColumn(
-            $conn,
-            'pawn_entries',
-            'total_interest_collected'
-        )) {
-            $stmt = $conn->prepare(
-                "UPDATE pawn_entries
-                 SET total_interest_collected =
-                     IFNULL(total_interest_collected,0) + ?
-                 WHERE id = ?
-                   AND business_id = ?
-                 LIMIT 1"
-            );
-
-            if (!$stmt) {
-                throw new RuntimeException(
-                    'Unable to prepare pawn interest total update.'
-                );
-            }
-
-            $stmt->bind_param(
-                'dii',
-                $interestAmount,
-                $pawnId,
-                $businessId
-            );
-
-            if (!$stmt->execute()) {
-                throw new RuntimeException(
-                    'Unable to update pawn interest total: ' . $stmt->error
-                );
-            }
-
-            $stmt->close();
-        }
-
+        actionLog($conn, $businessId, $branchId, $pid, 'Interest Collected', 'pawn_interest_collections', $cid, 'Collected interest receipt ' . $receipt, $userId);
+        auditLog($conn, $businessId, $branchId, $userId, 'Create', 'pawn_interest_collections', $cid, 'Collected pawn interest ' . $receipt, array('pawn_id' => $pid, 'receipt_no' => $receipt, 'interest' => $interestPaid, 'penalty' => $penaltyPaid, 'other' => $otherPaid, 'total' => $total));
         $conn->commit();
-
-        respond(
-            true,
-            'Interest collection saved successfully.',
-            [
-                'collection_id' => $collectionId,
-                'receipt_no' => $receiptNo,
-            ]
-        );
-    } catch (Throwable $error) {
+        out(true, 'Interest collected successfully.', array('receipt_no' => $receipt, 'collection_id' => $cid));
+    } catch (Throwable $e) {
         $conn->rollback();
-        respond(false, $error->getMessage(), [], 500);
+        out(false, $e->getMessage(), array(), 422);
     }
 }
-
-respond(false, 'Invalid action.', [], 400);
+if ($action === 'payment_quote') {
+    $pid = (int) ($_POST['pawn_id'] ?? 0);
+    $as = trim((string) ($_POST['as_of_date'] ?? date('Y-m-d')));
+    if ($pid <= 0 || !validDate($as))
+        out(false, 'Select a pawn and valid date.', array(), 422);
+    try {
+        $q = quoteInterest($conn, $businessId, $branchId, $pid, $as, $userId);
+        $pawn = $q['pawn'];
+        $interest = 0;
+        if (tableExists($conn, 'pawn_interest_accruals')) {
+            $s = $conn->prepare("SELECT COALESCE(SUM(balance_amount),0) v FROM pawn_interest_accruals WHERE pawn_entry_id=? AND business_id=? AND status IN ('Pending','Partially Paid')");
+            $s->bind_param('ii', $pid, $businessId);
+            $s->execute();
+            $interest = (float) $s->get_result()->fetch_assoc()['v'];
+            $s->close();
+        }
+        out(true, '', array('principal_balance' => (float) $pawn['balance_principal'], 'interest_outstanding' => $interest, 'closure_total' => (float) $pawn['balance_principal'] + $interest, 'bank_release_blocked' => bankBlocked($conn, $businessId, $pid), 'pawn' => $pawn));
+    } catch (Throwable $e) {
+        out(false, $e->getMessage(), array(), 422);
+    }
+}
+if ($action === 'payment_collect') {
+    $pid = (int) ($_POST['pawn_id'] ?? 0);
+    $date = trim((string) ($_POST['payment_date'] ?? date('Y-m-d')));
+    $principal = max(0, (float) ($_POST['principal_amount'] ?? 0));
+    $method = (int) ($_POST['payment_method_id'] ?? 0);
+    $ref = trim((string) ($_POST['reference_no'] ?? ''));
+    $remarks = trim((string) ($_POST['remarks'] ?? ''));
+    $closure = !empty($_POST['is_closure']);
+    $releasedTo = trim((string) ($_POST['released_to'] ?? ''));
+    $relation = trim((string) ($_POST['released_to_relation'] ?? ''));
+    $idNo = trim((string) ($_POST['identity_document_no'] ?? ''));
+    if ($pid <= 0 || !validDate($date) || $method <= 0 || $principal <= 0)
+        out(false, 'Pawn, payment date, principal amount and payment method are required.', array(), 422);
+    $conn->begin_transaction();
+    try {
+        $pawn = getPawn($conn, $businessId, $branchId, $pid, true);
+        if (!in_array($pawn['status'], array('Active', 'Partially Paid'), true))
+            throw new RuntimeException('This pawn is not open for payment.');
+        if ($principal > (float) $pawn['balance_principal'] + 0.01)
+            throw new RuntimeException('Principal payment exceeds outstanding principal.');
+        $interestOutstanding = 0;
+        if (tableExists($conn, 'pawn_interest_accruals')) {
+            $s = $conn->prepare("SELECT COALESCE(SUM(balance_amount),0) v FROM pawn_interest_accruals WHERE pawn_entry_id=? AND business_id=? AND status IN ('Pending','Partially Paid')");
+            $s->bind_param('ii', $pid, $businessId);
+            $s->execute();
+            $interestOutstanding = (float) $s->get_result()->fetch_assoc()['v'];
+            $s->close();
+        }
+        if ($closure) {
+            if (abs($principal - (float) $pawn['balance_principal']) > 0.01)
+                throw new RuntimeException('Full closure must pay the complete principal balance.');
+            if ($interestOutstanding > 0.009)
+                throw new RuntimeException('Collect all pending interest before closing this pawn.');
+            if (bankBlocked($conn, $businessId, $pid))
+                throw new RuntimeException('Cannot close/release: this pawn gold is still pledged with a bank.');
+            if ($releasedTo === '')
+                throw new RuntimeException('Enter the person receiving the pawn gold.');
+        }
+        $receipt = docNo($conn, $businessId, $branchId, 'pawn_payment_receipt', $date);
+        $type = $closure ? 'Full Settlement' : 'Principal Only';
+        $zero = 0.0;
+        $isClosure = $closure ? 1 : 0;
+        $s = $conn->prepare('INSERT INTO pawn_payments (business_id,branch_id,pawn_entry_id,receipt_no,payment_date,principal_amount,interest_amount,penalty_amount,other_charges,total_amount,payment_type,payment_method_id,reference_no,remarks,is_closure,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())');
+        $s->bind_param('iiissdddddsissii', $businessId, $branchId, $pid, $receipt, $date, $principal, $zero, $zero, $zero, $principal, $type, $method, $ref, $remarks, $isClosure, $userId);
+        if (!$s->execute())
+            throw new RuntimeException('Unable to save pawn payment: ' . $s->error);
+        $payId = (int) $s->insert_id;
+        $s->close();
+        if (tableExists($conn, 'pawn_payment_splits')) {
+            $s = $conn->prepare('INSERT INTO pawn_payment_splits (pawn_payment_id,payment_method_id,amount,reference_no,remarks) VALUES (?,?,?,?,?)');
+            $s->bind_param('iidss', $payId, $method, $principal, $ref, $remarks);
+            $s->execute();
+            $s->close();
+        }
+        $newBal = max(0, (float) $pawn['balance_principal'] - $principal);
+        $status = $closure ? 'Closed' : ($newBal < (float) $pawn['principal_amount'] ? 'Partially Paid' : 'Active');
+        $closureDate = $closure ? $date : null;
+        $s = $conn->prepare('UPDATE pawn_entries SET total_principal_paid=total_principal_paid+?,balance_principal=?,status=?,closure_date=? WHERE id=? AND business_id=?');
+        $s->bind_param('ddssii', $principal, $newBal, $status, $closureDate, $pid, $businessId);
+        $s->execute();
+        $s->close();
+        $releaseNo = '';
+        if ($closure && tableExists($conn, 'pawn_releases')) {
+            $releaseNo = docNo($conn, $businessId, $branchId, 'pawn_release', $date);
+            $s = $conn->prepare("INSERT INTO pawn_releases (business_id,branch_id,pawn_entry_id,pawn_payment_id,release_no,release_date,principal_paid,interest_paid,penalty_paid,other_charges,total_paid,released_to,released_to_relation,identity_document_no,identity_verified,item_handover_status,remarks,released_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,'Pending',?,?,NOW())");
+            $s->bind_param('iiiissdddddssssi', $businessId, $branchId, $pid, $payId, $releaseNo, $date, $principal, $zero, $zero, $zero, $principal, $releasedTo, $relation, $idNo, $remarks, $userId);
+            if (!$s->execute())
+                throw new RuntimeException('Unable to create pawn release: ' . $s->error);
+            $rid = (int) $s->insert_id;
+            $s->close();
+            actionLog($conn, $businessId, $branchId, $pid, 'Released', 'pawn_releases', $rid, 'Created pending item handover ' . $releaseNo, $userId);
+        }
+        actionLog($conn, $businessId, $branchId, $pid, $closure ? 'Closed' : 'Principal Collected', 'pawn_payments', $payId, 'Saved pawn payment ' . $receipt, $userId);
+        auditLog($conn, $businessId, $branchId, $userId, 'Create', 'pawn_payments', $payId, $closure ? 'Closed pawn ' . $pawn['pawn_no'] : 'Collected pawn principal ' . $receipt, array('pawn_id' => $pid, 'receipt_no' => $receipt, 'principal' => $principal, 'closure' => $closure));
+        $conn->commit();
+        out(true, $closure ? 'Pawn closed successfully. Release record created.' : 'Principal payment saved successfully.', array('receipt_no' => $receipt, 'payment_id' => $payId, 'release_no' => $releaseNo));
+    } catch (Throwable $e) {
+        $conn->rollback();
+        out(false, $e->getMessage(), array(), 422);
+    }
+}
+out(false, 'Invalid action.', array(), 400);
