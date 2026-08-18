@@ -126,13 +126,26 @@ function jsonResponse(bool $success, string $message = '', array $extra = [], in
     exit;
 }
 
+function bindDynamic(mysqli_stmt $stmt, string $types, array &$params): void
+{
+    if ($types === '' || !$params) {
+        return;
+    }
+
+    $bind = [$types];
+    foreach ($params as $key => $value) {
+        $bind[] = &$params[$key];
+    }
+    call_user_func_array([$stmt, 'bind_param'], $bind);
+}
+
 /*
 |--------------------------------------------------------------------------
-| AJAX PRODUCT LIST / 8-DIGIT BARCODE GENERATION
+| AJAX PRODUCT LIST / BULK 8-DIGIT BARCODE GENERATION
 |--------------------------------------------------------------------------
-| Loads product rows, can generate a unique 8-digit numeric barcode for a
-| product, and sends entered print quantities to the local Windows Barcode
-| Print Manager API.
+| Loads product rows, bulk-generates unique 8-digit numeric barcodes only for
+| products that do not already have a barcode, and sends entered print
+| quantities to the local Windows Barcode Print Manager API.
 |--------------------------------------------------------------------------
 */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
@@ -158,93 +171,143 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 
     $action = (string) $_POST['action'];
 
-    if ($action === 'generate_barcode') {
+    if ($action === 'generate_barcode' || $action === 'bulk_generate_barcodes') {
         if (!$canUpdate) {
-            jsonResponse(
-                false,
-                'You do not have permission to update products.',
-                [],
-                403
-            );
+            jsonResponse(false, 'You do not have permission to update products.', [], 403);
         }
 
-        $productId = (int) ($_POST['product_id'] ?? 0);
-        if ($productId <= 0) {
-            jsonResponse(false, 'Invalid product selected.', [], 422);
+        $requestedIds = [];
+        $generateAllMissing = false;
+
+        if ($action === 'generate_barcode') {
+            $productId = (int) ($_POST['product_id'] ?? 0);
+            if ($productId <= 0) {
+                jsonResponse(false, 'Invalid product selected.', [], 422);
+            }
+            $requestedIds = [$productId];
+        } else {
+            $generateAllMissing = ((string) ($_POST['generate_all_missing'] ?? '0') === '1');
+            $rawIds = $_POST['product_ids'] ?? [];
+            if (!is_array($rawIds)) {
+                $rawIds = [];
+            }
+            foreach ($rawIds as $rawId) {
+                $id = (int) $rawId;
+                if ($id > 0) {
+                    $requestedIds[$id] = $id;
+                }
+            }
+            $requestedIds = array_values($requestedIds);
+
+            if (!$generateAllMissing && !$requestedIds) {
+                jsonResponse(false, 'Select at least one product without a barcode.', [], 422);
+            }
         }
 
-        $stmt = $conn->prepare(
-            'SELECT id, product_name, product_code, barcode
-             FROM products
-             WHERE id = ? AND business_id = ?
-             LIMIT 1'
-        );
+        $where = 'business_id = ? AND (barcode IS NULL OR TRIM(barcode) = \'\')';
+        $types = 'i';
+        $params = [$businessId];
+
+        if (!$generateAllMissing) {
+            $placeholders = implode(',', array_fill(0, count($requestedIds), '?'));
+            $where .= " AND id IN ({$placeholders})";
+            $types .= str_repeat('i', count($requestedIds));
+            foreach ($requestedIds as $id) {
+                $params[] = $id;
+            }
+        }
+
+        $sql = "SELECT id, product_name, product_code, barcode
+                FROM products
+                WHERE {$where}
+                ORDER BY id ASC";
+        $stmt = $conn->prepare($sql);
         if (!$stmt) {
             jsonResponse(false, 'Unable to prepare product lookup.', [], 500);
         }
-
-        $stmt->bind_param('ii', $productId, $businessId);
+        bindDynamic($stmt, $types, $params);
         $stmt->execute();
-        $product = $stmt->get_result()->fetch_assoc();
+        $result = $stmt->get_result();
+        $targets = [];
+        while ($row = $result->fetch_assoc()) {
+            $targets[] = $row;
+        }
         $stmt->close();
 
-        if (!$product) {
-            jsonResponse(false, 'Product not found.', [], 404);
+        if (!$targets) {
+            jsonResponse(true, 'No products need a barcode.', [
+                'generated' => [],
+                'generated_count' => 0,
+                'skipped_count' => count($requestedIds),
+            ]);
         }
 
-        $barcode = '';
-        $attempts = 0;
-
-        while ($attempts < 100) {
-            $attempts++;
-            $candidate = (string) random_int(10000000, 99999999);
-
-            $check = $conn->prepare(
-                'SELECT id FROM products WHERE barcode = ? LIMIT 1'
-            );
-            if (!$check) {
-                jsonResponse(false, 'Unable to validate barcode uniqueness.', [], 500);
-            }
-
-            $check->bind_param('s', $candidate);
-            $check->execute();
-            $exists = $check->get_result()->fetch_assoc();
-            $check->close();
-
-            if (!$exists) {
-                $barcode = $candidate;
-                break;
-            }
-        }
-
-        if ($barcode === '') {
-            jsonResponse(false, 'Unable to generate a unique 8-digit barcode. Please try again.', [], 500);
-        }
-
+        $check = $conn->prepare('SELECT id FROM products WHERE barcode = ? LIMIT 1');
         $update = $conn->prepare(
-            'UPDATE products SET barcode = ? WHERE id = ? AND business_id = ?'
+            "UPDATE products
+             SET barcode = ?
+             WHERE id = ? AND business_id = ? AND (barcode IS NULL OR TRIM(barcode) = '')"
         );
-        if (!$update) {
-            jsonResponse(false, 'Unable to prepare barcode update.', [], 500);
+        if (!$check || !$update) {
+            if ($check) $check->close();
+            if ($update) $update->close();
+            jsonResponse(false, 'Unable to prepare barcode generation.', [], 500);
         }
 
-        $update->bind_param('sii', $barcode, $productId, $businessId);
-        if (!$update->execute()) {
-            $error = $update->error;
+        $generated = [];
+        $conn->begin_transaction();
+
+        try {
+            foreach ($targets as $product) {
+                $barcode = '';
+                $attempts = 0;
+
+                while ($attempts < 200) {
+                    $attempts++;
+                    $candidate = (string) random_int(10000000, 99999999);
+                    $check->bind_param('s', $candidate);
+                    $check->execute();
+                    $exists = $check->get_result()->fetch_assoc();
+                    if (!$exists) {
+                        $barcode = $candidate;
+                        break;
+                    }
+                }
+
+                if ($barcode === '') {
+                    throw new RuntimeException('Unable to generate a unique 8-digit barcode. Please try again.');
+                }
+
+                $productId = (int) $product['id'];
+                $update->bind_param('sii', $barcode, $productId, $businessId);
+                if (!$update->execute()) {
+                    throw new RuntimeException('Unable to save barcode: ' . $update->error);
+                }
+
+                if ($update->affected_rows === 1) {
+                    $generated[] = [
+                        'product_id' => $productId,
+                        'barcode' => $barcode,
+                    ];
+                }
+            }
+
+            $conn->commit();
+        } catch (Throwable $e) {
+            $conn->rollback();
+            $check->close();
             $update->close();
-            jsonResponse(false, 'Unable to save barcode: ' . $error, [], 500);
+            jsonResponse(false, $e->getMessage(), [], 500);
         }
+
+        $check->close();
         $update->close();
 
-        jsonResponse(
-            true,
-            'New 8-digit barcode generated successfully.',
-            [
-                'product_id' => $productId,
-                'barcode' => $barcode,
-                'old_barcode' => (string) ($product['barcode'] ?? ''),
-            ]
-        );
+        jsonResponse(true, count($generated) . ' barcode(s) generated successfully.', [
+            'generated' => $generated,
+            'generated_count' => count($generated),
+            'skipped_count' => max(0, count($targets) - count($generated)),
+        ]);
     }
 
     if ($action === 'list') {
@@ -430,7 +493,7 @@ $currencySymbol = (string) ($_SESSION['currency_symbol'] ?? '₹');
             padding: 14px;
             border-bottom: 1px solid var(--border-color);
             display: grid;
-            grid-template-columns: minmax(260px, 1fr) auto auto auto;
+            grid-template-columns: minmax(260px, 1fr) auto auto auto auto auto;
             gap: 10px;
             align-items: center;
         }
@@ -626,21 +689,22 @@ $currencySymbol = (string) ($_SESSION['currency_symbol'] ?? '₹');
             flex-wrap: wrap;
         }
 
-        .barcode-generate-btn {
-            min-height: 28px;
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            background: var(--primary-soft);
-            color: var(--primary-dark);
-            font-size: 9px;
-            font-weight: 800;
-            padding: 5px 8px;
-            white-space: nowrap;
+        .barcode-select {
+            width: 16px;
+            height: 16px;
+            accent-color: var(--primary);
+            cursor: pointer;
         }
 
-        .barcode-generate-btn:disabled {
-            opacity: .6;
-            cursor: wait;
+        .barcode-select:disabled {
+            cursor: not-allowed;
+            opacity: .35;
+        }
+
+        .barcode-selection-note {
+            font-size: 9px;
+            color: var(--muted-color);
+            white-space: nowrap;
         }
 
         .price-text {
@@ -933,6 +997,18 @@ $currencySymbol = (string) ($_SESSION['currency_symbol'] ?? '₹');
                             <span id="apiStatusText">Checking Print Manager...</span>
                         </div>
 
+                        <?php if ($canUpdate): ?>
+                        <button type="button" class="btn-soft" id="generateSelected" disabled>
+                            <i class="fa-solid fa-barcode"></i>
+                            Generate Selected
+                        </button>
+
+                        <button type="button" class="btn-soft" id="generateAllMissing">
+                            <i class="fa-solid fa-layer-group"></i>
+                            Generate All Missing
+                        </button>
+                        <?php endif; ?>
+
                         <button
                             type="button"
                             class="btn-soft"
@@ -967,6 +1043,7 @@ $currencySymbol = (string) ($_SESSION['currency_symbol'] ?? '₹');
                             >
                                 <thead>
                                     <tr>
+                                        <th style="width:46px" class="text-center"><input type="checkbox" class="barcode-select" id="selectAllMissing" title="Select all products without barcode"></th>
                                         <th style="width:60px">#</th>
                                         <th>Product</th>
                                         <th>Category / Metal</th>
@@ -1054,6 +1131,9 @@ $currencySymbol = (string) ($_SESSION['currency_symbol'] ?? '₹');
             const search = document.getElementById('productSearch');
             const printButton = document.getElementById('printEntered');
             const clearButton = document.getElementById('clearCounts');
+            const generateSelectedButton = document.getElementById('generateSelected');
+            const generateAllMissingButton = document.getElementById('generateAllMissing');
+            const selectAllMissing = document.getElementById('selectAllMissing');
 
             const apiStatus = document.getElementById('apiStatus');
             const apiStatusText = document.getElementById('apiStatusText');
@@ -1066,6 +1146,7 @@ $currencySymbol = (string) ($_SESSION['currency_symbol'] ?? '₹');
             let products = [];
             let searchTimer = null;
             let isPrinting = false;
+            let isGenerating = false;
 
             function escapeHtml(value) {
                 return String(value ?? '')
@@ -1169,20 +1250,11 @@ $currencySymbol = (string) ($_SESSION['currency_symbol'] ?? '₹');
                 const barcode = String(product.barcode || '').trim();
                 const printable = isValidBarcode(barcode);
 
-                let html = '<div class="barcode-cell-wrap">';
-
-                html += printable
-                    ? '<span class="barcode-text">' + escapeHtml(barcode) + '</span>'
-                    : '<span class="barcode-missing"><i class="fa-solid fa-triangle-exclamation me-1"></i>No printable barcode</span>';
-
-                if (canUpdateBarcode) {
-                    html += '<button type="button" class="barcode-generate-btn" data-action="generate-barcode" data-product-id="' +
-                        Number(product.id) + '"><i class="fa-solid fa-barcode me-1"></i>' +
-                        (printable ? 'New 8 Digit' : 'Generate 8 Digit') + '</button>';
-                }
-
-                html += '</div>';
-                return html;
+                return '<div class="barcode-cell-wrap">' +
+                    (printable
+                        ? '<span class="barcode-text">' + escapeHtml(barcode) + '</span>'
+                        : '<span class="barcode-missing"><i class="fa-solid fa-triangle-exclamation me-1"></i>No printable barcode</span>') +
+                    '</div>';
             }
 
             function rowHtml(product, index) {
@@ -1199,6 +1271,13 @@ $currencySymbol = (string) ($_SESSION['currency_symbol'] ?? '₹');
                     '<tr data-id="' +
                     Number(product.id) +
                     '">' +
+
+                    '<td class="text-center" data-label="Select">' +
+                    '<input type="checkbox" class="barcode-select product-barcode-select" data-product-id="' +
+                    Number(product.id) + '" ' +
+                    ((!printable && canUpdateBarcode) ? '' : 'disabled ') +
+                    'title="' + ((!printable && canUpdateBarcode) ? 'Select for barcode generation' : 'Barcode already exists') + '">' +
+                    '</td>' +
 
                     '<td data-label="#">' +
                     (index + 1) +
@@ -1285,6 +1364,29 @@ $currencySymbol = (string) ($_SESSION['currency_symbol'] ?? '₹');
                 );
 
                 updateSummary();
+                updateBarcodeSelection();
+            }
+
+            function updateBarcodeSelection() {
+                const selectable = [...body.querySelectorAll('.product-barcode-select:not(:disabled)')];
+                const selected = selectable.filter(input => input.checked);
+
+                if (generateSelectedButton) {
+                    generateSelectedButton.disabled = isGenerating || selected.length === 0;
+                    generateSelectedButton.innerHTML = isGenerating
+                        ? '<i class="fa-solid fa-spinner fa-spin"></i> Generating...'
+                        : '<i class="fa-solid fa-barcode"></i> Generate Selected (' + selected.length + ')';
+                }
+
+                if (generateAllMissingButton) {
+                    generateAllMissingButton.disabled = isGenerating || selectable.length === 0;
+                }
+
+                if (selectAllMissing) {
+                    selectAllMissing.disabled = selectable.length === 0 || isGenerating;
+                    selectAllMissing.checked = selectable.length > 0 && selected.length === selectable.length;
+                    selectAllMissing.indeterminate = selected.length > 0 && selected.length < selectable.length;
+                }
             }
 
             function getRowQuantity(row) {
@@ -1732,75 +1834,95 @@ $currencySymbol = (string) ($_SESSION['currency_symbol'] ?? '₹');
                 checkPrintManager(false);
             }
 
-            body.addEventListener('click', async event => {
-                const button = event.target.closest('[data-action="generate-barcode"]');
-                if (!button || isPrinting) {
+            async function generateBulkBarcodes(generateAllMissing) {
+                if (isGenerating || isPrinting || !canUpdateBarcode) {
                     return;
                 }
 
-                const productId = Number(button.dataset.productId || 0);
-                const product = products.find(item => Number(item.id) === productId);
-                if (!product) {
-                    showToast('error', 'Product not found in the current list.');
+                const selectedIds = [...body.querySelectorAll('.product-barcode-select:checked')]
+                    .map(input => Number(input.dataset.productId || 0))
+                    .filter(id => id > 0);
+
+                if (!generateAllMissing && selectedIds.length === 0) {
+                    showToast('error', 'Select at least one product without a barcode.');
                     return;
                 }
 
-                const currentBarcode = String(product.barcode || '').trim();
-                if (currentBarcode !== '') {
-                    const confirmed = window.confirm(
-                        'Generate a new 8-digit barcode for ' +
-                        (product.product_name || product.product_code || 'this product') +
-                        '? The current barcode ' + currentBarcode + ' will be replaced.'
-                    );
-                    if (!confirmed) {
-                        return;
-                    }
+                const missingCount = products.filter(item => String(item.barcode || '').trim() === '').length;
+                const targetCount = generateAllMissing ? missingCount : selectedIds.length;
+                if (targetCount === 0) {
+                    showToast('success', 'All products already have barcodes.');
+                    return;
                 }
 
-                button.disabled = true;
-                const oldHtml = button.innerHTML;
-                button.innerHTML = '<i class="fa-solid fa-spinner fa-spin me-1"></i>Generating...';
+                const confirmed = window.confirm(
+                    'Generate unique 8-digit barcodes for ' + targetCount + ' product(s)? Existing barcodes will not be changed.'
+                );
+                if (!confirmed) {
+                    return;
+                }
+
+                isGenerating = true;
+                updateBarcodeSelection();
+                setLoading(true, 'Generating 8-digit barcodes...');
 
                 try {
                     const data = new FormData();
-                    data.append('action', 'generate_barcode');
-                    data.append('product_id', String(productId));
-                    const result = await pageRequest(data);
-
-                    product.barcode = String(result.barcode || '');
-
-                    const row = button.closest('tr[data-id]');
-                    if (row) {
-                        const barcodeCell = row.querySelector('td[data-label="Barcode"]');
-                        if (barcodeCell) {
-                            barcodeCell.innerHTML = barcodeCellHtml(product);
-                        }
-
-                        const qtyInput = row.querySelector('.qty-input');
-                        if (qtyInput) {
-                            qtyInput.disabled = !isValidBarcode(product.barcode);
-                        }
-
-                        setRowStatus(
-                            row,
-                            isValidBarcode(product.barcode) ? 'ready' : 'waiting',
-                            isValidBarcode(product.barcode) ? 'Ready' : 'No Barcode'
-                        );
+                    data.append('action', 'bulk_generate_barcodes');
+                    data.append('generate_all_missing', generateAllMissing ? '1' : '0');
+                    if (!generateAllMissing) {
+                        selectedIds.forEach(id => data.append('product_ids[]', String(id)));
                     }
 
+                    const result = await pageRequest(data);
+                    const generated = Array.isArray(result.generated) ? result.generated : [];
+                    const byId = new Map(generated.map(row => [Number(row.product_id), String(row.barcode || '')]));
+
+                    products.forEach(product => {
+                        const newBarcode = byId.get(Number(product.id));
+                        if (newBarcode) {
+                            product.barcode = newBarcode;
+                        }
+                    });
+
+                    render();
                     printableProducts.textContent = products
                         .filter(item => isValidBarcode(item.barcode))
                         .length
                         .toLocaleString();
 
-                    updateSummary();
-                    showToast('success', 'Barcode ' + product.barcode + ' generated successfully.');
+                    showToast('success', Number(result.generated_count || generated.length) + ' barcode(s) generated successfully.', 5000);
                 } catch (error) {
-                    button.disabled = false;
-                    button.innerHTML = oldHtml;
-                    showToast('error', error.message);
+                    showToast('error', error.message, 6000);
+                } finally {
+                    isGenerating = false;
+                    setLoading(false);
+                    updateBarcodeSelection();
+                }
+            }
+
+            if (selectAllMissing) {
+                selectAllMissing.addEventListener('change', () => {
+                    body.querySelectorAll('.product-barcode-select:not(:disabled)').forEach(input => {
+                        input.checked = selectAllMissing.checked;
+                    });
+                    updateBarcodeSelection();
+                });
+            }
+
+            body.addEventListener('change', event => {
+                if (event.target.classList.contains('product-barcode-select')) {
+                    updateBarcodeSelection();
                 }
             });
+
+            if (generateSelectedButton) {
+                generateSelectedButton.addEventListener('click', () => generateBulkBarcodes(false));
+            }
+
+            if (generateAllMissingButton) {
+                generateAllMissingButton.addEventListener('click', () => generateBulkBarcodes(true));
+            }
 
             body.addEventListener(
                 'input',
@@ -1870,7 +1992,7 @@ $currencySymbol = (string) ($_SESSION['currency_symbol'] ?? '₹');
             clearButton.addEventListener(
                 'click',
                 () => {
-                    if (isPrinting) {
+                    if (isPrinting || isGenerating) {
                         return;
                     }
 
@@ -1937,7 +2059,7 @@ $currencySymbol = (string) ($_SESSION['currency_symbol'] ?? '₹');
              */
             setInterval(
                 () => {
-                    if (!isPrinting) {
+                    if (!isPrinting && !isGenerating) {
                         checkPrintManager(false);
                     }
                 },
