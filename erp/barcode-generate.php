@@ -99,6 +99,7 @@ if (!productPermission($conn, 'open')) {
 }
 
 $canView = productPermission($conn, 'view') || productPermission($conn, 'open');
+$canUpdate = productPermission($conn, 'update');
 
 $businessId = (int) ($_SESSION['business_id'] ?? 0);
 if ($businessId <= 0) {
@@ -127,11 +128,11 @@ function jsonResponse(bool $success, string $message = '', array $extra = [], in
 
 /*
 |--------------------------------------------------------------------------
-| AJAX PRODUCT LIST
+| AJAX PRODUCT LIST / 8-DIGIT BARCODE GENERATION
 |--------------------------------------------------------------------------
-| This page no longer generates, edits or previews barcodes.
-| It only loads product rows and sends the entered quantities to the
-| local Windows Barcode Print Manager API.
+| Loads product rows, can generate a unique 8-digit numeric barcode for a
+| product, and sends entered print quantities to the local Windows Barcode
+| Print Manager API.
 |--------------------------------------------------------------------------
 */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
@@ -156,6 +157,95 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     }
 
     $action = (string) $_POST['action'];
+
+    if ($action === 'generate_barcode') {
+        if (!$canUpdate) {
+            jsonResponse(
+                false,
+                'You do not have permission to update products.',
+                [],
+                403
+            );
+        }
+
+        $productId = (int) ($_POST['product_id'] ?? 0);
+        if ($productId <= 0) {
+            jsonResponse(false, 'Invalid product selected.', [], 422);
+        }
+
+        $stmt = $conn->prepare(
+            'SELECT id, product_name, product_code, barcode
+             FROM products
+             WHERE id = ? AND business_id = ?
+             LIMIT 1'
+        );
+        if (!$stmt) {
+            jsonResponse(false, 'Unable to prepare product lookup.', [], 500);
+        }
+
+        $stmt->bind_param('ii', $productId, $businessId);
+        $stmt->execute();
+        $product = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        if (!$product) {
+            jsonResponse(false, 'Product not found.', [], 404);
+        }
+
+        $barcode = '';
+        $attempts = 0;
+
+        while ($attempts < 100) {
+            $attempts++;
+            $candidate = (string) random_int(10000000, 99999999);
+
+            $check = $conn->prepare(
+                'SELECT id FROM products WHERE barcode = ? LIMIT 1'
+            );
+            if (!$check) {
+                jsonResponse(false, 'Unable to validate barcode uniqueness.', [], 500);
+            }
+
+            $check->bind_param('s', $candidate);
+            $check->execute();
+            $exists = $check->get_result()->fetch_assoc();
+            $check->close();
+
+            if (!$exists) {
+                $barcode = $candidate;
+                break;
+            }
+        }
+
+        if ($barcode === '') {
+            jsonResponse(false, 'Unable to generate a unique 8-digit barcode. Please try again.', [], 500);
+        }
+
+        $update = $conn->prepare(
+            'UPDATE products SET barcode = ? WHERE id = ? AND business_id = ?'
+        );
+        if (!$update) {
+            jsonResponse(false, 'Unable to prepare barcode update.', [], 500);
+        }
+
+        $update->bind_param('sii', $barcode, $productId, $businessId);
+        if (!$update->execute()) {
+            $error = $update->error;
+            $update->close();
+            jsonResponse(false, 'Unable to save barcode: ' . $error, [], 500);
+        }
+        $update->close();
+
+        jsonResponse(
+            true,
+            'New 8-digit barcode generated successfully.',
+            [
+                'product_id' => $productId,
+                'barcode' => $barcode,
+                'old_barcode' => (string) ($product['barcode'] ?? ''),
+            ]
+        );
+    }
 
     if ($action === 'list') {
         $search = trim((string) ($_POST['search'] ?? ''));
@@ -527,6 +617,30 @@ $currencySymbol = (string) ($_SESSION['currency_symbol'] ?? '₹');
             color: #b76b00;
             font-size: 10px;
             font-weight: 700;
+        }
+
+        .barcode-cell-wrap {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .barcode-generate-btn {
+            min-height: 28px;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            background: var(--primary-soft);
+            color: var(--primary-dark);
+            font-size: 9px;
+            font-weight: 800;
+            padding: 5px 8px;
+            white-space: nowrap;
+        }
+
+        .barcode-generate-btn:disabled {
+            opacity: .6;
+            cursor: wait;
         }
 
         .price-text {
@@ -924,6 +1038,7 @@ $currencySymbol = (string) ($_SESSION['currency_symbol'] ?? '₹');
             const csrfToken = <?php echo json_encode($csrfToken); ?>;
             const businessName = <?php echo json_encode($businessName); ?>;
             const currencySymbol = <?php echo json_encode($currencySymbol); ?>;
+            const canUpdateBarcode = <?php echo $canUpdate ? 'true' : 'false'; ?>;
 
             /*
              * Your local Windows Barcode Print Manager.
@@ -1050,6 +1165,26 @@ $currencySymbol = (string) ($_SESSION['currency_symbol'] ?? '₹');
                 );
             }
 
+            function barcodeCellHtml(product) {
+                const barcode = String(product.barcode || '').trim();
+                const printable = isValidBarcode(barcode);
+
+                let html = '<div class="barcode-cell-wrap">';
+
+                html += printable
+                    ? '<span class="barcode-text">' + escapeHtml(barcode) + '</span>'
+                    : '<span class="barcode-missing"><i class="fa-solid fa-triangle-exclamation me-1"></i>No printable barcode</span>';
+
+                if (canUpdateBarcode) {
+                    html += '<button type="button" class="barcode-generate-btn" data-action="generate-barcode" data-product-id="' +
+                        Number(product.id) + '"><i class="fa-solid fa-barcode me-1"></i>' +
+                        (printable ? 'New 8 Digit' : 'Generate 8 Digit') + '</button>';
+                }
+
+                html += '</div>';
+                return html;
+            }
+
             function rowHtml(product, index) {
                 const barcode =
                     String(product.barcode || '').trim();
@@ -1096,16 +1231,7 @@ $currencySymbol = (string) ($_SESSION['currency_symbol'] ?? '₹');
                     '</td>' +
 
                     '<td data-label="Barcode">' +
-                    (
-                        printable
-                            ? '<span class="barcode-text">' +
-                              escapeHtml(barcode) +
-                              '</span>'
-                            : '<span class="barcode-missing">' +
-                              '<i class="fa-solid fa-triangle-exclamation me-1"></i>' +
-                              'No printable barcode' +
-                              '</span>'
-                    ) +
+                    barcodeCellHtml(product) +
                     '</td>' +
 
                     '<td class="text-end" data-label="Sale Rate">' +
@@ -1605,6 +1731,76 @@ $currencySymbol = (string) ($_SESSION['currency_symbol'] ?? '₹');
 
                 checkPrintManager(false);
             }
+
+            body.addEventListener('click', async event => {
+                const button = event.target.closest('[data-action="generate-barcode"]');
+                if (!button || isPrinting) {
+                    return;
+                }
+
+                const productId = Number(button.dataset.productId || 0);
+                const product = products.find(item => Number(item.id) === productId);
+                if (!product) {
+                    showToast('error', 'Product not found in the current list.');
+                    return;
+                }
+
+                const currentBarcode = String(product.barcode || '').trim();
+                if (currentBarcode !== '') {
+                    const confirmed = window.confirm(
+                        'Generate a new 8-digit barcode for ' +
+                        (product.product_name || product.product_code || 'this product') +
+                        '? The current barcode ' + currentBarcode + ' will be replaced.'
+                    );
+                    if (!confirmed) {
+                        return;
+                    }
+                }
+
+                button.disabled = true;
+                const oldHtml = button.innerHTML;
+                button.innerHTML = '<i class="fa-solid fa-spinner fa-spin me-1"></i>Generating...';
+
+                try {
+                    const data = new FormData();
+                    data.append('action', 'generate_barcode');
+                    data.append('product_id', String(productId));
+                    const result = await pageRequest(data);
+
+                    product.barcode = String(result.barcode || '');
+
+                    const row = button.closest('tr[data-id]');
+                    if (row) {
+                        const barcodeCell = row.querySelector('td[data-label="Barcode"]');
+                        if (barcodeCell) {
+                            barcodeCell.innerHTML = barcodeCellHtml(product);
+                        }
+
+                        const qtyInput = row.querySelector('.qty-input');
+                        if (qtyInput) {
+                            qtyInput.disabled = !isValidBarcode(product.barcode);
+                        }
+
+                        setRowStatus(
+                            row,
+                            isValidBarcode(product.barcode) ? 'ready' : 'waiting',
+                            isValidBarcode(product.barcode) ? 'Ready' : 'No Barcode'
+                        );
+                    }
+
+                    printableProducts.textContent = products
+                        .filter(item => isValidBarcode(item.barcode))
+                        .length
+                        .toLocaleString();
+
+                    updateSummary();
+                    showToast('success', 'Barcode ' + product.barcode + ' generated successfully.');
+                } catch (error) {
+                    button.disabled = false;
+                    button.innerHTML = oldHtml;
+                    showToast('error', error.message);
+                }
+            });
 
             body.addEventListener(
                 'input',
