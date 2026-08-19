@@ -35,7 +35,7 @@ function pageUrl(array $replace = []): string
     foreach ($q as $k => $v)
         if ($v === '' || $v === null)
             unset($q[$k]);
-    return 'stock-overview1.php' . ($q ? '?' . http_build_query($q) : '');
+    return 'stock-overview.php' . ($q ? '?' . http_build_query($q) : '');
 }
 function stockPermission(string $action): bool
 {
@@ -586,7 +586,7 @@ $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
                 </div>
                 <div class="d-flex gap-2 justify-content-end mt-2"><button class="btn btn-theme"><i
                             class="fa-solid fa-filter me-2"></i>Apply</button><a class="btn btn-soft"
-                        href="stock-overview1.php">Reset</a></div>
+                        href="stock-overview.php">Reset</a></div>
             </form>
             <div class="table-card">
                 <div class="table-responsive">
