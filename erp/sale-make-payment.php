@@ -62,12 +62,57 @@ function queryAll(mysqli $conn, string $sql, string $types = '', array $params =
     return $rows;
 }
 
+function paymentPermission(mysqli $conn): bool
+{
+    if (($_SESSION['user_type'] ?? '') === 'Platform Admin') {
+        return true;
+    }
+
+    foreach (['perm.payments', 'perm.sales.list', 'perm.sales', 'perm.billing'] as $code) {
+        if (!empty($_SESSION['permissions'][$code]['can_create']) || !empty($_SESSION['permissions'][$code]['can_update'])) {
+            return true;
+        }
+    }
+
+    $businessId = (int)($_SESSION['business_id'] ?? 0);
+    $roleId = (int)($_SESSION['role_id'] ?? 0);
+    if ($businessId <= 0 || $roleId <= 0) {
+        return false;
+    }
+
+    $stmt = $conn->prepare("SELECT rp.can_create,rp.can_update
+        FROM role_permissions rp
+        INNER JOIN permissions p ON p.id=rp.permission_id
+        WHERE rp.business_id=? AND rp.role_id=? AND p.is_active=1
+          AND p.permission_code IN ('perm.payments','perm.sales.list','perm.sales','perm.billing')");
+    if (!$stmt) {
+        return false;
+    }
+    $stmt->bind_param('ii', $businessId, $roleId);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    $allowed = false;
+    while ($row = $result->fetch_assoc()) {
+        if ((int)($row['can_create'] ?? 0) === 1 || (int)($row['can_update'] ?? 0) === 1) {
+            $allowed = true;
+            break;
+        }
+    }
+    $stmt->close();
+    return $allowed;
+}
+
 $businessId = (int)($_SESSION['business_id'] ?? 0);
 $branchId = (int)($_SESSION['branch_id'] ?? ($_SESSION['default_branch_id'] ?? 0));
 $saleId = (int)($_GET['id'] ?? 0);
 
 if ($businessId <= 0 || $branchId <= 0 || $saleId <= 0) {
     die('Invalid sale.');
+}
+
+if (!paymentPermission($conn)) {
+    http_response_code(403);
+    die('You do not have permission to receive or adjust sale payments.');
 }
 
 if (empty($_SESSION['sales_payment_csrf'])) {
@@ -132,6 +177,7 @@ if ($sale['workflow_status'] === 'Cancelled') {
 }
 
 $balanceAmount = max(0, (float)$sale['balance_amount']);
+$existingDiscount = max(0, (float)$sale['discount_amount']);
 
 $theme = [
     'primary_color' => '#d89416',
@@ -222,7 +268,7 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
 
         .summary-grid{
             display:grid;
-            grid-template-columns:repeat(4,minmax(0,1fr));
+            grid-template-columns:repeat(5,minmax(0,1fr));
             gap:10px;
         }
 
@@ -299,6 +345,28 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
             font-size:11px;
         }
 
+        .discount-panel{
+            margin:14px 15px 0;
+            padding:14px;
+            border:1px solid var(--line);
+            border-radius:10px;
+            background:color-mix(in srgb,var(--primary) 4%,var(--card-bg));
+        }
+        .discount-grid{
+            display:grid;
+            grid-template-columns:minmax(180px,.7fr) minmax(260px,1.3fr) repeat(2,minmax(150px,.7fr));
+            gap:10px;
+            align-items:end;
+        }
+        .discount-stat{
+            border:1px solid var(--line);
+            border-radius:9px;
+            padding:10px;
+            background:var(--card-bg);
+        }
+        .discount-stat-label{font-size:9px;color:var(--muted);text-transform:uppercase;font-weight:700}
+        .discount-stat-value{font-size:16px;font-weight:900}
+
         .payment-total-bar{
             display:flex;
             align-items:center;
@@ -350,10 +418,11 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
 
         @media(max-width:900px){
             .summary-grid{grid-template-columns:1fr 1fr}
+            .discount-grid{grid-template-columns:1fr 1fr}
         }
 
         @media(max-width:600px){
-            .summary-grid{grid-template-columns:1fr}
+            .summary-grid,.discount-grid{grid-template-columns:1fr}
             .page-head{align-items:flex-start;flex-direction:column}
             .payment-total-bar{justify-content:stretch}
             .total-item{text-align:left}
@@ -387,15 +456,19 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
             <div class="page-body">
                 <div class="summary-grid">
                     <div class="summary-box">
-                        <div class="summary-label">Invoice Total</div>
+                        <div class="summary-label">Current Invoice Total</div>
                         <div class="summary-value">₹<?= money($sale['net_payable_amount']) ?></div>
+                    </div>
+                    <div class="summary-box">
+                        <div class="summary-label">Total Discount Given</div>
+                        <div class="summary-value">₹<?= money($existingDiscount) ?></div>
                     </div>
                     <div class="summary-box">
                         <div class="summary-label">Already Paid</div>
                         <div class="summary-value">₹<?= money($sale['paid_amount']) ?></div>
                     </div>
                     <div class="summary-box balance">
-                        <div class="summary-label">Outstanding Balance</div>
+                        <div class="summary-label">Current Balance</div>
                         <div class="summary-value">₹<?= money($balanceAmount) ?></div>
                     </div>
                     <div class="summary-box">
@@ -420,6 +493,35 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
             <form id="multiPaymentForm" class="page-card">
                 <input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>">
                 <input type="hidden" name="sale_id" value="<?= $saleId ?>">
+
+                <div class="discount-panel">
+                    <div class="fw-bold mb-2">Additional Discount</div>
+                    <div class="small text-muted mb-3">
+                        This is added to the discount already given in Billing. Example: old discount ₹10 + additional ₹10 = total discount ₹20.
+                    </div>
+                    <div class="discount-grid">
+                        <div>
+                            <label class="form-label small fw-bold">Additional Discount</label>
+                            <input type="number" name="additional_discount" id="additionalDiscount"
+                                   class="form-control" min="0" step="0.01" value="0.00"
+                                   max="<?= e(number_format($balanceAmount, 2, '.', '')) ?>">
+                        </div>
+                        <div>
+                            <label class="form-label small fw-bold">Discount Reason</label>
+                            <input type="text" name="discount_reason" id="discountReason"
+                                   class="form-control" maxlength="255"
+                                   placeholder="Optional reason for additional discount">
+                        </div>
+                        <div class="discount-stat">
+                            <div class="discount-stat-label">Total Discount After This</div>
+                            <div class="discount-stat-value">₹<span id="totalDiscountAfter"><?= money($existingDiscount) ?></span></div>
+                        </div>
+                        <div class="discount-stat">
+                            <div class="discount-stat-label">Balance After Discount</div>
+                            <div class="discount-stat-value">₹<span id="balanceAfterDiscount"><?= money($balanceAmount) ?></span></div>
+                        </div>
+                    </div>
+                </div>
 
                 <div class="page-head">
                     <div>
@@ -459,17 +561,21 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
                         <div class="total-value">₹<?= money($balanceAmount) ?></div>
                     </div>
                     <div class="total-item">
-                        <div class="total-label">Payment Total</div>
-                        <div class="total-value">₹<span id="paymentTotal">0.00</span></div>
+                        <div class="total-label">Additional Discount</div>
+                        <div class="total-value">- ₹<span id="discountTotalBar">0.00</span></div>
                     </div>
                     <div class="total-item">
-                        <div class="total-label">Balance After Payment</div>
+                        <div class="total-label">Payment Total</div>
+                        <div class="total-value">- ₹<span id="paymentTotal">0.00</span></div>
+                    </div>
+                    <div class="total-item">
+                        <div class="total-label">Final Balance</div>
                         <div class="total-value remaining-value">
                             ₹<span id="remainingBalance"><?= money($balanceAmount) ?></span>
                         </div>
                     </div>
                     <button type="submit" class="btn-theme" id="savePayments">
-                        <i class="fa-solid fa-floppy-disk me-1"></i>Save Payments
+                        <i class="fa-solid fa-floppy-disk me-1"></i>Save Payment / Discount
                     </button>
                 </div>
             </form>
@@ -521,6 +627,8 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
 
     const methods = <?= json_encode($paymentMethods, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
     const outstanding = <?= json_encode($balanceAmount) ?>;
+    const existingDiscount = <?= json_encode($existingDiscount) ?>;
+    const discountInput = document.getElementById('additionalDiscount');
     const rows = document.getElementById('paymentRows');
 
     if (!rows) {
@@ -563,14 +671,14 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
         rows.insertAdjacentHTML('beforeend', `
             <tr class="payment-row">
                 <td>
-                    <select name="payment_method_id[]" class="form-select payment-method" required>
+                    <select name="payment_method_id[]" class="form-select payment-method">
                         ${methodOptions()}
                     </select>
                 </td>
                 <td>
                     <input type="number" name="payment_amount[]" min="0.01" step="0.01"
                            class="form-control payment-amount" value="${esc(defaultAmount)}"
-                           placeholder="0.00" required>
+                           placeholder="0.00">
                 </td>
                 <td>
                     <input name="payment_reference[]" class="form-control"
@@ -594,16 +702,25 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
             total += Math.max(0, Number(input.value) || 0);
         });
 
-        const remaining = Math.max(0, outstanding - total);
+        const additionalDiscount = Math.max(0, Number(discountInput?.value) || 0);
+        const afterDiscount = Math.max(0, outstanding - additionalDiscount);
+        const remaining = Math.max(0, afterDiscount - total);
 
         document.getElementById('paymentTotal').textContent = money(total);
+        document.getElementById('discountTotalBar').textContent = money(additionalDiscount);
+        document.getElementById('totalDiscountAfter').textContent = money(existingDiscount + additionalDiscount);
+        document.getElementById('balanceAfterDiscount').textContent = money(afterDiscount);
         document.getElementById('remainingBalance').textContent = money(remaining);
 
         const totalElement = document.getElementById('paymentTotal');
-        totalElement.classList.toggle('text-danger', total > outstanding + 0.009);
+        totalElement.classList.toggle('text-danger', total > afterDiscount + 0.009);
+        if (discountInput) {
+            discountInput.classList.toggle('is-invalid', additionalDiscount > outstanding + 0.009);
+        }
     }
 
     document.getElementById('addPaymentRow').addEventListener('click', () => addRow());
+    if (discountInput) discountInput.addEventListener('input', calculate);
 
     rows.addEventListener('input', event => {
         if (event.target.classList.contains('payment-amount')) {
@@ -630,24 +747,41 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
 
         let total = 0;
         let validRows = 0;
+        let invalidPartialRow = false;
 
         rows.querySelectorAll('.payment-row').forEach(row => {
             const method = Number(row.querySelector('.payment-method').value || 0);
             const amount = Number(row.querySelector('.payment-amount').value || 0);
 
+            if ((method > 0 && amount <= 0) || (method <= 0 && amount > 0)) {
+                invalidPartialRow = true;
+            }
             if (method > 0 && amount > 0) {
                 validRows++;
                 total += amount;
             }
         });
 
-        if (validRows === 0) {
-            toast('error', 'Add at least one valid payment.');
+        const additionalDiscount = Math.max(0, Number(discountInput?.value) || 0);
+        const balanceAfterDiscount = Math.max(0, outstanding - additionalDiscount);
+
+        if (additionalDiscount > outstanding + 0.009) {
+            toast('error', 'Additional discount cannot exceed the current balance.');
             return;
         }
 
-        if (total > outstanding + 0.009) {
-            toast('error', 'Payment total cannot exceed the outstanding balance.');
+        if (invalidPartialRow) {
+            toast('error', 'Each used payment row must have both method and amount.');
+            return;
+        }
+
+        if (validRows === 0 && additionalDiscount <= 0.009) {
+            toast('error', 'Enter an additional discount or add at least one payment.');
+            return;
+        }
+
+        if (total > balanceAfterDiscount + 0.009) {
+            toast('error', 'Payment total cannot exceed the balance after discount.');
             return;
         }
 
@@ -693,7 +827,8 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
         }
     });
 
-    addRow(outstanding > 0 ? money(outstanding) : '');
+    addRow('');
+    calculate();
 })();
 </script>
 </body>

@@ -485,7 +485,7 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
                             <button type="button" class="action-btn print-action print-sale" data-id="${row.id}" data-no="${esc(row.invoice_no)}" data-mobile="${esc(row.customer_mobile || '')}" title="Print / Share invoice"><i class="fa-solid fa-print"></i></button>
                             ${canEdit && row.workflow_status !== 'Cancelled' ? `<a class="action-btn" href="billing.php?edit_sale_id=${row.id}" title="Edit invoice"><i class="fa-solid fa-pen-to-square"></i></a>` : ''}
                             ${Number(row.balance_amount || 0) > 0 && row.workflow_status !== 'Cancelled' ? `<a class="action-btn pay-action" href="sale-make-payment.php?id=${row.id}" title="Make balance payment"><i class="fa-solid fa-indian-rupee-sign"></i></a>` : ''}
-                            ${canDelete && row.workflow_status !== 'Cancelled' ? `<button type="button" class="action-btn delete-sale" data-id="${row.id}" data-no="${esc(row.invoice_no)}" title="Delete invoice and restock"><i class="fa-solid fa-trash"></i></button>` : ''}
+                            ${canDelete && row.workflow_status !== 'Cancelled' ? `<button type="button" class="action-btn delete-sale" data-id="${row.id}" data-no="${esc(row.invoice_no)}" title="Cancel invoice and reverse linked effects"><i class="fa-solid fa-trash"></i></button>` : ''}
                         </div>
                     </td>
                 </tr>`).join('');
@@ -631,14 +631,14 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
     });
 
     async function deleteSale(id, invoiceNo) {
-        const reason = prompt('Enter delete reason for ' + invoiceNo + ':', 'Deleted from sales list');
+        const reason = prompt('Enter cancellation reason for ' + invoiceNo + ':', 'Cancelled from sales list');
         if (reason === null) return;
         if (!reason.trim()) {
-            toast('error', 'Delete reason is required.');
+            toast('error', 'Cancellation reason is required.');
             return;
         }
 
-        if (!confirm('Delete invoice ' + invoiceNo + '? Product stock will be restored and the action will be recorded in Activity Log.')) {
+        if (!confirm('Cancel invoice ' + invoiceNo + '? Product stock, customer receipt, chit claim and available exchange stock will be reversed, and the action will be recorded in Activity Log.')) {
             return;
         }
 

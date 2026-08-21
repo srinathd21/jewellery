@@ -59,6 +59,20 @@ if (!billingPermission($conn, 'open') && !billingPermission($conn, 'create') && 
 $businessId = (int) ($_SESSION['business_id'] ?? 0);
 $branchId = (int) ($_SESSION['branch_id'] ?? ($_SESSION['default_branch_id'] ?? 0));
 $nonGstModeActive = (int) ($_SESSION['non_gst_mode'] ?? 0) === 1;
+$editSaleId = isset($_GET['edit_sale_id']) ? max(0, (int) $_GET['edit_sale_id']) : 0;
+$pageNonGstModeActive = $nonGstModeActive;
+if ($editSaleId > 0) {
+    $modeStmt = $conn->prepare("SELECT tax_type FROM sales WHERE id=? AND business_id=? AND branch_id=? LIMIT 1");
+    if ($modeStmt) {
+        $modeStmt->bind_param('iii', $editSaleId, $businessId, $branchId);
+        $modeStmt->execute();
+        $modeRow = $modeStmt->get_result()->fetch_assoc();
+        $modeStmt->close();
+        if ($modeRow) {
+            $pageNonGstModeActive = strtolower(trim((string)($modeRow['tax_type'] ?? 'GST'))) === 'non-gst';
+        }
+    }
+}
 if ($businessId <= 0 || $branchId <= 0)
     die('A valid business and branch must be selected.');
 if (empty($_SESSION['billing_csrf']))
@@ -91,8 +105,8 @@ $productTaxSelect = $productHasTaxType
     ? "p.tax_type"
     : "CASE WHEN COALESCE(p.tax_percent,0)=0 THEN 'Non-GST' ELSE 'GST' END";
 $productTaxCondition = $productHasTaxType
-    ? ($nonGstModeActive ? " AND p.tax_type='Non-GST'" : " AND p.tax_type='GST'")
-    : ($nonGstModeActive ? " AND COALESCE(p.tax_percent,0)=0" : " AND COALESCE(p.tax_percent,0)>0");
+    ? ($pageNonGstModeActive ? " AND p.tax_type='Non-GST'" : " AND p.tax_type='GST'")
+    : ($pageNonGstModeActive ? " AND COALESCE(p.tax_percent,0)=0" : " AND COALESCE(p.tax_percent,0)>0");
 
 $productSql = "SELECT p.id,p.product_code,p.barcode,p.product_name,p.product_type,
                       {$productTaxSelect} AS tax_type,
@@ -136,7 +150,7 @@ if ($stmt) {
     $stmt->close();
 }
 $paymentMethods = [];
-$stmt = $conn->prepare('SELECT id,method_name FROM payment_methods WHERE business_id=? AND is_active=1 ORDER BY method_name');
+$stmt = $conn->prepare('SELECT id,method_name,method_type FROM payment_methods WHERE business_id=? AND is_active=1 ORDER BY method_name');
 if ($stmt) {
     $stmt->bind_param('i', $businessId);
     $stmt->execute();
@@ -262,7 +276,6 @@ function previewNextBillingNumber(mysqli $conn, int $businessId, int $branchId, 
     return renderBillingNumber($setting, $next, $date);
 }
 
-$editSaleId = isset($_GET['edit_sale_id']) ? max(0, (int) $_GET['edit_sale_id']) : 0;
 $editData = null;
 if ($editSaleId > 0) {
     if (!billingPermission($conn, 'update') && !billingPermission($conn, 'create')) {
@@ -300,10 +313,40 @@ if ($editSaleId > 0) {
         while ($x = $r->fetch_assoc()) $editPayments[] = $x;
         $s->close();
     }
+    if (!$editPayments && (float)($saleEdit['paid_amount'] ?? 0) > 0 && billingColumnExists($conn, 'customer_payments', 'sale_id')) {
+        $s = $conn->prepare("SELECT cps.payment_method_id,cps.amount,cps.reference_no
+                             FROM customer_payments cp
+                             INNER JOIN customer_payment_splits cps ON cps.payment_id=cp.id
+                             WHERE cp.sale_id=? AND cp.business_id=? ORDER BY cp.id,cps.id");
+        if ($s) {
+            $s->bind_param('ii', $editSaleId, $businessId);
+            $s->execute();
+            $r = $s->get_result();
+            while ($x = $r->fetch_assoc()) $editPayments[] = $x;
+            $s->close();
+        }
+    }
 
     $editExchange = [];
     if (billingColumnExists($conn, 'sale_exchange_items', 'sale_id')) {
-        $s = $conn->prepare("SELECT * FROM sale_exchange_items WHERE sale_id=? AND business_id=? ORDER BY id");
+        $s = $conn->prepare("SELECT sei.*,
+                (SELECT m.id
+                 FROM metals m
+                 WHERE m.business_id=sei.business_id
+                 ORDER BY
+                    (LOWER(sei.item_name) LIKE CONCAT('%',LOWER(m.metal_name),'%')) DESC,
+                    ABS(COALESCE((SELECT mr.rate_per_gram
+                                  FROM metal_rates mr
+                                  WHERE mr.business_id=sei.business_id
+                                    AND mr.metal_id=m.id
+                                    AND mr.is_current=1
+                                    AND (mr.branch_id=sei.branch_id OR mr.branch_id IS NULL)
+                                  ORDER BY (mr.branch_id=sei.branch_id) DESC,mr.effective_from DESC,mr.id DESC
+                                  LIMIT 1),0)-sei.rate_per_gram) ASC,
+                    m.id ASC
+                 LIMIT 1) AS metal_id
+            FROM sale_exchange_items sei
+            WHERE sei.sale_id=? AND sei.business_id=? ORDER BY sei.id");
         if ($s) {
             $s->bind_param('ii', $editSaleId, $businessId);
             $s->execute();
@@ -337,7 +380,7 @@ if ($editSaleId > 0) {
 
 $pageTitle = $editSaleId > 0 ? 'Edit Billing' : 'Billing';
 $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
-$defaultDocumentType = $nonGstModeActive ? 'Non GST Invoice' : 'Invoice';
+$defaultDocumentType = $pageNonGstModeActive ? 'Non GST Invoice' : 'Invoice';
 $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNextBillingNumber($conn, $businessId, $branchId, $defaultDocumentType, date('Y-m-d'));
 // The API locks and increments the same sequence during save.
 ?>
@@ -1103,7 +1146,7 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
         <form id="billingForm" autocomplete="off"><input type="hidden" name="csrf_token"
                 value="<?= e($csrfToken) ?>"><input type="hidden" name="action" value="<?= $editSaleId > 0 ? 'update' : 'save' ?>"><input type="hidden" name="edit_sale_id" value="<?= (int)$editSaleId ?>"><input type="hidden"
                 name="document_mode" id="documentMode"
-                value="<?= $nonGstModeActive ? 'Non GST Invoice' : 'Invoice' ?>"><input type="hidden"
+                value="<?= $pageNonGstModeActive ? 'Non GST Invoice' : 'Invoice' ?>"><input type="hidden"
                 name="chit_claims_json" id="chitClaimsJson" value="[]"><input type="hidden" name="exchange_items_json"
                 id="exchangeItemsJson" value="[]">
             <div class="bill-card">
@@ -1144,12 +1187,12 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                                 </div>
                                 <div class="c3"><label class="field-label">Bill Type</label><select name="bill_type"
                                         id="billType" class="form-select select2-static">
-                                        <?php if ($nonGstModeActive): ?>
+                                        <?php if ($pageNonGstModeActive): ?>
                                             <option value="Non GST" selected>Non GST</option>
                                         <?php else: ?>
                                             <option value="Retail">Retail</option>
                                             <option value="GST">GST</option>
-                                            <option value="Estimate">Estimate</option>
+                                            <?php if ($editSaleId <= 0): ?><option value="Estimate">Estimate</option><?php endif; ?>
                                             <option value="Exchange">Exchange</option>
                                         <?php endif; ?>
                                     </select></div>
@@ -1393,7 +1436,7 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
             const payments = <?= json_encode($paymentMethods, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
             const exchangeMetals = <?= json_encode($exchangeMetals, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
             const csrfToken = <?= json_encode($csrfToken) ?>;
-            const nonGstModeActive = <?= $nonGstModeActive ? 'true' : 'false' ?>;
+            const nonGstModeActive = <?= $pageNonGstModeActive ? 'true' : 'false' ?>;
             const editData = <?= json_encode($editData, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
             const editMode = !!(editData && editData.sale && Number(editData.sale.id || 0) > 0);
             const billTypeSelect = document.getElementById('billType');
@@ -1690,15 +1733,11 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                     </tr>`);
                     const row = pays.lastElementChild;
                     enhanceRow(row);
-                    if (existing) {
+                    if (existing && typeof existing === 'object' && !('type' in existing)) {
                         const method = row.querySelector('.payment-method');
                         method.value = String(existing.payment_method_id || '');
                         row.querySelector('.pay-amount').value = Number(existing.amount || 0).toFixed(2);
                         row.querySelector('[name="payment_reference[]"]').value = existing.reference_no || '';
-                        method.disabled = true;
-                        row.querySelector('.pay-amount').disabled = true;
-                        row.querySelector('[name="payment_reference[]"]').disabled = true;
-                        row.querySelector('.remove-row').disabled = true;
                     }
                     calc();
                 }
@@ -1707,7 +1746,7 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                     if (!editMode) return false;
                     const sale = editData.sale || {};
                     customer.value = String(sale.customer_id || '');
-                    if (billTypeSelect) billTypeSelect.value = String(sale.bill_type || 'Retail');
+                    if (billTypeSelect) billTypeSelect.value = nonGstModeActive ? 'Non GST' : String(sale.bill_type || 'Retail');
                     if (invoiceDateInput) invoiceDateInput.value = String(sale.invoice_date || '');
                     const timeInput = document.getElementById('invoiceTime');
                     if (timeInput) timeInput.value = String(sale.invoice_time || '').substring(0, 5);
@@ -1716,13 +1755,6 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                     document.getElementById('overallDiscount').value = Number(editData.overall_discount || 0).toFixed(2);
                     document.getElementById('roundOff').value = Number(sale.round_off || 0).toFixed(2);
                     if (documentNumberPreview) documentNumberPreview.value = String(sale.invoice_no || '');
-
-                    const addPaymentButton = document.getElementById('addPayment');
-                    if (addPaymentButton) addPaymentButton.disabled = true;
-                    const addExchangeButton = document.getElementById('addExchange');
-                    if (addExchangeButton) addExchangeButton.disabled = true;
-                    const claimButton = document.getElementById('openClaimModal');
-                    if (claimButton) claimButton.disabled = true;
 
                     items.innerHTML = '';
                     (editData.items || []).forEach(existing => {
@@ -1743,10 +1775,11 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                     pays.innerHTML = '';
                     (editData.payments || []).forEach(existing => addPay(existing));
                     if (!(editData.payments || []).length) {
-                        addPay({payment_method_id:'', amount:Number(sale.paid_amount || 0), reference_no:'Existing received amount'});
+                        addPay();
                     }
 
                     exchangeItems = (editData.exchange_items || []).map(x => ({
+                        id: Number(x.id || 0),
                         item_name: x.item_name || '',
                         metal_id: x.metal_id || '',
                         gross_weight: Number(x.gross_weight || 0),
@@ -1756,7 +1789,6 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                         exchange_value: Number(x.exchange_value || 0)
                     }));
                     renderExchangeItems();
-                    document.querySelectorAll('#exchangeItems input,#exchangeItems select,#exchangeItems button').forEach(el => el.disabled = true);
 
                     appliedClaims = (editData.claims || []).map(x => ({
                         chit_member_id: Number(x.chit_member_id || 0),
@@ -1767,6 +1799,7 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                         claim_amount: Number(x.claim_amount || 0)
                     }));
                     calc();
+                    loadCustomerChits({ preserveClaims: true });
                     refreshDocumentNumber();
                     return true;
                 }
@@ -1867,7 +1900,20 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                     const afterExchange = Math.max(0, beforeAdjustments - exchangeValue);
                     const appliedClaim = Math.min(claimTotal(), afterExchange);
                     const grand = Math.max(0, afterExchange - appliedClaim);
-                    const paid = Math.min([...pays.querySelectorAll('.pay-amount')].reduce((a, x) => a + (Number(x.value) || 0), 0), grand);
+
+                    let split = 0;
+                    let received = 0;
+                    pays.querySelectorAll('.payment-row').forEach(row => {
+                        const methodId = row.querySelector('.payment-method')?.value || '';
+                        const amount = Number(row.querySelector('.pay-amount')?.value || 0) || 0;
+                        const method = payments.find(x => String(x.id) === String(methodId));
+                        const methodName = String(method?.method_name || '').toLowerCase();
+                        const methodType = String(method?.method_type || '').toLowerCase();
+                        const isCredit = methodType === 'credit' || methodName.includes('credit') || methodName.includes('due') || methodName.includes('pay later') || methodName.includes('paylater');
+                        split += amount;
+                        if (!isCredit) received += amount;
+                    });
+                    const paid = Math.min(received, grand);
 
                     document.getElementById('sumSubtotal').textContent = money(subtotal);
                     document.getElementById('sumWastage').textContent = money(totalWastage);
@@ -1881,18 +1927,17 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                     document.getElementById('sumGrand').textContent = money(grand);
                     document.getElementById('sumBalance').textContent = money(Math.max(0, grand - paid));
 
-                    let split = 0;
-                    pays.querySelectorAll('.pay-amount').forEach(x => split += Number(x.value) || 0);
                     document.getElementById('splitTotal').textContent = money(split);
-                    document.getElementById('paidAmount').value = money(split);
-                    document.getElementById('sumBalance').textContent = money(Math.max(0, grand - Math.min(split, grand)));
+                    document.getElementById('paidAmount').value = money(received);
+                    document.getElementById('sumBalance').textContent = money(Math.max(0, grand - Math.min(received, grand)));
                     document.getElementById('chitClaimsJson').value = JSON.stringify(appliedClaims);
                     document.getElementById('exchangeItemsJson').value = JSON.stringify(exchangeItems);
                 }
 
-                async function loadCustomerChits() {
+                async function loadCustomerChits(options = {}) {
+                    const preserveClaims = !!(options && options.preserveClaims);
                     customerChits = [];
-                    appliedClaims = [];
+                    if (!preserveClaims) appliedClaims = [];
                     calc();
 
                     const id = Number(customer.value || 0);
@@ -1914,12 +1959,18 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                         });
                         const data = await res.json();
                         if (!res.ok || !data.success) throw new Error(data.message || 'Unable to load chits.');
-                        customerChits = (data.chits || []).map(chit => ({
-                            ...chit,
-                            saved_grams: Math.max(0, Number(chit.saved_grams || 0)),
-                            claimed_grams: Math.max(0, Number(chit.claimed_grams || 0)),
-                            available_grams: Math.max(0, Number(chit.available_grams || 0))
-                        }));
+                        customerChits = (data.chits || []).map(chit => {
+                            const currentSaleClaim = preserveClaims
+                                ? appliedClaims.filter(claim => Number(claim.chit_member_id) === Number(chit.chit_member_id))
+                                    .reduce((sum, claim) => sum + Number(claim.claim_grams || 0), 0)
+                                : 0;
+                            return {
+                                ...chit,
+                                saved_grams: Math.max(0, Number(chit.saved_grams || 0)),
+                                claimed_grams: Math.max(0, Number(chit.claimed_grams || 0) - currentSaleClaim),
+                                available_grams: Math.max(0, Number(chit.available_grams || 0) + currentSaleClaim)
+                            };
+                        });
 
                         const claimableChits = customerChits.filter(
                             chit => Number(chit.available_grams || 0) > 0.0000005
@@ -2052,7 +2103,7 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                 function renderExchangeItems() {
                     const wrap = document.getElementById('exchangeItems');
                     wrap.innerHTML = exchangeItems.map((x, i) => `
-                        <div class="adjustment-card" data-index="${i}">
+                        <div class="adjustment-card" data-index="${i}" data-exchange-id="${Number(x.id || 0)}">
                             <div class="adjustment-grid">
                                 <div class="wide">
                                     <label class="field-label">Old Item Name</label>
@@ -2128,6 +2179,7 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
 
                         card.querySelector('.ex-net').value = eligible.toFixed(3);
                         nextItems.push({
+                            id: Number(card.dataset.exchangeId || 0),
                             item_name: card.querySelector('.ex-name').value.trim(),
                             metal_id: Number(metalSelect.value) || 0,
                             metal_name: metal?.metal_name || '',
@@ -2143,7 +2195,7 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                     document.getElementById('exchangeTotal').textContent = money(exchangeTotalValue());
                     calc();
                 }
-                document.getElementById('addExchange').addEventListener('click', () => { const firstMetal = exchangeMetals[0] || null; exchangeItems.push({ item_name: 'Old Gold', metal_id: Number(firstMetal?.id || 0), metal_name: firstMetal?.metal_name || '', gross_weight: 0, wastage_percent: 0, eligible_weight: 0, rate_per_gram: Number(firstMetal?.current_rate || 0), exchange_value: 0 }); renderExchangeItems() });
+                document.getElementById('addExchange').addEventListener('click', () => { const firstMetal = exchangeMetals[0] || null; exchangeItems.push({ id: 0, item_name: 'Old Gold', metal_id: Number(firstMetal?.id || 0), metal_name: firstMetal?.metal_name || '', gross_weight: 0, wastage_percent: 0, eligible_weight: 0, rate_per_gram: Number(firstMetal?.current_rate || 0), exchange_value: 0 }); renderExchangeItems() });
                 document.getElementById('exchangeItems').addEventListener('input', syncExchange); document.getElementById('exchangeItems').addEventListener('change', syncExchange); document.getElementById('exchangeItems').addEventListener('click', e => { const b = e.target.closest('.remove-exchange'); if (!b) return; exchangeItems.splice(Number(b.closest('.adjustment-card').dataset.index), 1); renderExchangeItems() });
 
                 async function switchBillingTaxMode() {
@@ -2184,7 +2236,7 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                 }
 
                 document.getElementById('addItem').addEventListener('click', () => addItem());
-                document.getElementById('addPayment').addEventListener('click', addPay);
+                document.getElementById('addPayment').addEventListener('click', () => addPay());
                 document.getElementById('addScannedProduct').addEventListener('click', addByBarcode);
 
                 scan.addEventListener('keydown', event => {
@@ -2365,6 +2417,10 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                         toast('error', 'Add at least one product.');
                         return;
                     }
+                    if (editMode && String(billTypeSelect?.value || '').toLowerCase() === 'estimate') {
+                        toast('error', 'A posted sale cannot be converted to an Estimate from Edit Bill.');
+                        return;
+                    }
 
                     const button = document.getElementById('saveBtn');
                     const old = button.innerHTML;
@@ -2414,7 +2470,7 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                     initSelect2('.select2-static', 'Select');
                     if (editMode && window.jQuery) {
                         window.jQuery(customer).val(String(editData.sale.customer_id || '')).trigger('change.select2');
-                        if (billTypeSelect) window.jQuery(billTypeSelect).val(String(editData.sale.bill_type || '')).trigger('change.select2');
+                        if (billTypeSelect) window.jQuery(billTypeSelect).val(nonGstModeActive ? 'Non GST' : String(editData.sale.bill_type || '')).trigger('change.select2');
                         items.querySelectorAll('.item-row').forEach(enhanceRow);
                         pays.querySelectorAll('.payment-row').forEach(enhanceRow);
                     }

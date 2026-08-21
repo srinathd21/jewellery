@@ -119,7 +119,9 @@ $csrfToken = $_SESSION['categories_csrf'];
 $categories = [];
 $sql = "SELECT c.id, c.parent_id, c.category_code, c.category_name, c.description, c.sort_order, c.is_active,
                p.category_name AS parent_name,
-               COUNT(pr.id) AS product_count
+               COUNT(pr.id) AS product_count,
+               COALESCE(SUM(pr.gross_weight), 0) AS total_gross_weight,
+               COALESCE(SUM(pr.net_weight), 0) AS total_net_weight
         FROM product_categories c
         LEFT JOIN product_categories p
                ON p.id = c.parent_id
@@ -315,7 +317,7 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
             <div class="categories-card">
                 <div class="table-responsive">
                     <table class="table categories-table align-middle" id="categoriesTable">
-                        <thead><tr><th>Category</th><th>Code</th><th>Parent</th><th>Products</th><th>Sort Order</th><th>Status</th><th class="text-end">Actions</th></tr></thead>
+                        <thead><tr><th>Category</th><th>Code</th><th>Parent</th><th>Products</th><th>Total Weight</th><th>Sort Order</th><th>Status</th><th class="text-end">Actions</th></tr></thead>
                         <tbody>
                         <?php foreach ($categories as $category): ?>
                             <tr data-search="<?php echo e(strtolower($category['category_name'] . ' ' . ($category['category_code'] ?? '') . ' ' . ($category['description'] ?? '') . ' ' . ($category['parent_name'] ?? ''))); ?>" data-status="<?php echo (int)$category['is_active'] === 1 ? 'active' : 'inactive'; ?>">
@@ -323,6 +325,10 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
                                 <td data-label="Code"><span class="code-badge"><?php echo e(!empty($category['category_code']) ? $category['category_code'] : '—'); ?></span></td>
                                 <td data-label="Parent"><?php if ($category['parent_name']): ?><span class="parent-badge"><?php echo e($category['parent_name']); ?></span><?php else: ?><span class="category-sub">Main Category</span><?php endif; ?></td>
                                 <td data-label="Products"><?php echo (int)$category['product_count']; ?></td>
+                                <td data-label="Total Weight">
+                                    <div><strong>G:</strong> <?php echo number_format((float)($category['total_gross_weight'] ?? 0), 3); ?> g</div>
+                                    <div class="category-sub"><strong>N:</strong> <?php echo number_format((float)($category['total_net_weight'] ?? 0), 3); ?> g</div>
+                                </td>
                                 <td data-label="Sort Order"><?php echo (int)$category['sort_order']; ?></td>
                                 <td data-label="Status"><span class="status-badge <?php echo (int)$category['is_active'] === 1 ? 'status-active' : 'status-inactive'; ?>"><?php echo (int)$category['is_active'] === 1 ? 'Active' : 'Inactive'; ?></span></td>
                                 <td class="text-end actions-column" data-label="Actions"><div class="d-inline-flex gap-1">

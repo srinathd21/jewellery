@@ -123,21 +123,93 @@ function bindDynamic(mysqli_stmt $stmt, string $types, array &$params): void
     call_user_func_array([$stmt, 'bind_param'], $bind);
 }
 
-function auditSaleDelete(mysqli $conn, int $businessId, int $branchId, int $userId, int $saleId, string $invoiceNo, string $reason, array $restocked = []): void
-{
+function auditSaleDelete(
+    mysqli $conn,
+    int $businessId,
+    int $branchId,
+    int $userId,
+    int $saleId,
+    string $invoiceNo,
+    string $reason,
+    array $oldSale,
+    array $reversalDetails = []
+): void {
     $stmt = $conn->prepare("INSERT INTO audit_logs
-        (business_id,branch_id,user_id,module_code,action_type,reference_table,reference_id,description,new_values_json,ip_address,user_agent)
+        (business_id,branch_id,user_id,module_code,action_type,reference_table,reference_id,
+         description,old_values_json,new_values_json,ip_address,user_agent)
         VALUES (?,?,?,'sales.list','Delete','sales',?,?,?,?,?,?)");
     if (!$stmt) return;
 
-    $description = 'Deleted invoice ' . $invoiceNo . ' and restored sold stock';
-    $json = json_encode(['invoice_no' => $invoiceNo, 'reason' => $reason, 'restocked_items' => $restocked], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    $description = 'Cancelled invoice ' . $invoiceNo . ' and reversed linked sale effects';
+    $oldJson = json_encode($oldSale, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    $newJson = json_encode([
+        'invoice_no' => $invoiceNo,
+        'workflow_status' => 'Cancelled',
+        'reason' => $reason,
+        'reversal' => $reversalDetails,
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     $ip = (string)($_SERVER['REMOTE_ADDR'] ?? '');
     $ua = (string)($_SERVER['HTTP_USER_AGENT'] ?? '');
 
-    $stmt->bind_param('iiiissss', $businessId, $branchId, $userId, $saleId, $description, $json, $ip, $ua);
+    $stmt->bind_param(
+        'iiiisssss',
+        $businessId,
+        $branchId,
+        $userId,
+        $saleId,
+        $description,
+        $oldJson,
+        $newJson,
+        $ip,
+        $ua
+    );
     $stmt->execute();
     $stmt->close();
+}
+
+function deleteCustomerReceiptsForSale(mysqli $conn, int $businessId, int $saleId): int
+{
+    if (!tableExists($conn, 'customer_payments')) {
+        return 0;
+    }
+
+    $ids = [];
+    $stmt = $conn->prepare('SELECT id FROM customer_payments WHERE business_id=? AND sale_id=? FOR UPDATE');
+    if ($stmt) {
+        $stmt->bind_param('ii', $businessId, $saleId);
+        $stmt->execute();
+        $result = $stmt->get_result();
+        while ($row = $result->fetch_assoc()) {
+            $ids[] = (int)$row['id'];
+        }
+        $stmt->close();
+    }
+
+    if ($ids && tableExists($conn, 'customer_payment_splits')) {
+        $deleteSplit = $conn->prepare('DELETE FROM customer_payment_splits WHERE payment_id=?');
+        if (!$deleteSplit) {
+            throw new RuntimeException('Unable to prepare customer payment split reversal: ' . $conn->error);
+        }
+        foreach ($ids as $paymentId) {
+            $deleteSplit->bind_param('i', $paymentId);
+            if (!$deleteSplit->execute()) {
+                throw new RuntimeException('Unable to reverse customer payment split: ' . $deleteSplit->error);
+            }
+        }
+        $deleteSplit->close();
+    }
+
+    $stmt = $conn->prepare('DELETE FROM customer_payments WHERE business_id=? AND sale_id=?');
+    if (!$stmt) {
+        throw new RuntimeException('Unable to prepare customer receipt reversal: ' . $conn->error);
+    }
+    $stmt->bind_param('ii', $businessId, $saleId);
+    if (!$stmt->execute()) {
+        throw new RuntimeException('Unable to reverse customer receipts: ' . $stmt->error);
+    }
+    $count = $stmt->affected_rows;
+    $stmt->close();
+    return max(0, $count);
 }
 
 function tableExists(mysqli $conn, string $table): bool
@@ -168,9 +240,9 @@ if ($action === 'list') {
     $page = max(1, (int)($_POST['page'] ?? 1));
     $perPage = max(5, min(100, (int)($_POST['per_page'] ?? 10)));
 
-    $where = ' WHERE s.business_id = ?';
-    $types = 'i';
-    $params = [$businessId];
+    $where = ' WHERE s.business_id = ? AND s.branch_id = ?';
+    $types = 'ii';
+    $params = [$businessId, $branchId];
 
     // Default Sales List shows only active/posted invoices. Cancelled invoices
     // are available only when the user explicitly selects Cancelled status.
@@ -290,8 +362,8 @@ if ($action === 'view') {
     $saleId = (int)($_POST['sale_id'] ?? 0);
     if ($saleId <= 0) respond(false, 'Invalid sale selected.');
 
-    $stmt = $conn->prepare('SELECT * FROM sales WHERE id = ? AND business_id = ? LIMIT 1');
-    $stmt->bind_param('ii', $saleId, $businessId);
+    $stmt = $conn->prepare('SELECT * FROM sales WHERE id = ? AND business_id = ? AND branch_id = ? LIMIT 1');
+    $stmt->bind_param('iii', $saleId, $businessId, $branchId);
     $stmt->execute();
     $sale = $stmt->get_result()->fetch_assoc();
     $stmt->close();
@@ -342,42 +414,61 @@ if ($action === 'delete' || $action === 'cancel') {
     $conn->begin_transaction();
 
     try {
-        $stmt = $conn->prepare("SELECT id, branch_id, invoice_no, workflow_status
+        $stmt = $conn->prepare("SELECT *
             FROM sales
-            WHERE id = ? AND business_id = ?
+            WHERE id = ? AND business_id = ? AND branch_id = ?
             LIMIT 1 FOR UPDATE");
         if (!$stmt) throw new Exception('Unable to prepare sale check: ' . $conn->error);
 
-        $stmt->bind_param('ii', $saleId, $businessId);
+        $stmt->bind_param('iii', $saleId, $businessId, $branchId);
         $stmt->execute();
         $sale = $stmt->get_result()->fetch_assoc();
         $stmt->close();
 
         if (!$sale) throw new Exception('Sale not found.');
-        if ($sale['workflow_status'] === 'Cancelled') throw new Exception('This invoice is already deleted/cancelled.');
+        if ((string)$sale['workflow_status'] === 'Cancelled') {
+            throw new Exception('This invoice is already deleted/cancelled.');
+        }
         $saleBranchId = (int)$sale['branch_id'];
+
+        // If old-gold stock has already moved to another workflow, cancellation is unsafe.
+        if (tableExists($conn, 'exchange_items_stock')) {
+            $stmt = $conn->prepare("SELECT status,COUNT(*) AS cnt
+                FROM exchange_items_stock
+                WHERE business_id=? AND branch_id=? AND sale_id=?
+                GROUP BY status
+                FOR UPDATE");
+            if (!$stmt) throw new Exception('Unable to inspect exchange stock: ' . $conn->error);
+            $stmt->bind_param('iii', $businessId, $saleBranchId, $saleId);
+            $stmt->execute();
+            $result = $stmt->get_result();
+            while ($row = $result->fetch_assoc()) {
+                if ((string)$row['status'] !== 'Available' && (int)$row['cnt'] > 0) {
+                    throw new Exception(
+                        'This invoice has exchange stock already marked ' . $row['status'] .
+                        '. Reverse that exchange workflow before cancelling the invoice.'
+                    );
+                }
+            }
+            $stmt->close();
+        }
 
         $items = [];
         $restocked = [];
-        $stmt = $conn->prepare('SELECT product_id, item_name, quantity, gross_weight, net_weight, metal_rate, line_total FROM sale_items WHERE sale_id = ? AND business_id = ?');
-        $stmt->bind_param('ii', $saleId, $businessId);
+        $stmt = $conn->prepare("SELECT si.product_id,si.item_name,si.quantity,si.gross_weight,
+                si.net_weight,si.metal_rate,si.line_total,COALESCE(p.track_stock,0) AS track_stock
+            FROM sale_items si
+            LEFT JOIN products p ON p.id=si.product_id AND p.business_id=si.business_id
+            WHERE si.sale_id=? AND si.business_id=? AND si.branch_id=?");
+        if (!$stmt) throw new Exception('Unable to prepare sale items: ' . $conn->error);
+        $stmt->bind_param('iii', $saleId, $businessId, $saleBranchId);
         $stmt->execute();
         $result = $stmt->get_result();
         while ($row = $result->fetch_assoc()) $items[] = $row;
         $stmt->close();
 
-        $stmt = $conn->prepare("UPDATE sales
-            SET workflow_status = 'Cancelled',
-                cancelled_by = ?,
-                cancelled_at = NOW(),
-                cancel_reason = ?
-            WHERE id = ? AND business_id = ?");
-        if (!$stmt) throw new Exception('Unable to prepare cancellation: ' . $conn->error);
-        $stmt->bind_param('isii', $userId, $reason, $saleId, $businessId);
-        if (!$stmt->execute()) throw new Exception('Unable to cancel sale: ' . $stmt->error);
-        $stmt->close();
-
         foreach ($items as $item) {
+            if ((int)($item['track_stock'] ?? 0) !== 1) continue;
             $productId = (int)($item['product_id'] ?? 0);
             if ($productId <= 0) continue;
 
@@ -399,12 +490,27 @@ if ($action === 'delete' || $action === 'cancel') {
             if (!$stmt->execute()) throw new Exception('Unable to restore product stock: ' . $stmt->error);
             $stmt->close();
 
-            $remarks = 'Deleted invoice ' . $sale['invoice_no'] . ' - stock restored';
+            $movementDate = date('Y-m-d H:i:s');
+            $remarksText = 'Cancelled invoice ' . $sale['invoice_no'] . ' - stock restored';
             $stmt = $conn->prepare("INSERT INTO stock_movements
-                (business_id,branch_id,product_id,movement_type,reference_table,reference_id,quantity_in,quantity_out,weight_in,weight_out,rate,value_amount,remarks,created_by)
-                VALUES (?,?,?,'Adjustment In','sales',?,?,0,?,0,?,?,?,?)");
+                (business_id,branch_id,product_id,movement_date,movement_type,reference_table,reference_id,
+                 quantity_in,quantity_out,weight_in,weight_out,rate,value_amount,remarks,created_by)
+                VALUES (?,?,?,?,'Adjustment In','sales',?,?,0,?,0,?,?,?,?)");
             if (!$stmt) throw new Exception('Unable to prepare stock movement: ' . $conn->error);
-            $stmt->bind_param('iiiiddddsi', $businessId, $saleBranchId, $productId, $saleId, $quantity, $netWeight, $rate, $value, $remarks, $userId);
+            $stmt->bind_param(
+                'iiisiddddsi',
+                $businessId,
+                $saleBranchId,
+                $productId,
+                $movementDate,
+                $saleId,
+                $quantity,
+                $netWeight,
+                $rate,
+                $value,
+                $remarksText,
+                $userId
+            );
             if (!$stmt->execute()) throw new Exception('Unable to add stock movement: ' . $stmt->error);
             $stmt->close();
 
@@ -413,17 +519,91 @@ if ($action === 'delete' || $action === 'cancel') {
                 'item_name' => (string)($item['item_name'] ?? ''),
                 'quantity' => $quantity,
                 'gross_weight' => $grossWeight,
-                'net_weight' => $netWeight
+                'net_weight' => $netWeight,
             ];
         }
 
-        auditSaleDelete($conn, $businessId, $saleBranchId, $userId, $saleId, (string)$sale['invoice_no'], $reason, $restocked);
+        $reversedCustomerReceipts = deleteCustomerReceiptsForSale($conn, $businessId, $saleId);
+
+        $reversedPayments = 0;
+        if (tableExists($conn, 'sale_payments')) {
+            $stmt = $conn->prepare('DELETE FROM sale_payments WHERE business_id=? AND branch_id=? AND sale_id=?');
+            if (!$stmt) throw new Exception('Unable to prepare payment reversal: ' . $conn->error);
+            $stmt->bind_param('iii', $businessId, $saleBranchId, $saleId);
+            if (!$stmt->execute()) throw new Exception('Unable to reverse sale payments: ' . $stmt->error);
+            $reversedPayments = max(0, $stmt->affected_rows);
+            $stmt->close();
+        }
+
+        $cancelledClaims = 0;
+        if (tableExists($conn, 'sales_chit_claims')) {
+            $stmt = $conn->prepare("UPDATE sales_chit_claims
+                SET status='Cancelled',cancelled_by=?,cancelled_at=NOW()
+                WHERE business_id=? AND branch_id=? AND sale_id=? AND status='Posted'");
+            if (!$stmt) throw new Exception('Unable to prepare chit claim reversal: ' . $conn->error);
+            $stmt->bind_param('iiii', $userId, $businessId, $saleBranchId, $saleId);
+            if (!$stmt->execute()) throw new Exception('Unable to reverse chit claims: ' . $stmt->error);
+            $cancelledClaims = max(0, $stmt->affected_rows);
+            $stmt->close();
+        }
+
+        $removedExchangeStock = 0;
+        if (tableExists($conn, 'exchange_items_stock')) {
+            $stmt = $conn->prepare("DELETE FROM exchange_items_stock
+                WHERE business_id=? AND branch_id=? AND sale_id=? AND status='Available'");
+            if (!$stmt) throw new Exception('Unable to prepare exchange stock reversal: ' . $conn->error);
+            $stmt->bind_param('iii', $businessId, $saleBranchId, $saleId);
+            if (!$stmt->execute()) throw new Exception('Unable to reverse exchange stock: ' . $stmt->error);
+            $removedExchangeStock = max(0, $stmt->affected_rows);
+            $stmt->close();
+        }
+
+        $stmt = $conn->prepare("UPDATE sales
+            SET workflow_status='Cancelled',
+                paid_amount=0,
+                balance_amount=0,
+                payment_status='Unpaid',
+                cancelled_by=?,
+                cancelled_at=NOW(),
+                cancel_reason=?
+            WHERE id=? AND business_id=? AND branch_id=?");
+        if (!$stmt) throw new Exception('Unable to prepare cancellation: ' . $conn->error);
+        $stmt->bind_param('isiii', $userId, $reason, $saleId, $businessId, $saleBranchId);
+        if (!$stmt->execute()) throw new Exception('Unable to cancel sale: ' . $stmt->error);
+        $stmt->close();
+
+        $reversal = [
+            'restocked_items' => $restocked,
+            'customer_receipts_reversed' => $reversedCustomerReceipts,
+            'sale_payments_reversed' => $reversedPayments,
+            'chit_claims_cancelled' => $cancelledClaims,
+            'exchange_stock_removed' => $removedExchangeStock,
+        ];
+
+        auditSaleDelete(
+            $conn,
+            $businessId,
+            $saleBranchId,
+            $userId,
+            $saleId,
+            (string)$sale['invoice_no'],
+            $reason,
+            $sale,
+            $reversal
+        );
+
         $conn->commit();
 
-        respond(true, 'Invoice deleted successfully. Product stock restored and Activity Log updated.', ['restocked_items' => count($restocked)]);
+        respond(true, 'Invoice cancelled successfully. Linked stock/payment/chit/exchange effects were reversed.', [
+            'restocked_items' => count($restocked),
+            'customer_receipts_reversed' => $reversedCustomerReceipts,
+            'sale_payments_reversed' => $reversedPayments,
+            'chit_claims_cancelled' => $cancelledClaims,
+            'exchange_stock_removed' => $removedExchangeStock,
+        ]);
     } catch (Throwable $e) {
         $conn->rollback();
-        respond(false, $e->getMessage(), [], 500);
+        respond(false, $e->getMessage(), [], 422);
     }
 }
 

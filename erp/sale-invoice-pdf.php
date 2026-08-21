@@ -164,7 +164,21 @@ if(isset($_GET['action']) && $_GET['action']==='share_link'){
 try{
     $saleRows=allRows($conn,"SELECT s.*,c.customer_code,c.mobile customer_master_mobile,c.email,c.gstin customer_gstin,c.address_line1,c.address_line2,c.city,c.state,c.pincode,b.business_name,b.legal_name,b.mobile business_mobile,b.email business_email,b.website,b.gstin business_gstin,b.pan_no,br.branch_name,br.mobile branch_mobile,br.email branch_email,br.address_line1 branch_address1,br.address_line2 branch_address2,br.city branch_city,br.state branch_state,br.pincode branch_pincode,br.gstin branch_gstin FROM sales s LEFT JOIN customers c ON c.id=s.customer_id LEFT JOIN businesses b ON b.id=s.business_id LEFT JOIN branches br ON br.id=s.branch_id WHERE s.id=? AND s.business_id=? LIMIT 1",'ii',[$saleId,$businessId]);
     if(!$saleRows) die('Sale not found.'); $s=$saleRows[0];
-    $items=allRows($conn,"SELECT si.*,p.product_code,p.hsn_code product_hsn FROM sale_items si LEFT JOIN products p ON p.id=si.product_id WHERE si.sale_id=? AND si.business_id=? ORDER BY si.sort_order,si.id",'ii',[$saleId,$businessId]);
+    $items=allRows($conn,"SELECT si.*,p.product_code,p.hsn_code product_hsn,p.metal_id,
+        COALESCE((
+            SELECT mr.rate_per_gram
+            FROM metal_rates mr
+            WHERE mr.business_id=si.business_id
+              AND mr.metal_id=p.metal_id
+              AND mr.is_current=1
+              AND (mr.branch_id=si.branch_id OR mr.branch_id IS NULL)
+            ORDER BY (mr.branch_id=si.branch_id) DESC,mr.effective_from DESC,mr.id DESC
+            LIMIT 1
+        ),0) AS today_rate
+        FROM sale_items si
+        LEFT JOIN products p ON p.id=si.product_id
+        WHERE si.sale_id=? AND si.business_id=?
+        ORDER BY si.sort_order,si.id",'ii',[$saleId,$businessId]);
     $pays=allRows($conn,"SELECT sp.*,pm.method_name FROM sale_payments sp LEFT JOIN payment_methods pm ON pm.id=sp.payment_method_id WHERE sp.sale_id=? AND sp.business_id=? ORDER BY sp.id",'ii',[$saleId,$businessId]);
     $claims=allRows($conn,"SELECT sc.*,cg.group_name,cg.group_no,cm.ticket_no FROM sales_chit_claims sc LEFT JOIN chit_groups cg ON cg.id=sc.chit_group_id LEFT JOIN chit_members cm ON cm.id=sc.chit_member_id WHERE sc.sale_id=? AND sc.business_id=? AND sc.status='Posted'",'ii',[$saleId,$businessId]);
     $ex=allRows($conn,"SELECT * FROM sale_exchange_items WHERE sale_id=? AND business_id=? ORDER BY id",'ii',[$saleId,$businessId]);
@@ -345,8 +359,8 @@ $y=$boxY+8;$y=$pdf->info(10,$y,93,'Customer Name',$s['customer_name']?:'Walk-in 
 $y=$boxY+8;$y=$pdf->info(107,$y,93,'Invoice Number',(string)$s['invoice_no']);$y=$pdf->info(107,$y,93,'Invoice Date',date('d-m-Y',strtotime($s['invoice_date'])));$y=$pdf->info(107,$y,93,'Payment Status',(string)($s['payment_status']??'-'));$y=$pdf->info(107,$y,93,'Sales Person',(string)($s['sales_person_name']??'-'));$y=$pdf->info(107,$y,93,'Place of Supply',(string)($s['state']?:$s['branch_state']));
 
 $pdf->SetY(76);
-$heads=['S.No','Description','HSN / Purity','Gross g','Stone g','Net g','Rate/g','Metal Value','Making','Other','Taxable'];
-$ws=[8,35,19,14,14,14,17,19,17,15,22];
+$heads=['S.No','Description','HSN / Purity','Gross g','Stone g','Net g','Making','Other','Taxable'];
+$ws=[9,47,24,16,16,16,20,20,26];
 $drawHead=function()use($pdf,$heads,$ws,$P,$D){$pdf->SetFillColor(...$P);$pdf->SetDrawColor(...$D);$pdf->SetTextColor(255);$pdf->SetFont('Arial','B',6.8);foreach($heads as $i=>$h)$pdf->Cell($ws[$i],10,txt($h),1,0,'C',true);$pdf->Ln();$pdf->SetTextColor(36);};
 $drawHead();$pdf->SetFont('Arial','',7.2);$pdf->SetDrawColor(...$B);
 foreach($items as $n=>$i){
@@ -372,7 +386,7 @@ foreach($items as $n=>$i){
         ?? max(0,$metal+$making+$wastageAmount+$stoneAmount+$other-$discount));
 
     $hsn=trim((string)($i['hsn_code']??$i['product_hsn']??'').' / '.(string)($i['purity']??''),' /');
-    $vals=[$n+1,$i['item_name']??'-',$hsn?:'-',number_format($gross,3),number_format($stone,3),number_format($net,3),number_format($rate,2),number_format($metal,2),number_format($making,2),number_format($other,2),number_format($taxable,2)];
+    $vals=[$n+1,$i['item_name']??'-',$hsn?:'-',number_format($gross,3),number_format($stone,3),number_format($net,3),number_format($making,2),number_format($other,2),number_format($taxable,2)];
     foreach($vals as $c=>$v)$pdf->Cell($ws[$c],9,txt($v),1,0,$c===1?'L':($c<3?'C':'R'));
     $pdf->Ln();
 }
@@ -381,16 +395,119 @@ $pdf->Ln(3);
 if($ex){$pdf->need(14+count($ex)*7);$pdf->SetFillColor(...$GS);$pdf->SetTextColor(...$P);$pdf->SetFont('Arial','B',8.5);$pdf->Cell($W,7,txt('EXCHANGE DETAILS'),1,1,'L',true);$pdf->SetTextColor(36);$pdf->SetFont('Arial','',8);foreach($ex as $x){$line=($x['item_name']??'Exchange Item').' | '.number_format((float)$x['eligible_weight'],3).' g = Rs. '.number_format((float)$x['exchange_value'],2);$pdf->MultiCell($W,6,txt($line),1,'L');}$pdf->Ln(2);}
 if($claims){$pdf->need(14+count($claims)*7);$pdf->SetFillColor(...$GS);$pdf->SetTextColor(...$P);$pdf->SetFont('Arial','B',8.5);$pdf->Cell($W,7,txt('GOLD GRAM CLAIMS'),1,1,'L',true);$pdf->SetTextColor(36);$pdf->SetFont('Arial','',8);foreach($claims as $c){$line=($c['group_name']?:'Chit').' / Ticket '.($c['ticket_no']?:'-').' | '.number_format((float)$c['claim_grams'],6).' g x Rs. '.number_format((float)$c['rate_per_gram'],2).' = Rs. '.number_format((float)$c['claim_amount'],2);$pdf->MultiCell($W,6,txt($line),1,'L');}$pdf->Ln(2);}
 
-$pdf->need(68);$summaryY=$pdf->GetY();$notesW=112;
-$pdf->SetXY(8,$summaryY);$pdf->SetFillColor(...$GS);$pdf->SetTextColor(...$P);$pdf->SetFont('Arial','B',7);$pdf->Cell($notesW,6,txt('TERMS AND CONDITIONS'),1,1,'L',true);$pdf->SetX(8);$pdf->SetTextColor(36);$pdf->SetFont('Arial','',6);
-$terms=trim((string)($set['terms_conditions']??''));if($terms==='')$terms="1. Jewellery once sold will be exchanged according to prevailing policy.\n2. Gold rate, making and stone charges are shown separately.\n3. Verify weight, purity and item details before leaving the showroom.\n4. Preserve this invoice for exchange, service or warranty claims.";
-$pdf->MultiCell($notesW,4,txt($terms),1,'L');$notesBottom=$pdf->GetY();
+$notesW=112;
+$terms=trim((string)($set['terms_conditions']??''));
+if($terms===''){
+    $terms="1. Jewellery once sold will be exchanged according to prevailing policy.\n2. Gold rate, making and stone charges are shown separately.\n3. Verify weight, purity and item details before leaving the showroom.\n4. Preserve this invoice for exchange, service or warranty claims.";
+}
 
-$totals=[['Taxable Amount',(float)($s['taxable_amount']??$s['subtotal']??0)],['CGST',(float)($s['cgst_amount']??0)],['SGST',(float)($s['sgst_amount']??0)],['IGST',(float)($s['igst_amount']??0)],['Discount',-(float)($s['discount_amount']??0)],['Exchange',-(float)($s['exchange_amount']??0)],['Gold Claim',-(float)($s['chit_claim_amount']??0)],['Round Off',(float)($s['round_off']??0)],['Grand Total',(float)($s['grand_total']??$s['net_payable_amount']??0)],['Paid Amount',(float)($s['paid_amount']??0)],['Balance',(float)($s['balance_amount']??0)]];
-$pdf->SetXY(124,$summaryY);foreach($totals as $r){$grand=$r[0]==='Grand Total';if($grand){$pdf->SetFillColor(...$P);$pdf->SetTextColor(255);$pdf->SetFont('Arial','B',8);}else{$pdf->SetTextColor(36);$pdf->SetFont('Arial',in_array($r[0],['Paid Amount','Balance'],true)?'B':'',6.7);}$pdf->Cell(44,5.4,txt($r[0]),1,0,'L',$grand);$pdf->Cell(34,5.4,txt('Rs. '.number_format((float)$r[1],2)),1,1,'R',$grand);$pdf->SetX(124);} $totalsBottom=$pdf->GetY();
+// Keep the summary block together where possible. The left side contains
+// Terms & Conditions followed immediately by Rate Details; totals remain right.
+$termLineEstimate=max(1,substr_count($terms,"\n")+1);
+$rateHeight=$items ? (14+(count($items)*6)) : 0;
+$leftHeight=6+($termLineEstimate*4)+2+$rateHeight;
+$pdf->need(max(68,$leftHeight+3));
+$summaryY=$pdf->GetY();
+$summaryPage=$pdf->PageNo();
 
-$pdf->SetY(max($notesBottom,$totalsBottom)+3);
+/* ---------------- RIGHT SIDE: TOTALS ---------------- */
+$totals=[
+    ['Taxable Amount',(float)($s['taxable_amount']??$s['subtotal']??0)],
+    ['CGST',(float)($s['cgst_amount']??0)],
+    ['SGST',(float)($s['sgst_amount']??0)],
+    ['IGST',(float)($s['igst_amount']??0)],
+    ['Discount',-(float)($s['discount_amount']??0)],
+    ['Exchange',-(float)($s['exchange_amount']??0)],
+    ['Gold Claim',-(float)($s['chit_claim_amount']??0)],
+    ['Round Off',(float)($s['round_off']??0)],
+    ['Grand Total',(float)($s['grand_total']??$s['net_payable_amount']??0)],
+    ['Paid Amount',(float)($s['paid_amount']??0)],
+    ['Balance',(float)($s['balance_amount']??0)]
+];
+$pdf->SetXY(124,$summaryY);
+foreach($totals as $r){
+    $grand=$r[0]==='Grand Total';
+    if($grand){
+        $pdf->SetFillColor(...$P);$pdf->SetTextColor(255);$pdf->SetFont('Arial','B',8);
+    }else{
+        $pdf->SetTextColor(36);$pdf->SetFont('Arial',in_array($r[0],['Paid Amount','Balance'],true)?'B':'',6.7);
+    }
+    $pdf->Cell(44,5.4,txt($r[0]),1,0,'L',$grand);
+    $pdf->Cell(34,5.4,txt('Rs. '.number_format((float)$r[1],2)),1,1,'R',$grand);
+    $pdf->SetX(124);
+}
+$totalsBottom=$pdf->GetY();
+
+/* ---------------- LEFT SIDE: TERMS ---------------- */
+$pdf->SetXY(8,$summaryY);
+$pdf->SetFillColor(...$GS);$pdf->SetTextColor(...$P);$pdf->SetFont('Arial','B',7);
+$pdf->Cell($notesW,6,txt('TERMS AND CONDITIONS'),1,1,'L',true);
+$pdf->SetX(8);$pdf->SetTextColor(36);$pdf->SetFont('Arial','',6);
+$pdf->MultiCell($notesW,4,txt($terms),1,'L');
+$notesBottom=$pdf->GetY();
+
+/* ---------------- LEFT SIDE: RATE DETAILS ----------------
+ * Today's Rate = current active branch/global rate for the item's metal.
+ * Applied Rate = the metal_rate saved on this invoice item.
+ */
+$rateBottom=$notesBottom;
+if($items){
+    $rateWs=[10,50,26,26]; // total = 112 mm (same width as Terms section)
+    $drawRateHead=function()use($pdf,$notesW,$rateWs,$GS,$P,$D){
+        $pdf->SetX(8);
+        $pdf->SetFillColor(...$GS);$pdf->SetDrawColor(...$D);$pdf->SetTextColor(...$P);$pdf->SetFont('Arial','B',7);
+        $pdf->Cell($notesW,6,txt('RATE DETAILS'),1,1,'L',true);
+        $pdf->SetX(8);
+        $pdf->SetFillColor(...$P);$pdf->SetTextColor(255);$pdf->SetFont('Arial','B',6.1);
+        foreach(['S.No','Description',"Today's Rate / g",'Applied Rate / g'] as $idx=>$head){
+            $pdf->Cell($rateWs[$idx],7,txt($head),1,0,'C',true);
+        }
+        $pdf->Ln();
+        $pdf->SetTextColor(36);$pdf->SetDrawColor(...$D);$pdf->SetFont('Arial','',6.6);
+    };
+
+    $requiredRateHeight=15+(count($items)*6);
+    if($pdf->GetY()+2+$requiredRateHeight>$pdf->GetPageHeight()-17){
+        $pdf->AddPage();
+        $pdf->SetY(14);
+    }else{
+        $pdf->SetY($notesBottom+2);
+    }
+
+    $drawRateHead();
+    foreach($items as $idx=>$item){
+        if($pdf->GetY()+6>$pdf->GetPageHeight()-17){
+            $pdf->AddPage();$pdf->SetY(14);$drawRateHead();
+        }
+
+        $todayRate=(float)($item['today_rate']??0);
+        $appliedRate=(float)($item['metal_rate']??$item['rate_per_gram']??0);
+        $rateVals=[
+            $idx+1,
+            (string)($item['item_name']??'-'),
+            $todayRate>0 ? 'Rs. '.number_format($todayRate,2) : '-',
+            $appliedRate>0 ? 'Rs. '.number_format($appliedRate,2) : '-'
+        ];
+
+        $pdf->SetX(8);
+        foreach($rateVals as $col=>$value){
+            $pdf->Cell($rateWs[$col],6,txt($value),1,0,$col===1?'L':($col===0?'C':'R'));
+        }
+        $pdf->Ln();
+    }
+    $rateBottom=$pdf->GetY();
+}
+
+// Continue below whichever side is lower when both are on the same page.
+// If Rate Details moved to a new page, continue below that section there.
+if($pdf->PageNo()===$summaryPage){
+    $pdf->SetY(max($rateBottom,$totalsBottom)+3);
+}else{
+    $pdf->SetY($rateBottom+3);
+}
+
 $grandTotal=(float)($s['grand_total']??$s['net_payable_amount']??0);
+$pdf->need(14);
 $pdf->SetFillColor(255,250,240);$pdf->SetTextColor(...$D);$pdf->SetFont('Arial','B',7);$pdf->Cell($W,6,txt('AMOUNT IN WORDS'),1,1,'L',true);$pdf->SetFont('Arial','',7);$pdf->MultiCell($W,5,txt(amountWords((int)round($grandTotal))),1,'L');
 
 $pdf->Ln(3);$pdf->need(42);$payY=$pdf->GetY();$half=95;
