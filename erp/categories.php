@@ -311,7 +311,10 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
                         <option value="inactive">Inactive</option>
                     </select>
                 </div>
-                <?php if ($canCreate): ?><button type="button" class="btn btn-theme btn-sm" id="addCategoryButton"><i class="fa-solid fa-plus me-2"></i>Add Category</button><?php endif; ?>
+                <div class="d-flex align-items-center gap-2 flex-wrap">
+                    <a href="category-report-pdf.php?inline=1" target="_blank" class="btn btn-light btn-sm" id="printCategoryButton"><i class="fa-solid fa-print me-2"></i>Print</a>
+                    <?php if ($canCreate): ?><button type="button" class="btn btn-theme btn-sm" id="addCategoryButton"><i class="fa-solid fa-plus me-2"></i>Add Category</button><?php endif; ?>
+                </div>
             </div>
 
             <div class="categories-card">

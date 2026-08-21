@@ -480,7 +480,7 @@ if($todayMetalRates){
 
     $pdf->SetX(8);
     $pdf->SetFillColor(...$P);$pdf->SetTextColor(255);$pdf->SetFont('Arial','B',6.1);
-    foreach(['S.No','Metal',"Today's Rate / g"] as $idx=>$head){
+    foreach(['S.No','Metal',"Rate / g"] as $idx=>$head){
         $pdf->Cell($rateWs[$idx],7,txt($head),1,0,'C',true);
     }
     $pdf->Ln();
