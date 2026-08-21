@@ -173,7 +173,7 @@ try{
     // Show only today's/current Gold and Silver rates on the invoice.
     $todayMetalRates=[];
     if(tableExists($conn,'metal_rates') && tableExists($conn,'metals')){
-        $rateRows=allRows($conn,"SELECT mr.id,mr.metal_id,mr.rate_per_gram,mr.purity,mr.branch_id,mr.effective_from,m.metal_name
+        $rateRows=allRows($conn,"SELECT mr.id,mr.metal_id,mr.rate_per_gram,mr.branch_id,mr.effective_from,m.metal_name
             FROM metal_rates mr
             INNER JOIN metals m ON m.id=mr.metal_id AND m.business_id=mr.business_id
             WHERE mr.business_id=?
@@ -181,18 +181,25 @@ try{
               AND (mr.branch_id=? OR mr.branch_id IS NULL)
               AND (LOWER(m.metal_name) LIKE '%gold%' OR LOWER(m.metal_name) LIKE '%silver%')
             ORDER BY
+              CASE WHEN LOWER(m.metal_name) LIKE '%gold%' THEN 0 ELSE 1 END,
               CASE WHEN mr.branch_id=? THEN 0 ELSE 1 END,
               mr.effective_from DESC,
               mr.id DESC",'iii',[$businessId,(int)$s['branch_id'],(int)$s['branch_id']]);
 
-        $seenRates=[];
+        // Keep only one current Gold rate and one current Silver rate.
+        // Gold is intentionally inserted first, then Silver.
+        $groupedRates=['gold'=>null,'silver'=>null];
         foreach($rateRows as $rateRow){
-            $metalName=trim((string)($rateRow['metal_name']??''));
-            $purity=trim((string)($rateRow['purity']??''));
-            $key=strtolower($metalName).'|'.strtolower($purity);
-            if(isset($seenRates[$key])) continue;
-            $seenRates[$key]=true;
-            $todayMetalRates[]=$rateRow;
+            $metalName=strtolower(trim((string)($rateRow['metal_name']??'')));
+            $group=strpos($metalName,'gold')!==false ? 'gold' : (strpos($metalName,'silver')!==false ? 'silver' : '');
+            if($group!=='' && $groupedRates[$group]===null){
+                $groupedRates[$group]=$rateRow;
+            }
+        }
+        foreach(['gold','silver'] as $group){
+            if($groupedRates[$group]!==null){
+                $todayMetalRates[]=$groupedRates[$group];
+            }
         }
     }
     $pays=allRows($conn,"SELECT sp.*,pm.method_name FROM sale_payments sp LEFT JOIN payment_methods pm ON pm.id=sp.payment_method_id WHERE sp.sale_id=? AND sp.business_id=? ORDER BY sp.id",'ii',[$saleId,$businessId]);
@@ -465,7 +472,7 @@ $notesBottom=$pdf->GetY();
 /* ---------------- LEFT SIDE: TODAY GOLD & SILVER RATES ---------------- */
 $rateBottom=$notesBottom;
 if($todayMetalRates){
-    $rateWs=[42,30,40]; // total = 112 mm
+    $rateWs=[12,60,40]; // total = 112 mm
     $pdf->SetY($notesBottom+2);
     $pdf->SetX(8);
     $pdf->SetFillColor(...$GS);$pdf->SetDrawColor(...$D);$pdf->SetTextColor(...$P);$pdf->SetFont('Arial','B',7);
@@ -473,19 +480,19 @@ if($todayMetalRates){
 
     $pdf->SetX(8);
     $pdf->SetFillColor(...$P);$pdf->SetTextColor(255);$pdf->SetFont('Arial','B',6.1);
-    foreach(['Metal','Purity',"Today's Rate / g"] as $idx=>$head){
+    foreach(['S.No','Metal',"Today's Rate / g"] as $idx=>$head){
         $pdf->Cell($rateWs[$idx],7,txt($head),1,0,'C',true);
     }
     $pdf->Ln();
 
     $pdf->SetTextColor(36);$pdf->SetDrawColor(...$D);$pdf->SetFont('Arial','',6.6);
-    foreach($todayMetalRates as $rateRow){
+    foreach($todayMetalRates as $rateIndex=>$rateRow){
         if($pdf->GetY()+6>$pdf->GetPageHeight()-17){
             $pdf->AddPage();
             $pdf->SetY(14);
             $pdf->SetX(8);
             $pdf->SetFillColor(...$P);$pdf->SetTextColor(255);$pdf->SetFont('Arial','B',6.1);
-            foreach(['Metal','Purity',"Today's Rate / g"] as $idx=>$head){
+            foreach(['S.No','Metal',"Today's Rate / g"] as $idx=>$head){
                 $pdf->Cell($rateWs[$idx],7,txt($head),1,0,'C',true);
             }
             $pdf->Ln();
@@ -493,16 +500,16 @@ if($todayMetalRates){
         }
 
         $metalName=trim((string)($rateRow['metal_name']??'-'));
-        $purity=trim((string)($rateRow['purity']??''));
         $todayRate=(float)($rateRow['rate_per_gram']??0);
         $values=[
+            $rateIndex+1,
             $metalName!==''?$metalName:'-',
-            $purity!==''?$purity:'-',
             $todayRate>0?'Rs. '.number_format($todayRate,2):'-'
         ];
         $pdf->SetX(8);
         foreach($values as $col=>$value){
-            $pdf->Cell($rateWs[$col],6,txt($value),1,0,$col===0?'L':($col===1?'C':'R'));
+            $align=$col===0?'C':($col===1?'L':'R');
+            $pdf->Cell($rateWs[$col],6,txt($value),1,0,$align);
         }
         $pdf->Ln();
     }
