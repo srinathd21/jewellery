@@ -347,7 +347,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     p.image_path,
                     p.gross_weight,
                     p.net_weight,
-                    p.sale_rate,
                     p.is_active,
                     COALESCE(pc.category_name, '') AS category_name,
                     COALESCE(m.metal_name, '') AS metal_name
@@ -437,7 +436,6 @@ if ($themeStmt) {
 
 $pageTitle = 'Barcode Printing';
 $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
-$currencySymbol = (string) ($_SESSION['currency_symbol'] ?? '₹');
 ?>
 <!doctype html>
 <html lang="en">
@@ -707,7 +705,7 @@ $currencySymbol = (string) ($_SESSION['currency_symbol'] ?? '₹');
             white-space: nowrap;
         }
 
-        .price-text {
+        .weight-text {
             font-weight: 700;
             white-space: nowrap;
         }
@@ -1112,9 +1110,11 @@ $currencySymbol = (string) ($_SESSION['currency_symbol'] ?? '₹');
         (function () {
             'use strict';
 
+            // Barcode Printing V3 - net weight printing only. No price field is used.
+            console.info('Barcode Printing V3 loaded');
+
             const csrfToken = <?php echo json_encode($csrfToken); ?>;
             const businessName = <?php echo json_encode($businessName); ?>;
-            const currencySymbol = <?php echo json_encode($currencySymbol); ?>;
             const canUpdateBarcode = <?php echo $canUpdate ? 'true' : 'false'; ?>;
 
             /*
@@ -1314,7 +1314,7 @@ $currencySymbol = (string) ($_SESSION['currency_symbol'] ?? '₹');
                     '</td>' +
 
                     '<td class="text-end" data-label="Net Weight">' +
-                    '<span class="price-text">' +
+                    '<span class="weight-text">' +
                     netWeight.toFixed(3) + ' g' +
                     '</span>' +
                     '</td>' +
@@ -1641,40 +1641,40 @@ $currencySymbol = (string) ($_SESSION['currency_symbol'] ?? '₹');
                 const netWeight =
                     Number(product.net_weight || 0);
 
-                if (!Number.isFinite(price) || price <= 0) {
+                if (!Number.isFinite(netWeight) || netWeight < 0) {
                     throw new Error(
-                        'Sale rate must be greater than 0.'
+                        'Net weight must be zero or greater.'
                     );
                 }
 
-                const payload = {
-                    shopName: businessName,
-                    productCode:
-                        String(
-                            product.product_code || ''
-                        ).trim(),
-                    productName:
-                        String(
-                            product.product_name || ''
-                        ).trim(),
-                    netWeight: netWeight,
-                    barcode: barcode,
-                    quantity: quantity
-                };
+                /*
+                 * Use GET for the local print request. The local Print Manager
+                 * already supports GET /print and this avoids the browser's
+                 * JSON POST/CORS preflight, which can otherwise surface only as
+                 * "Failed to fetch" even when /health is reachable.
+                 */
+                const printParams = new URLSearchParams();
+                printParams.set('shopName', businessName);
+                printParams.set(
+                    'productCode',
+                    String(product.product_code || '').trim()
+                );
+                printParams.set(
+                    'productName',
+                    String(product.product_name || '').trim()
+                );
+                printParams.set('netWeight', netWeight.toFixed(3));
+                printParams.set('barcode', barcode);
+                printParams.set('quantity', String(quantity));
 
                 const response =
                     await fetchLocal(
-                        '/print',
+                        '/print?' + printParams.toString(),
                         {
-                            method: 'POST',
+                            method: 'GET',
                             headers: {
-                                'Content-Type':
-                                    'application/json',
-                                'Accept':
-                                    'application/json'
-                            },
-                            body:
-                                JSON.stringify(payload)
+                                'Accept': 'application/json'
+                            }
                         },
                         15000
                     );
