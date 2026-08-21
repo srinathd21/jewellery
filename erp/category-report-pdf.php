@@ -260,14 +260,19 @@ $pdf->SetMargins(8, 8, 8);
 $pdf->SetAutoPageBreak(true, 14);
 $pdf->AddPage();
 
-$headers = ['S.No', 'Category', 'Code', 'Parent', 'Products', 'Gross Wt.', 'Net Wt.', 'Sort Order', 'Status'];
-$widths = [12, 55, 30, 45, 22, 28, 28, 24, 25];
+$headers = ['S.No', 'Category', 'Code', 'Parent', 'Products', 'Gross Wt.', 'Net Wt.', 'Sort', 'Status'];
+// Match the full printable width used by the report title/navigation bar.
+// A4 landscape = 297 mm; with 8 mm left/right margins the usable width is 281 mm.
+$tableWidth = 281;
+$tableX = 8;
+$widths = [10, 56, 30, 44, 22, 30, 30, 20, 39]; // total = 281 mm
 
-$drawHeader = function () use ($pdf, $headers, $widths) {
+$drawHeader = function () use ($pdf, $headers, $widths, $tableX) {
+    $pdf->SetX($tableX);
     $pdf->SetFillColor(123, 31, 58);
     $pdf->SetDrawColor(190, 160, 120);
     $pdf->SetTextColor(255, 255, 255);
-    $pdf->SetFont('Arial', 'B', 7.2);
+    $pdf->SetFont('Arial', 'B', 6.8);
     foreach ($headers as $index => $header) {
         $pdf->Cell($widths[$index], 8, pdfText($header), 1, 0, 'C', true);
     }
@@ -275,7 +280,7 @@ $drawHeader = function () use ($pdf, $headers, $widths) {
 };
 
 $drawHeader();
-$pdf->SetFont('Arial', '', 7.1);
+$pdf->SetFont('Arial', '', 6.8);
 $pdf->SetTextColor(35, 35, 35);
 $pdf->SetDrawColor(220, 205, 180);
 
@@ -284,10 +289,10 @@ $totalGross = 0.0;
 $totalNet = 0.0;
 
 foreach ($categories as $index => $category) {
-    if ($pdf->GetY() > 190) {
+    if ($pdf->GetY() > 188) {
         $pdf->AddPage();
         $drawHeader();
-        $pdf->SetFont('Arial', '', 7.1);
+        $pdf->SetFont('Arial', '', 6.8);
         $pdf->SetTextColor(35, 35, 35);
         $pdf->SetDrawColor(220, 205, 180);
     }
@@ -311,6 +316,7 @@ foreach ($categories as $index => $category) {
         (int)($category['is_active'] ?? 0) === 1 ? 'Active' : 'Inactive'
     ];
 
+    $pdf->SetX($tableX);
     foreach ($values as $col => $value) {
         $align = in_array($col, [0, 4, 5, 6, 7], true) ? 'C' : 'L';
         $pdf->Cell($widths[$col], 7, pdfText($value), 1, 0, $align);
@@ -320,21 +326,25 @@ foreach ($categories as $index => $category) {
 
 if (!$categories) {
     $pdf->SetFont('Arial', 'I', 8);
-    $pdf->Cell(array_sum($widths), 12, 'No category data available.', 1, 1, 'C');
+    $pdf->SetX($tableX);
+    $pdf->Cell($tableWidth, 12, 'No category data available.', 1, 1, 'C');
 }
 
 $pdf->Ln(3);
 $pdf->SetFillColor(248, 236, 208);
 $pdf->SetTextColor(80, 17, 38);
 $pdf->SetFont('Arial', 'B', 7.5);
-$pdf->Cell(60, 7, 'Total Categories', 1, 0, 'L', true);
-$pdf->Cell(25, 7, (string)count($categories), 1, 0, 'C', true);
-$pdf->Cell(45, 7, 'Linked Products', 1, 0, 'L', true);
-$pdf->Cell(25, 7, (string)$totalProducts, 1, 0, 'C', true);
-$pdf->Cell(35, 7, 'Gross Weight', 1, 0, 'L', true);
-$pdf->Cell(35, 7, number_format($totalGross, 3) . ' g', 1, 0, 'R', true);
-$pdf->Cell(32, 7, 'Net Weight', 1, 0, 'L', true);
-$pdf->Cell(35, 7, number_format($totalNet, 3) . ' g', 1, 1, 'R', true);
+// Summary uses exactly the same 281 mm width as the table and report title bar.
+$summaryWidths = [40, 24, 40, 24, 36, 43, 32, 42]; // total = 281 mm
+$pdf->SetX($tableX);
+$pdf->Cell($summaryWidths[0], 6.5, 'Total Categories', 1, 0, 'L', true);
+$pdf->Cell($summaryWidths[1], 6.5, (string)count($categories), 1, 0, 'C', true);
+$pdf->Cell($summaryWidths[2], 6.5, 'Linked Products', 1, 0, 'L', true);
+$pdf->Cell($summaryWidths[3], 6.5, (string)$totalProducts, 1, 0, 'C', true);
+$pdf->Cell($summaryWidths[4], 6.5, 'Gross Weight', 1, 0, 'L', true);
+$pdf->Cell($summaryWidths[5], 6.5, number_format($totalGross, 3) . ' g', 1, 0, 'R', true);
+$pdf->Cell($summaryWidths[6], 6.5, 'Net Weight', 1, 0, 'L', true);
+$pdf->Cell($summaryWidths[7], 6.5, number_format($totalNet, 3) . ' g', 1, 1, 'R', true);
 
 $inline = isset($_GET['inline']) && $_GET['inline'] === '1';
 $mode = $inline ? 'I' : 'D';
