@@ -307,6 +307,8 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
                 <div class="span-12 d-flex flex-wrap gap-2">
                     <button type="submit" class="btn btn-theme"><i class="fa-solid fa-magnifying-glass me-1"></i>Show Report</button>
                     <button type="button" class="btn btn-light-custom" id="resetFilters">Reset</button>
+                    <button type="button" class="btn btn-light-custom" id="exportPdf"><i class="fa-solid fa-file-pdf me-1"></i>Export PDF</button>
+                    <button type="button" class="btn btn-light-custom" id="exportExcel"><i class="fa-solid fa-file-excel me-1"></i>Export Excel</button>
                     <span class="ms-auto align-self-center page-subtitle" id="periodLabel"></span>
                 </div>
             </form>
@@ -537,6 +539,20 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
         await loadBootstrap();
         await loadReport();
     });
+
+    function exportUrl(page){
+        const params=new URLSearchParams(new FormData(filterForm));
+        return page+'?'+params.toString();
+    }
+
+    document.getElementById('exportPdf').addEventListener('click',()=>{
+        window.open(exportUrl('sales-report-export-pdf.php'),'_blank','noopener');
+    });
+
+    document.getElementById('exportExcel').addEventListener('click',()=>{
+        window.location.href=exportUrl('sales-report-export-excel.php');
+    });
+
     (async()=>{await loadBootstrap();await loadReport();})();
 })();
 </script>
