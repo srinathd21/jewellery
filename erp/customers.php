@@ -1,5 +1,5 @@
 <?php
-/* customersphp - overflow and URL pagination corrected */
+/* customers.php - overflow and URL pagination corrected */
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
@@ -357,7 +357,7 @@ function customerPageUrl(int $targetPage): string
     if ((int) ($query['page'] ?? 1) === 1) {
         unset($query['page']);
     }
-    return 'customersphp' . ($query ? '?' . http_build_query($query) : '');
+    return 'customers.php' . ($query ? '?' . http_build_query($query) : '');
 }
 
 $paginationFrom = $totalFilteredCustomers > 0 ? $offset + 1 : 0;
@@ -1058,7 +1058,7 @@ $flashMessage = [
                             <option value="<?php echo $rowsPerPage; ?>" <?php echo $perPage === $rowsPerPage ? 'selected' : ''; ?>><?php echo $rowsPerPage; ?> rows</option>
                         <?php endforeach; ?>
                     </select>
-                </div>
+                </div>  
                 <div class="filter-actions-row">
                     <div class="filter-result-note">Use filters and click Apply to update the customer list.</div>
                     <div class="filter-actions">
