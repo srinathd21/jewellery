@@ -327,36 +327,34 @@ $yesterdaySales = (float) ($salesSummary['yesterday_sales'] ?? 0);
 $salesGrowth = $previousSales > 0 ? (($currentSales - $previousSales) / $previousSales) * 100 : ($currentSales > 0 ? 100 : 0);
 $todayGrowth = $yesterdaySales > 0 ? (($todaySales - $yesterdaySales) / $yesterdaySales) * 100 : ($todaySales > 0 ? 100 : 0);
 
-$metalStock = dbAll($conn, "
-    SELECT m.metal_name, m.metal_code,
-           COALESCE(SUM(ps.net_weight),0) AS net_weight,
-           COALESCE(SUM(ps.stock_value),0) AS stock_value
+/*
+ * Product-type stock summary.
+ *
+ * Important stock-weight rule:
+ *   Total Gross Stock Weight = Stock Qty / Pieces x Single Product Gross Weight
+ *
+ * p.net_weight remains the single-product net weight and is NOT multiplied here.
+ */
+$productTypeStock = dbAll($conn, "
+    SELECT
+        COALESCE(NULLIF(TRIM(p.product_type), ''), 'Other') AS product_type,
+        COUNT(DISTINCT p.id) AS total_products,
+        COALESCE(SUM(ps.quantity), 0) AS total_quantity,
+        COALESCE(SUM(ps.quantity * p.gross_weight), 0) AS total_gross_weight,
+        COALESCE(SUM(ps.stock_value), 0) AS stock_value
     FROM product_stock ps
-    INNER JOIN products p ON p.id = ps.product_id AND p.business_id = ps.business_id
-    LEFT JOIN metals m ON m.id = p.metal_id AND m.business_id = p.business_id
+    INNER JOIN products p
+        ON p.id = ps.product_id
+       AND p.business_id = ps.business_id
     WHERE {$stockScope}
-    GROUP BY m.id, m.metal_name, m.metal_code
-    ORDER BY stock_value DESC
+      AND p.is_active = 1
+    GROUP BY p.product_type
+    ORDER BY stock_value DESC, product_type ASC
 ");
 
-$goldWeight = 0.0;
-$goldValue = 0.0;
-$silverWeight = 0.0;
-$silverValue = 0.0;
 $totalInventoryValue = 0.0;
-foreach ($metalStock as $metal) {
-  $name = strtolower((string) ($metal['metal_name'] ?? ''));
-  $weight = (float) $metal['net_weight'];
-  $value = (float) $metal['stock_value'];
-  $totalInventoryValue += $value;
-  if (str_contains($name, 'gold') && (str_contains($name, '22') || str_contains(strtolower((string) $metal['metal_code']), '22'))) {
-    $goldWeight += $weight;
-    $goldValue += $value;
-  }
-  if (str_contains($name, 'silver')) {
-    $silverWeight += $weight;
-    $silverValue += $value;
-  }
+foreach ($productTypeStock as $typeStock) {
+  $totalInventoryValue += (float) ($typeStock['stock_value'] ?? 0);
 }
 
 
@@ -960,28 +958,39 @@ $branchName = (string) ($_SESSION['branch_name'] ?? '');
             </div>
           </div>
         </div>
-        <div class="col-12 col-sm-6 col-xl-2">
-          <div class="card-panel metric-card d-flex gap-2">
-            <div class="metric-icon"><i class="fa-solid fa-cubes-stacked"></i></div>
-            <div>
-              <p class="metric-label">Gold Stock (22K)</p>
-              <div class="metric-value"><?php echo number_format($goldWeight / 1000, 3); ?> <small>kg</small></div>
-              <div class="metric-meta <?php echo !$canViewValue ? 'masked-value' : ''; ?>">
-                <?php echo e(maskedValue($canViewValue, moneyInr($goldValue, $currency) . ' Value')); ?></div>
+        <?php foreach ($productTypeStock as $typeStock): ?>
+          <?php
+            $productType = (string) ($typeStock['product_type'] ?? 'Other');
+            $totalProducts = (int) ($typeStock['total_products'] ?? 0);
+            $totalQuantity = (float) ($typeStock['total_quantity'] ?? 0);
+            $totalGrossWeight = (float) ($typeStock['total_gross_weight'] ?? 0);
+            $typeValue = (float) ($typeStock['stock_value'] ?? 0);
+
+            $typeNameLower = strtolower($productType);
+            if (str_contains($typeNameLower, 'gold')) {
+              $typeIcon = 'fa-solid fa-gem';
+            } elseif (str_contains($typeNameLower, 'silver')) {
+              $typeIcon = 'fa-solid fa-cubes';
+            } elseif (str_contains($typeNameLower, 'diamond')) {
+              $typeIcon = 'fa-regular fa-gem';
+            } else {
+              $typeIcon = 'fa-solid fa-cubes-stacked';
+            }
+          ?>
+          <div class="col-12 col-sm-6 col-xl-2">
+            <div class="card-panel metric-card d-flex gap-2">
+              <div class="metric-icon"><i class="<?php echo e($typeIcon); ?>"></i></div>
+              <div>
+                <p class="metric-label"><?php echo e($productType); ?> Stock</p>
+                <div class="metric-value">
+                  <?php echo number_format($totalGrossWeight / 1000, 3); ?> <small>kg</small>
+                </div>
+                
+                
+              </div>
             </div>
           </div>
-        </div>
-        <div class="col-12 col-sm-6 col-xl-2">
-          <div class="card-panel metric-card d-flex gap-2">
-            <div class="metric-icon"><i class="fa-solid fa-cubes"></i></div>
-            <div>
-              <p class="metric-label">Silver Stock</p>
-              <div class="metric-value"><?php echo number_format($silverWeight / 1000, 3); ?> <small>kg</small></div>
-              <div class="metric-meta <?php echo !$canViewValue ? 'masked-value' : ''; ?>">
-                <?php echo e(maskedValue($canViewValue, moneyInr($silverValue, $currency) . ' Value')); ?></div>
-            </div>
-          </div>
-        </div>
+        <?php endforeach; ?>
         <div class="col-12 col-sm-6 col-xl-2">
           <div class="card-panel metric-card d-flex gap-2">
             <div class="metric-icon"><i class="fa-solid fa-cart-shopping"></i></div>
@@ -1182,16 +1191,18 @@ $branchName = (string) ($_SESSION['branch_name'] ?? '');
             <div class="section-body">
               <div class="row g-2">
                 <div class="col-md-6">
-                  <div class="tax-box"><strong>By Metal</strong>
+                  <div class="tax-box"><strong>By Product Type</strong>
                     <div class="d-flex align-items-center gap-3 mt-3">
                       <div class="donut"></div>
                       <div class="small text-muted">
-                        <?php if (!$metalStock): ?>
+                        <?php if (!$productTypeStock): ?>
                           <div>No stock found.</div>
                         <?php else:
-                          foreach (array_slice($metalStock, 0, 4) as $metal): ?>
-                            <div class="mb-2">● <?php echo e($metal['metal_name'] ?: 'Other'); ?> &nbsp;
-                              <?php echo number_format((float) $metal['net_weight'] / 1000, 3); ?> kg</div>
+                          foreach (array_slice($productTypeStock, 0, 4) as $typeStock): ?>
+                            <div class="mb-2">
+                              ● <?php echo e($typeStock['product_type'] ?: 'Other'); ?> &nbsp;
+                              <?php echo number_format((float) $typeStock['total_gross_weight'] / 1000, 3); ?> kg
+                            </div>
                           <?php endforeach; endif; ?>
                       </div>
                     </div>

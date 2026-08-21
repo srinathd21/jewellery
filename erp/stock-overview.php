@@ -155,7 +155,7 @@ COALESCE(SUM(CASE WHEN COALESCE(ps.quantity,0)>0 THEN 1 ELSE 0 END),0) in_stock,
 COALESCE(SUM(CASE WHEN COALESCE(ps.quantity,0)>0 AND p.minimum_stock_qty>0 AND COALESCE(ps.quantity,0)<=p.minimum_stock_qty THEN 1 ELSE 0 END),0) low_stock,
 COALESCE(SUM(CASE WHEN COALESCE(ps.quantity,0)<=0 THEN 1 ELSE 0 END),0) out_stock,
 COALESCE(SUM(ps.quantity),0) total_qty,
-COALESCE(SUM(ps.net_weight),0) total_weight' . $join . $where;
+COALESCE(SUM(COALESCE(ps.quantity,0) * COALESCE(p.gross_weight,0)),0) total_weight' . $join . $where;
 $stmt = $conn->prepare($summarySql);
 if (!$stmt)
     die('Unable to prepare stock summary query.');
@@ -166,7 +166,17 @@ $stats = $stmt->get_result()->fetch_assoc() ?: [];
 $stmt->close();
 
 $listSql = 'SELECT p.id,p.product_code,p.product_name,p.barcode,p.purity,p.minimum_stock_qty,p.sale_rate,p.image_path,p.is_active,
-COALESCE(p.tax_type, CASE WHEN COALESCE(p.tax_percent,0)>0 THEN \'GST\' ELSE \'Non-GST\' END) tax_type,c.category_name,m.metal_name,COALESCE(u.unit_name,\'Piece\') unit_name,COALESCE(ps.quantity,0) closing_qty,COALESCE(ps.gross_weight,0) gross_weight,COALESCE(ps.net_weight,0) net_weight,COALESCE(ps.average_cost,0) average_cost,COALESCE(ps.stock_value,0) stock_value,ps.updated_at stock_updated_at,COALESCE(mv.opening_qty,0) opening_qty,COALESCE(mv.qty_in,0) qty_in,COALESCE(mv.qty_out,0) qty_out,mv.last_movement_date' . $join . ' LEFT JOIN (SELECT product_id,SUM(CASE WHEN movement_type=\'Opening\' THEN quantity_in-quantity_out ELSE 0 END) opening_qty,SUM(quantity_in) qty_in,SUM(quantity_out) qty_out,MAX(movement_date) last_movement_date FROM stock_movements WHERE business_id=? AND branch_id=? GROUP BY product_id) mv ON mv.product_id=p.id' . $where . ' ORDER BY p.id DESC LIMIT ? OFFSET ?';
+COALESCE(p.tax_type, CASE WHEN COALESCE(p.tax_percent,0)>0 THEN \'GST\' ELSE \'Non-GST\' END) tax_type,c.category_name,m.metal_name,COALESCE(u.unit_name,\'Piece\') unit_name,
+COALESCE(ps.quantity,0) closing_qty,
+COALESCE(p.gross_weight,0) single_gross_weight,
+COALESCE(p.net_weight,0) single_net_weight,
+COALESCE(ps.average_cost,0) average_cost,
+COALESCE(ps.stock_value,0) stock_value,
+ps.updated_at stock_updated_at,
+COALESCE(mv.opening_qty,0) opening_qty,
+COALESCE(mv.qty_in,0) qty_in,
+COALESCE(mv.qty_out,0) qty_out,
+mv.last_movement_date' . $join . ' LEFT JOIN (SELECT product_id,SUM(CASE WHEN movement_type=\'Opening\' THEN quantity_in-quantity_out ELSE 0 END) opening_qty,SUM(quantity_in) qty_in,SUM(quantity_out) qty_out,MAX(movement_date) last_movement_date FROM stock_movements WHERE business_id=? AND branch_id=? GROUP BY product_id) mv ON mv.product_id=p.id' . $where . ' ORDER BY p.id DESC LIMIT ? OFFSET ?';
 $listParams = [$businessId, $branchId];
 $listTypes = 'ii';
 foreach ($params as $v)
@@ -540,7 +550,7 @@ $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
                 <div class="stat-card">
                     <div class="stat-icon"><i class="fa-solid fa-weight-hanging"></i></div>
                     <div>
-                        <div class="stat-label">Total Net Weight</div>
+                        <div class="stat-label">Total Gross Weight</div>
                         <div class="stat-value"><?= number_format((float) ($stats['total_weight'] ?? 0), 3) ?></div>
                     </div>
                 </div>
@@ -616,6 +626,13 @@ $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
                                 foreach ($products as $i => $p):
                                     $qty = (float) $p['closing_qty'];
                                     $min = (float) $p['minimum_stock_qty'];
+
+                                    // Final weight rule:
+                                    // Gross stock weight = stock quantity/pieces x single-product gross weight
+                                    // Net weight = single-product net weight only
+                                    $grossWeight = $qty * (float) ($p['single_gross_weight'] ?? 0);
+                                    $netWeight = (float) ($p['single_net_weight'] ?? 0);
+
                                     $status = 'In Stock';
                                     $cls = 'in-stock';
                                     if ($qty <= 0) {
@@ -651,8 +668,8 @@ $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
                                         <td class="number-in"><?= number_format((float) $p['qty_in'], 3) ?></td>
                                         <td class="number-out"><?= number_format((float) $p['qty_out'], 3) ?></td>
                                         <td class="number-main"><?= number_format($qty, 3) ?>         <?= h($p['unit_name']) ?></td>
-                                        <td><?= number_format((float) $p['gross_weight'], 3) ?></td>
-                                        <td><?= number_format((float) $p['net_weight'], 3) ?></td>
+                                        <td><?= number_format($grossWeight, 3) ?></td>
+                                        <td><?= number_format($netWeight, 3) ?></td>
                                         <td><?= number_format($min, 3) ?></td>
                                         <td>₹<?= number_format((float) $p['stock_value'], 2) ?></td>
                                         <td><span class="badge-stock <?= $cls ?>"><?= $status ?></span></td>

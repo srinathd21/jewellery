@@ -38,6 +38,22 @@ function money($value, string $currency = '₹'): string
     return $currency . ' ' . number_format((float)$value, 2);
 }
 
+function reportPageUrl(array $replace = []): string
+{
+    $query = array_merge($_GET, $replace);
+
+    // Export should never be carried into normal pagination links.
+    unset($query['export']);
+
+    foreach ($query as $key => $value) {
+        if ($value === '' || $value === null) {
+            unset($query[$key]);
+        }
+    }
+
+    return 'reports-stock.php' . ($query ? '?' . http_build_query($query) : '');
+}
+
 function tableExists(mysqli $conn, string $table): bool
 {
     $safe = $conn->real_escape_string($table);
@@ -140,6 +156,13 @@ $dateFrom = trim((string)($_GET['date_from'] ?? date('Y-m-01')));
 $dateTo = trim((string)($_GET['date_to'] ?? date('Y-m-d')));
 $export = trim((string)($_GET['export'] ?? ''));
 
+$page = max(1, (int)($_GET['page'] ?? 1));
+$allowedPerPage = [10, 25, 50, 100];
+$perPage = (int)($_GET['per_page'] ?? 10);
+if (!in_array($perPage, $allowedPerPage, true)) {
+    $perPage = 10;
+}
+
 if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $dateFrom)) {
     $dateFrom = date('Y-m-01');
 }
@@ -207,7 +230,7 @@ if ($stockStatus === 'available') {
     $where .= " AND COALESCE(ps.quantity,0) <= p.minimum_stock_qty ";
 }
 
-$stockRows = fetchRows(
+$allStockRows = fetchRows(
     $conn,
     "
     SELECT
@@ -228,8 +251,8 @@ $stockRows = fetchRows(
         m.metal_name,
         m.metal_code,
         COALESCE(ps.quantity,0) AS quantity,
-        COALESCE(ps.gross_weight,0) AS gross_weight,
-        COALESCE(ps.net_weight,0) AS net_weight,
+        COALESCE(p.gross_weight,0) AS single_gross_weight,
+        COALESCE(p.net_weight,0) AS single_net_weight,
         COALESCE(ps.average_cost,0) AS average_cost,
         COALESCE(ps.stock_value,0) AS stock_value,
         ps.updated_at
@@ -253,8 +276,16 @@ $stockRows = fetchRows(
     array_merge([$branchId], $params)
 );
 
+$totalRows = count($allStockRows);
+$totalPages = max(1, (int)ceil($totalRows / $perPage));
+if ($page > $totalPages) {
+    $page = $totalPages;
+}
+$offset = ($page - 1) * $perPage;
+$stockRows = array_slice($allStockRows, $offset, $perPage);
+
 $summary = [
-    'total_products' => count($stockRows),
+    'total_products' => count($allStockRows),
     'available_products' => 0,
     'low_stock_products' => 0,
     'zero_stock_products' => 0,
@@ -264,7 +295,7 @@ $summary = [
     'stock_value' => 0
 ];
 
-foreach ($stockRows as $row) {
+foreach ($allStockRows as $row) {
     $qty = (float)$row['quantity'];
     $minimum = (float)$row['minimum_stock_qty'];
 
@@ -279,8 +310,13 @@ foreach ($stockRows as $row) {
     }
 
     $summary['quantity'] += $qty;
-    $summary['gross_weight'] += (float)$row['gross_weight'];
-    $summary['net_weight'] += (float)$row['net_weight'];
+
+    // Final weight rule:
+    // Gross stock weight = stock quantity/pieces x single-product gross weight.
+    // Net weight = single-product net weight only.
+    $summary['gross_weight'] += $qty * (float)($row['single_gross_weight'] ?? 0);
+    $summary['net_weight'] += (float)($row['single_net_weight'] ?? 0);
+
     $summary['stock_value'] += (float)$row['stock_value'];
 }
 
@@ -292,8 +328,8 @@ $metalSummary = fetchRows(
         COALESCE(m.metal_code,'OTHER') AS metal_code,
         COUNT(DISTINCT p.id) AS product_count,
         COALESCE(SUM(ps.quantity),0) AS quantity,
-        COALESCE(SUM(ps.gross_weight),0) AS gross_weight,
-        COALESCE(SUM(ps.net_weight),0) AS net_weight,
+        COALESCE(SUM(COALESCE(ps.quantity,0) * COALESCE(p.gross_weight,0)),0) AS gross_weight,
+        COALESCE(SUM(COALESCE(p.net_weight,0)),0) AS net_weight,
         COALESCE(SUM(ps.stock_value),0) AS stock_value
     FROM products p
     LEFT JOIN product_stock ps
@@ -401,7 +437,7 @@ if ($export === 'excel') {
     echo '<table border="1">';
     echo '<tr><th>Product Code</th><th>Product</th><th>Category</th><th>Metal</th><th>Purity</th><th>Quantity</th><th>Gross Weight</th><th>Net Weight</th><th>Average Cost</th><th>Stock Value</th><th>Minimum Stock</th><th>Status</th></tr>';
 
-    foreach ($stockRows as $row) {
+    foreach ($allStockRows as $row) {
         $qty = (float)$row['quantity'];
         $minimum = (float)$row['minimum_stock_qty'];
 
@@ -419,9 +455,12 @@ if ($export === 'excel') {
         echo '<td>' . e($row['category_name'] ?: '—') . '</td>';
         echo '<td>' . e($row['metal_name'] ?: '—') . '</td>';
         echo '<td>' . e($row['purity'] ?: '—') . '</td>';
+        $grossWeight = $qty * (float)($row['single_gross_weight'] ?? 0);
+        $netWeight = (float)($row['single_net_weight'] ?? 0);
+
         echo '<td>' . number_format($qty, 3, '.', '') . '</td>';
-        echo '<td>' . number_format((float)$row['gross_weight'], 3, '.', '') . '</td>';
-        echo '<td>' . number_format((float)$row['net_weight'], 3, '.', '') . '</td>';
+        echo '<td>' . number_format($grossWeight, 3, '.', '') . '</td>';
+        echo '<td>' . number_format($netWeight, 3, '.', '') . '</td>';
         echo '<td>' . number_format((float)$row['average_cost'], 2, '.', '') . '</td>';
         echo '<td>' . number_format((float)$row['stock_value'], 2, '.', '') . '</td>';
         echo '<td>' . number_format($minimum, 3, '.', '') . '</td>';
@@ -733,6 +772,48 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
             color:var(--muted);
         }
 
+        .pagination-wrap{
+            display:flex;
+            align-items:center;
+            justify-content:space-between;
+            gap:12px;
+            padding:10px 12px;
+            border-top:1px solid var(--line);
+            color:var(--muted);
+            font-size:9px;
+        }
+
+        .pagination{
+            margin:0;
+            gap:4px;
+            flex-wrap:wrap;
+        }
+
+        .pagination .page-link{
+            min-width:32px;
+            height:32px;
+            display:grid;
+            place-items:center;
+            padding:0 9px;
+            border:1px solid var(--line);
+            border-radius:8px !important;
+            background:var(--card-bg);
+            color:var(--text);
+            font-size:9px;
+            box-shadow:none;
+        }
+
+        .pagination .page-item.active .page-link{
+            background:var(--primary);
+            border-color:var(--primary);
+            color:#fff;
+        }
+
+        .pagination .page-item.disabled .page-link{
+            opacity:.45;
+            pointer-events:none;
+        }
+
         .print-header{
             display:none;
         }
@@ -754,6 +835,7 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
         @media(max-width:767px){
             .report-head{align-items:flex-start;flex-direction:column}
             .summary-grid,.filter-grid,.metal-grid{grid-template-columns:1fr}
+            .pagination-wrap{align-items:flex-start;flex-direction:column}
         }
 
         @media print{
@@ -821,6 +903,7 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
         </section>
 
         <form method="get" class="report-card filter-card">
+            <input type="hidden" name="page" value="1">
             <div class="filter-grid">
                 <select name="category_id" class="form-select">
                     <option value="">All Categories</option>
@@ -853,6 +936,14 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
                        value="<?= e($search) ?>"
                        placeholder="Product, code, barcode, HSN...">
 
+                <select name="per_page" class="form-select" aria-label="Rows per page">
+                    <?php foreach ($allowedPerPage as $size): ?>
+                        <option value="<?= $size ?>" <?= $perPage === $size ? 'selected' : '' ?>>
+                            <?= $size ?> Rows
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+
                 <button type="submit" class="btn-theme">
                     <i class="fa-solid fa-filter"></i>Apply Filter
                 </button>
@@ -883,16 +974,16 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
             <div class="summary-card">
                 <div class="summary-icon"><i class="fa-solid fa-weight-scale"></i></div>
                 <div>
-                    <div class="summary-label">Gross Weight</div>
-                    <div class="summary-value"><?= number_format((float)$summary['gross_weight'], 3) ?> g</div>
+                    <div class="summary-label">Total Gross Weight</div>
+                    <div class="summary-value"><?= number_format(((float)$summary['gross_weight']) / 1000, 3) ?> kg</div>
                 </div>
             </div>
 
             <div class="summary-card">
                 <div class="summary-icon"><i class="fa-solid fa-scale-balanced"></i></div>
                 <div>
-                    <div class="summary-label">Net Weight</div>
-                    <div class="summary-value"><?= number_format((float)$summary['net_weight'], 3) ?> g</div>
+                    <div class="summary-label">Single Net Weight Total</div>
+                    <div class="summary-value"><?= number_format(((float)$summary['net_weight']) / 1000, 3) ?> kg</div>
                 </div>
             </div>
 
@@ -968,6 +1059,12 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
                                     $qty = (float)$row['quantity'];
                                     $minimum = (float)$row['minimum_stock_qty'];
 
+                                    // Final weight rule:
+                                    // Gross = stock quantity x single-product gross weight.
+                                    // Net = single-product net weight only.
+                                    $grossWeight = $qty * (float)($row['single_gross_weight'] ?? 0);
+                                    $netWeight = (float)($row['single_net_weight'] ?? 0);
+
                                     if ($qty <= 0) {
                                         $statusText = 'Out of Stock';
                                         $statusClass = 'badge-zero';
@@ -994,8 +1091,8 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
                                         </td>
                                         <td><?= $row['purity'] !== null ? e(number_format((float)$row['purity'], 4)) : '—' ?></td>
                                         <td class="text-number"><?= number_format($qty, 3) ?></td>
-                                        <td class="text-number"><?= number_format((float)$row['gross_weight'], 3) ?> g</td>
-                                        <td class="text-number"><?= number_format((float)$row['net_weight'], 3) ?> g</td>
+                                        <td class="text-number"><?= number_format($grossWeight, 3) ?> g</td>
+                                        <td class="text-number"><?= number_format($netWeight, 3) ?> g</td>
                                         <td class="text-number"><?= e(money($row['average_cost'], $currency)) ?></td>
                                         <td class="text-number"><?= e(money($row['stock_value'], $currency)) ?></td>
                                         <td class="text-number"><?= number_format($minimum, 3) ?></td>
@@ -1012,6 +1109,82 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
                             <?php endif; ?>
                             </tbody>
                         </table>
+                    </div>
+
+                    <div class="pagination-wrap">
+                        <div>
+                            Showing
+                            <?= $totalRows > 0 ? ($offset + 1) : 0 ?>
+                            to
+                            <?= $totalRows > 0 ? min($offset + $perPage, $totalRows) : 0 ?>
+                            of
+                            <?= $totalRows ?>
+                            products
+                        </div>
+
+                        <?php if ($totalPages > 1): ?>
+                            <nav aria-label="Stock report pagination">
+                                <ul class="pagination pagination-sm">
+                                    <li class="page-item <?= $page <= 1 ? 'disabled' : '' ?>">
+                                        <a class="page-link"
+                                           href="<?= e(reportPageUrl(['page' => max(1, $page - 1), 'per_page' => $perPage])) ?>"
+                                           aria-label="Previous">
+                                            <i class="fa-solid fa-angle-left"></i>
+                                        </a>
+                                    </li>
+
+                                    <?php
+                                    $startPage = max(1, $page - 2);
+                                    $endPage = min($totalPages, $page + 2);
+
+                                    if ($page <= 3) {
+                                        $endPage = min($totalPages, 5);
+                                    }
+                                    if ($page >= $totalPages - 2) {
+                                        $startPage = max(1, $totalPages - 4);
+                                    }
+                                    ?>
+
+                                    <?php if ($startPage > 1): ?>
+                                        <li class="page-item">
+                                            <a class="page-link" href="<?= e(reportPageUrl(['page' => 1, 'per_page' => $perPage])) ?>">1</a>
+                                        </li>
+                                        <?php if ($startPage > 2): ?>
+                                            <li class="page-item disabled"><span class="page-link">…</span></li>
+                                        <?php endif; ?>
+                                    <?php endif; ?>
+
+                                    <?php for ($pg = $startPage; $pg <= $endPage; $pg++): ?>
+                                        <li class="page-item <?= $pg === $page ? 'active' : '' ?>">
+                                            <a class="page-link"
+                                               href="<?= e(reportPageUrl(['page' => $pg, 'per_page' => $perPage])) ?>">
+                                                <?= $pg ?>
+                                            </a>
+                                        </li>
+                                    <?php endfor; ?>
+
+                                    <?php if ($endPage < $totalPages): ?>
+                                        <?php if ($endPage < $totalPages - 1): ?>
+                                            <li class="page-item disabled"><span class="page-link">…</span></li>
+                                        <?php endif; ?>
+                                        <li class="page-item">
+                                            <a class="page-link"
+                                               href="<?= e(reportPageUrl(['page' => $totalPages, 'per_page' => $perPage])) ?>">
+                                                <?= $totalPages ?>
+                                            </a>
+                                        </li>
+                                    <?php endif; ?>
+
+                                    <li class="page-item <?= $page >= $totalPages ? 'disabled' : '' ?>">
+                                        <a class="page-link"
+                                           href="<?= e(reportPageUrl(['page' => min($totalPages, $page + 1), 'per_page' => $perPage])) ?>"
+                                           aria-label="Next">
+                                            <i class="fa-solid fa-angle-right"></i>
+                                        </a>
+                                    </li>
+                                </ul>
+                            </nav>
+                        <?php endif; ?>
                     </div>
                 </div>
 
