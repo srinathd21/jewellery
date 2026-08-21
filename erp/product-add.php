@@ -68,6 +68,42 @@ if ($stmt) {
     }
     $stmt->close();
 }
+
+$metalPurities = [];
+$purityTableCheck = $conn->query("SHOW TABLES LIKE 'metal_rates'");
+$metalRatesExists = $purityTableCheck && $purityTableCheck->num_rows > 0;
+if ($metalRatesExists) {
+    $purityColumnCheck = $conn->query("SHOW COLUMNS FROM metal_rates LIKE 'purity'");
+    $metalIdColumnCheck = $conn->query("SHOW COLUMNS FROM metal_rates LIKE 'metal_id'");
+    if ($purityColumnCheck && $purityColumnCheck->num_rows > 0 && $metalIdColumnCheck && $metalIdColumnCheck->num_rows > 0) {
+        $sql = "SELECT DISTINCT metal_id, purity
+                FROM metal_rates
+                WHERE business_id = ?
+                  AND metal_id IS NOT NULL
+                  AND purity IS NOT NULL
+                  AND TRIM(CAST(purity AS CHAR)) <> ''
+                ORDER BY metal_id ASC, CAST(purity AS DECIMAL(12,4)) DESC, purity ASC";
+        $stmt = $conn->prepare($sql);
+        if ($stmt) {
+            $stmt->bind_param('i', $businessId);
+            $stmt->execute();
+            $r = $stmt->get_result();
+            while ($x = $r->fetch_assoc()) {
+                $mid = (int) ($x['metal_id'] ?? 0);
+                $purityValue = trim((string) ($x['purity'] ?? ''));
+                if ($mid > 0 && $purityValue !== '') {
+                    if (!isset($metalPurities[$mid])) {
+                        $metalPurities[$mid] = [];
+                    }
+                    if (!in_array($purityValue, $metalPurities[$mid], true)) {
+                        $metalPurities[$mid][] = $purityValue;
+                    }
+                }
+            }
+            $stmt->close();
+        }
+    }
+}
 $theme = ['primary_color' => '#d89416', 'primary_dark_color' => '#b86a0b', 'primary_soft_color' => '#fff6e5', 'page_background' => '#f4f3f0', 'card_background' => '#fff', 'text_color' => '#171717', 'muted_text_color' => '#7d8794', 'border_color' => '#e8e8e8', 'font_family' => 'Inter', 'heading_font_family' => 'Playfair Display', 'border_radius_px' => 12, 'sidebar_width_px' => 230, 'sidebar_gradient_1' => '#171c21', 'sidebar_gradient_2' => '#20272d', 'sidebar_gradient_3' => '#101419'];
 $stmt = $conn->prepare('SELECT * FROM business_theme_settings WHERE business_id=? LIMIT 1');
 if ($stmt) {
@@ -278,8 +314,6 @@ $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
                             <label class="field-label">HSN code</label>
                             <input class="form-control" name="hsn_code" id="hsnCodeInput" maxlength="20">
                         </div>
-                        <div class="col-md-3"><label class="field-label">Purity %</label><input class="form-control"
-                                type="number" step="0.0001" name="purity" value="91.6000"></div>
                     </div>
                 </div>
                 <div class="section">
@@ -287,12 +321,20 @@ $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
                     <div class="row g-3">
                         <div class="col-md-3">
                             <label class="field-label">Metal</label>
-                            <select class="form-select" name="metal_id">
+                            <select class="form-select" name="metal_id" id="metalSelect">
                                 <option value="0">Select metal</option>
                                 <?php foreach ($metals as $x): ?>
                                     <option value="<?= (int) $x['id'] ?>"><?= e($x['name']) ?></option>
                                 <?php endforeach ?>
                             </select>
+                        </div>
+
+                        <div class="col-md-3">
+                            <label class="field-label">Purity</label>
+                            <select class="form-select" name="purity" id="puritySelect" disabled>
+                                <option value="">Select metal first</option>
+                            </select>
+                            <div class="small text-muted mt-1" id="purityHelp">Purity values are loaded based on the selected metal.</div>
                         </div>
 
                         <div class="col-md-3">
@@ -439,6 +481,53 @@ $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
             const taxPercentInput = document.getElementById('taxPercentInput');
             const gstTypeFieldWrap = document.getElementById('gstTypeFieldWrap');
             const gstTypeSelect = document.getElementById('gstTypeSelect');
+            const metalSelect = document.getElementById('metalSelect');
+            const puritySelect = document.getElementById('puritySelect');
+            const purityHelp = document.getElementById('purityHelp');
+            const metalPurities = <?= json_encode($metalPurities, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
+
+            function loadPuritiesForMetal() {
+                if (!metalSelect || !puritySelect) return;
+
+                const metalId = String(parseInt(metalSelect.value || '0', 10) || 0);
+                const values = Array.isArray(metalPurities[metalId]) ? metalPurities[metalId] : [];
+                const previousValue = String(puritySelect.value || '');
+
+                puritySelect.innerHTML = '';
+
+                if (metalId === '0') {
+                    puritySelect.disabled = true;
+                    puritySelect.innerHTML = '<option value="">Select metal first</option>';
+                    if (purityHelp) purityHelp.textContent = 'Purity values are loaded based on the selected metal.';
+                    return;
+                }
+
+                if (!values.length) {
+                    puritySelect.disabled = true;
+                    puritySelect.innerHTML = '<option value="">No purity configured for this metal</option>';
+                    if (purityHelp) purityHelp.textContent = 'No purity values are available in Metal Rates for the selected metal.';
+                    return;
+                }
+
+                puritySelect.disabled = false;
+                puritySelect.innerHTML = '<option value="">Select purity</option>' +
+                    values.map(value => '<option value="' + String(value).replace(/"/g, '&quot;') + '">' + String(value) + '</option>').join('');
+
+                if (previousValue && values.includes(previousValue)) {
+                    puritySelect.value = previousValue;
+                } else if (values.length === 1) {
+                    puritySelect.value = String(values[0]);
+                }
+
+                if (purityHelp) purityHelp.textContent = values.length + ' purity option(s) available for this metal.';
+            }
+
+            metalSelect?.addEventListener('change', () => {
+                loadPuritiesForMetal();
+                markDirty();
+            });
+            loadPuritiesForMetal();
+
             let savedGstTaxPercent = taxPercentInput ? (taxPercentInput.value || '3') : '3';
             let savedHsnCode = hsnCodeInput ? hsnCodeInput.value : '';
 

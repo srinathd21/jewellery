@@ -164,21 +164,37 @@ if(isset($_GET['action']) && $_GET['action']==='share_link'){
 try{
     $saleRows=allRows($conn,"SELECT s.*,c.customer_code,c.mobile customer_master_mobile,c.email,c.gstin customer_gstin,c.address_line1,c.address_line2,c.city,c.state,c.pincode,b.business_name,b.legal_name,b.mobile business_mobile,b.email business_email,b.website,b.gstin business_gstin,b.pan_no,br.branch_name,br.mobile branch_mobile,br.email branch_email,br.address_line1 branch_address1,br.address_line2 branch_address2,br.city branch_city,br.state branch_state,br.pincode branch_pincode,br.gstin branch_gstin FROM sales s LEFT JOIN customers c ON c.id=s.customer_id LEFT JOIN businesses b ON b.id=s.business_id LEFT JOIN branches br ON br.id=s.branch_id WHERE s.id=? AND s.business_id=? LIMIT 1",'ii',[$saleId,$businessId]);
     if(!$saleRows) die('Sale not found.'); $s=$saleRows[0];
-    $items=allRows($conn,"SELECT si.*,p.product_code,p.hsn_code product_hsn,p.metal_id,
-        COALESCE((
-            SELECT mr.rate_per_gram
-            FROM metal_rates mr
-            WHERE mr.business_id=si.business_id
-              AND mr.metal_id=p.metal_id
-              AND mr.is_current=1
-              AND (mr.branch_id=si.branch_id OR mr.branch_id IS NULL)
-            ORDER BY (mr.branch_id=si.branch_id) DESC,mr.effective_from DESC,mr.id DESC
-            LIMIT 1
-        ),0) AS today_rate
+    $items=allRows($conn,"SELECT si.*,p.product_code,p.hsn_code product_hsn,p.metal_id
         FROM sale_items si
         LEFT JOIN products p ON p.id=si.product_id
         WHERE si.sale_id=? AND si.business_id=?
         ORDER BY si.sort_order,si.id",'ii',[$saleId,$businessId]);
+
+    // Show only today's/current Gold and Silver rates on the invoice.
+    $todayMetalRates=[];
+    if(tableExists($conn,'metal_rates') && tableExists($conn,'metals')){
+        $rateRows=allRows($conn,"SELECT mr.id,mr.metal_id,mr.rate_per_gram,mr.purity,mr.branch_id,mr.effective_from,m.metal_name
+            FROM metal_rates mr
+            INNER JOIN metals m ON m.id=mr.metal_id AND m.business_id=mr.business_id
+            WHERE mr.business_id=?
+              AND mr.is_current=1
+              AND (mr.branch_id=? OR mr.branch_id IS NULL)
+              AND (LOWER(m.metal_name) LIKE '%gold%' OR LOWER(m.metal_name) LIKE '%silver%')
+            ORDER BY
+              CASE WHEN mr.branch_id=? THEN 0 ELSE 1 END,
+              mr.effective_from DESC,
+              mr.id DESC",'iii',[$businessId,(int)$s['branch_id'],(int)$s['branch_id']]);
+
+        $seenRates=[];
+        foreach($rateRows as $rateRow){
+            $metalName=trim((string)($rateRow['metal_name']??''));
+            $purity=trim((string)($rateRow['purity']??''));
+            $key=strtolower($metalName).'|'.strtolower($purity);
+            if(isset($seenRates[$key])) continue;
+            $seenRates[$key]=true;
+            $todayMetalRates[]=$rateRow;
+        }
+    }
     $pays=allRows($conn,"SELECT sp.*,pm.method_name FROM sale_payments sp LEFT JOIN payment_methods pm ON pm.id=sp.payment_method_id WHERE sp.sale_id=? AND sp.business_id=? ORDER BY sp.id",'ii',[$saleId,$businessId]);
     $claims=allRows($conn,"SELECT sc.*,cg.group_name,cg.group_no,cm.ticket_no FROM sales_chit_claims sc LEFT JOIN chit_groups cg ON cg.id=sc.chit_group_id LEFT JOIN chit_members cm ON cm.id=sc.chit_member_id WHERE sc.sale_id=? AND sc.business_id=? AND sc.status='Posted'",'ii',[$saleId,$businessId]);
     $ex=allRows($conn,"SELECT * FROM sale_exchange_items WHERE sale_id=? AND business_id=? ORDER BY id",'ii',[$saleId,$businessId]);
@@ -402,9 +418,9 @@ if($terms===''){
 }
 
 // Keep the summary block together where possible. The left side contains
-// Terms & Conditions followed immediately by Rate Details; totals remain right.
+// Terms & Conditions followed by today's Gold and Silver rates; totals remain right.
 $termLineEstimate=max(1,substr_count($terms,"\n")+1);
-$rateHeight=$items ? (14+(count($items)*6)) : 0;
+$rateHeight=$todayMetalRates ? (14+(count($todayMetalRates)*6)) : 0;
 $leftHeight=6+($termLineEstimate*4)+2+$rateHeight;
 $pdf->need(max(68,$leftHeight+3));
 $summaryY=$pdf->GetY();
@@ -446,52 +462,47 @@ $pdf->SetX(8);$pdf->SetTextColor(36);$pdf->SetFont('Arial','',6);
 $pdf->MultiCell($notesW,4,txt($terms),1,'L');
 $notesBottom=$pdf->GetY();
 
-/* ---------------- LEFT SIDE: RATE DETAILS ----------------
- * Today's Rate = current active branch/global rate for the item's metal.
- * Applied Rate = the metal_rate saved on this invoice item.
- */
+/* ---------------- LEFT SIDE: TODAY GOLD & SILVER RATES ---------------- */
 $rateBottom=$notesBottom;
-if($items){
-    $rateWs=[10,50,26,26]; // total = 112 mm (same width as Terms section)
-    $drawRateHead=function()use($pdf,$notesW,$rateWs,$GS,$P,$D){
-        $pdf->SetX(8);
-        $pdf->SetFillColor(...$GS);$pdf->SetDrawColor(...$D);$pdf->SetTextColor(...$P);$pdf->SetFont('Arial','B',7);
-        $pdf->Cell($notesW,6,txt('RATE DETAILS'),1,1,'L',true);
-        $pdf->SetX(8);
-        $pdf->SetFillColor(...$P);$pdf->SetTextColor(255);$pdf->SetFont('Arial','B',6.1);
-        foreach(['S.No','Description',"Today's Rate / g",'Applied Rate / g'] as $idx=>$head){
-            $pdf->Cell($rateWs[$idx],7,txt($head),1,0,'C',true);
-        }
-        $pdf->Ln();
-        $pdf->SetTextColor(36);$pdf->SetDrawColor(...$D);$pdf->SetFont('Arial','',6.6);
-    };
+if($todayMetalRates){
+    $rateWs=[42,30,40]; // total = 112 mm
+    $pdf->SetY($notesBottom+2);
+    $pdf->SetX(8);
+    $pdf->SetFillColor(...$GS);$pdf->SetDrawColor(...$D);$pdf->SetTextColor(...$P);$pdf->SetFont('Arial','B',7);
+    $pdf->Cell($notesW,6,txt("TODAY'S GOLD & SILVER RATES"),1,1,'L',true);
 
-    $requiredRateHeight=15+(count($items)*6);
-    if($pdf->GetY()+2+$requiredRateHeight>$pdf->GetPageHeight()-17){
-        $pdf->AddPage();
-        $pdf->SetY(14);
-    }else{
-        $pdf->SetY($notesBottom+2);
+    $pdf->SetX(8);
+    $pdf->SetFillColor(...$P);$pdf->SetTextColor(255);$pdf->SetFont('Arial','B',6.1);
+    foreach(['Metal','Purity',"Today's Rate / g"] as $idx=>$head){
+        $pdf->Cell($rateWs[$idx],7,txt($head),1,0,'C',true);
     }
+    $pdf->Ln();
 
-    $drawRateHead();
-    foreach($items as $idx=>$item){
+    $pdf->SetTextColor(36);$pdf->SetDrawColor(...$D);$pdf->SetFont('Arial','',6.6);
+    foreach($todayMetalRates as $rateRow){
         if($pdf->GetY()+6>$pdf->GetPageHeight()-17){
-            $pdf->AddPage();$pdf->SetY(14);$drawRateHead();
+            $pdf->AddPage();
+            $pdf->SetY(14);
+            $pdf->SetX(8);
+            $pdf->SetFillColor(...$P);$pdf->SetTextColor(255);$pdf->SetFont('Arial','B',6.1);
+            foreach(['Metal','Purity',"Today's Rate / g"] as $idx=>$head){
+                $pdf->Cell($rateWs[$idx],7,txt($head),1,0,'C',true);
+            }
+            $pdf->Ln();
+            $pdf->SetTextColor(36);$pdf->SetDrawColor(...$D);$pdf->SetFont('Arial','',6.6);
         }
 
-        $todayRate=(float)($item['today_rate']??0);
-        $appliedRate=(float)($item['metal_rate']??$item['rate_per_gram']??0);
-        $rateVals=[
-            $idx+1,
-            (string)($item['item_name']??'-'),
-            $todayRate>0 ? 'Rs. '.number_format($todayRate,2) : '-',
-            $appliedRate>0 ? 'Rs. '.number_format($appliedRate,2) : '-'
+        $metalName=trim((string)($rateRow['metal_name']??'-'));
+        $purity=trim((string)($rateRow['purity']??''));
+        $todayRate=(float)($rateRow['rate_per_gram']??0);
+        $values=[
+            $metalName!==''?$metalName:'-',
+            $purity!==''?$purity:'-',
+            $todayRate>0?'Rs. '.number_format($todayRate,2):'-'
         ];
-
         $pdf->SetX(8);
-        foreach($rateVals as $col=>$value){
-            $pdf->Cell($rateWs[$col],6,txt($value),1,0,$col===1?'L':($col===0?'C':'R'));
+        foreach($values as $col=>$value){
+            $pdf->Cell($rateWs[$col],6,txt($value),1,0,$col===0?'L':($col===1?'C':'R'));
         }
         $pdf->Ln();
     }

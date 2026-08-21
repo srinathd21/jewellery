@@ -1,5 +1,5 @@
 <?php
-/* customers1.php - overflow and URL pagination corrected */
+/* customersphp - overflow and URL pagination corrected */
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
@@ -357,7 +357,7 @@ function customerPageUrl(int $targetPage): string
     if ((int) ($query['page'] ?? 1) === 1) {
         unset($query['page']);
     }
-    return 'customers1.php' . ($query ? '?' . http_build_query($query) : '');
+    return 'customersphp' . ($query ? '?' . http_build_query($query) : '');
 }
 
 $paginationFrom = $totalFilteredCustomers > 0 ? $offset + 1 : 0;
@@ -1023,7 +1023,7 @@ $flashMessage = [
                 </div>
             </div>
 
-            <form class="toolbar" method="get" action="customers1.php">
+            <form class="toolbar" method="get" action="customers.php">
                 <div class="customer-filter-grid">
                     <div class="search-box"><i class="fa-solid fa-magnifying-glass"></i><input type="search"
                             name="search" class="form-control" placeholder="Search name, code, mobile, GSTIN, city..."
@@ -1063,7 +1063,7 @@ $flashMessage = [
                     <div class="filter-result-note">Use filters and click Apply to update the customer list.</div>
                     <div class="filter-actions">
                         <button type="submit" class="btn btn-light btn-sm"><i class="fa-solid fa-filter me-1"></i>Apply</button>
-                        <?php if ($filterActive): ?><a class="btn btn-light btn-sm" href="customers1.php"><i class="fa-solid fa-rotate-left me-1"></i>Reset</a><?php endif; ?>
+                        <?php if ($filterActive): ?><a class="btn btn-light btn-sm" href="customers.php"><i class="fa-solid fa-rotate-left me-1"></i>Reset</a><?php endif; ?>
                         <?php if ($canCreate): ?><a href="customer-add.php" class="btn btn-theme btn-sm"><i class="fa-solid fa-plus me-1"></i>Add Customer</a><?php endif; ?>
                     </div>
                 </div>
