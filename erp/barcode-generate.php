@@ -1048,7 +1048,7 @@ $currencySymbol = (string) ($_SESSION['currency_symbol'] ?? '₹');
                                         <th>Product</th>
                                         <th>Category / Metal</th>
                                         <th>Barcode</th>
-                                        <th class="text-end">Sale Rate</th>
+                                        <th class="text-end">Net Weight</th>
                                         <th class="text-center" style="width:115px">Count</th>
                                         <th class="text-center" style="width:105px">Status</th>
                                     </tr>
@@ -1264,8 +1264,8 @@ $currencySymbol = (string) ($_SESSION['currency_symbol'] ?? '₹');
                 const printable =
                     isValidBarcode(barcode);
 
-                const price =
-                    Number(product.sale_rate || 0);
+                const netWeight =
+                    Number(product.net_weight || 0);
 
                 return (
                     '<tr data-id="' +
@@ -1313,10 +1313,9 @@ $currencySymbol = (string) ($_SESSION['currency_symbol'] ?? '₹');
                     barcodeCellHtml(product) +
                     '</td>' +
 
-                    '<td class="text-end" data-label="Sale Rate">' +
+                    '<td class="text-end" data-label="Net Weight">' +
                     '<span class="price-text">' +
-                    escapeHtml(currencySymbol) +
-                    price.toFixed(2) +
+                    netWeight.toFixed(3) + ' g' +
                     '</span>' +
                     '</td>' +
 
@@ -1639,8 +1638,8 @@ $currencySymbol = (string) ($_SESSION['currency_symbol'] ?? '₹');
                     );
                 }
 
-                const price =
-                    Number(product.sale_rate || 0);
+                const netWeight =
+                    Number(product.net_weight || 0);
 
                 if (!Number.isFinite(price) || price <= 0) {
                     throw new Error(
@@ -1658,7 +1657,7 @@ $currencySymbol = (string) ($_SESSION['currency_symbol'] ?? '₹');
                         String(
                             product.product_name || ''
                         ).trim(),
-                    price: price,
+                    netWeight: netWeight,
                     barcode: barcode,
                     quantity: quantity
                 };
