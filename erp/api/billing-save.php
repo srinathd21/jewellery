@@ -390,6 +390,42 @@ function nextDocumentNumber(mysqli $c, int $bid, int $branch, string $date, stri
     return ['document_no' => renderNo($setting, $seq, $date), 'setting_id' => (int)$setting['id'], 'document_type' => $documentType];
 }
 
+
+function resolveInvoiceSettingId(mysqli $c, int $businessId, int $branchId, string $documentType): ?int
+{
+    if (!tableExists($c, 'invoice_settings')) {
+        return null;
+    }
+
+    // sales.invoice_setting_id / estimates.invoice_setting_id reference invoice_settings.id.
+    // Do NOT use document_number_settings.id here.
+    $invoiceDocumentType = $documentType === 'Non GST Invoice' ? 'Invoice' : $documentType;
+
+    if (!in_array($invoiceDocumentType, ['Invoice', 'Estimate'], true)) {
+        return null;
+    }
+
+    $stmt = prepareOrFail(
+        $c,
+        "SELECT id
+         FROM invoice_settings
+         WHERE business_id=?
+           AND document_type=?
+           AND is_active=1
+           AND (branch_id=? OR branch_id IS NULL)
+         ORDER BY (branch_id=?) DESC, is_default DESC, id DESC
+         LIMIT 1",
+        'Unable to load invoice print setting'
+    );
+
+    $stmt->bind_param('isii', $businessId, $invoiceDocumentType, $branchId, $branchId);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    return $row ? (int)$row['id'] : null;
+}
+
 function billingValidatePaymentRows(mysqli $c, int $businessId, array $payMethods, array $payAmounts, array $payRefs, float $netPayable): array
 {
     $payments = [];
@@ -1043,7 +1079,7 @@ try {
             }
         }
 
-        $estimateSettingId = (int)($number['setting_id'] ?? 0) ?: null;
+        $estimateSettingId = resolveInvoiceSettingId($conn, $businessId, $branchId, 'Estimate');
         $estimateNo = (string)$number['document_no'];
         $customerName = (string)$customer['customer_name'];
         $customerMobile = (string)$customer['mobile'];
@@ -1155,7 +1191,7 @@ try {
         ]);
     }
     $sale = prepareOrFail($conn, 'INSERT INTO sales(business_id,branch_id,invoice_setting_id,invoice_no,invoice_date,invoice_time,customer_id,customer_name,customer_mobile,bill_type,tax_type,subtotal,discount_amount,taxable_amount,cgst_amount,sgst_amount,igst_amount,round_off,grand_total,exchange_amount,chit_claim_amount,net_payable_amount,paid_amount,balance_amount,payment_status,workflow_status,notes,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,\'Posted\',?,?)', 'Unable to prepare sale insert. Confirm sales.exchange_amount exists');
-    $igst=0.0; $storedGrandTotal=$grossGrandTotal; $invoiceSettingId=(int)($number['setting_id']??0)?:null; $invoiceNo=(string)$number['document_no']; $customerName=(string)$customer['customer_name']; $customerMobile=(string)$customer['mobile'];
+    $igst=0.0; $storedGrandTotal=$grossGrandTotal; $invoiceSettingId=resolveInvoiceSettingId($conn,$businessId,$branchId,$documentType); $invoiceNo=(string)$number['document_no']; $customerName=(string)$customer['customer_name']; $customerMobile=(string)$customer['mobile'];
     $saleParams=[$businessId,$branchId,$invoiceSettingId,$invoiceNo,$invoiceDate,$invoiceTime,$customerId,$customerName,$customerMobile,$billType,$taxType,$subtotal,$discountTotal,$taxable,$cgst,$sgst,$igst,$round,$storedGrandTotal,$exchangeTotal,$claimTotal,$netPayable,$paid,$balance,$paymentStatus,$notes,$userId];
     $saleTypes='iiisssissss'.str_repeat('d',13).'ssi'; bindDynamic($sale,$saleTypes,$saleParams);
     if (!$sale->execute())
