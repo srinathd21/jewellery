@@ -283,7 +283,9 @@ $reregisterFrom = $editId > 0 ? 0 : (isset($_GET['reregister_from']) ? max(0, (i
                                     <div class="col-md-4"><label class="form-label">Pawn Category *</label><select
                                             name="pawn_category_id" id="categorySelect" class="form-select" required>
                                             <option value="">Select category</option>
-                                        </select><div class="small text-muted mt-1">Category Max Loan: <strong id="categoryPercent">-</strong></div></div>
+                                        </select>
+                                        <div class="small text-muted mt-1">Category Max Loan: <strong id="categoryPercent">-</strong></div>
+                                    </div>
                                     <div class="col-md-4"><label class="form-label">Loan Type</label><input
                                             name="loan_type" class="form-control" value="General"></div>
                                     <div class="col-md-4"><label class="form-label">Primary Metal</label><select
@@ -432,27 +434,121 @@ $reregisterFrom = $editId > 0 ? 0 : (isset($_GET['reregister_from']) ? max(0, (i
             <?php include('includes/footer.php'); ?>
         </div>
     </main>
+    <!-- jQuery must be loaded before any jQuery plugin such as Select2 -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+
     <?php include('includes/script.php'); ?>
+
+    <!-- Select2 must be loaded after jQuery -->
     <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0/dist/js/select2.min.js"></script>
+
     <script src="assets/js/script.js"></script>
     <script>
-        (function () {
+        (function() {
             'use strict';
-            var api = 'api/pawn-entry.php', csrf = <?= json_encode($csrfToken) ?>, reregisterFrom = <?= (int) $reregisterFrom ?>, editId = <?= (int) $editId ?>;
-            var data = { customers: [], categories: [], metals: [], metal_rates: [], payment_methods: [], schemes: [] };
+            var api = 'api/pawn-entry.php',
+                csrf = <?= json_encode($csrfToken) ?>,
+                reregisterFrom = <?= (int) $reregisterFrom ?>,
+                editId = <?= (int) $editId ?>;
+            var data = {
+                customers: [],
+                categories: [],
+                metals: [],
+                metal_rates: [],
+                payment_methods: [],
+                schemes: []
+            };
             var maxLoanPercent = 100;
-            function $(id) { return document.getElementById(id) }
-            function esc(v) { return String(v == null ? '' : v).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[c] }) }
-            function money(v) { return Number(v || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }
-            function toast(ok, msg) { var x = document.createElement('div'); x.className = 'theme-toast ' + (ok ? 'theme-toast-success' : 'theme-toast-error'); x.textContent = msg; document.body.appendChild(x); setTimeout(function () { x.remove() }, 3800) }
-            async function req(obj) { var f = new FormData(); Object.keys(obj).forEach(function (k) { f.append(k, obj[k]) }); f.append('csrf_token', csrf); var r = await fetch(api, { method: 'POST', body: f, credentials: 'same-origin', headers: { Accept: 'application/json' } }); var raw = await r.text(); var j; try { j = JSON.parse(raw) } catch (e) { throw new Error('Pawn Entry API returned invalid JSON. HTTP ' + r.status + ': ' + raw.replace(/<[^>]*>/g, ' ').slice(0, 300)) } if (!r.ok || !j.success) throw new Error(j.message || 'Request failed'); return j }
-            function selectedCustomer() { return data.customers.find(function (x) { return String(x.id) === String($('customerSelect').value) }) || null }
-            function selectedScheme() { return data.schemes.find(function (x) { return String(x.id) === String($('schemeSelect').value) }) || null }
-            function selectedCategory() { return data.categories.find(function (x) { return String(x.id) === String($('categorySelect').value) }) || null }
-            function selectedFirstStep() { var s = selectedScheme(); return s && s.steps && s.steps.length ? s.steps[0] : null }
-            function metalOptions(sel) { return data.metals.map(function (m) { return '<option value="' + m.id + '" ' + (String(sel || '') === String(m.id) ? 'selected' : '') + '>' + esc(m.metal_name) + '</option>' }).join('') }
+
+            function $(id) {
+                return document.getElementById(id)
+            }
+
+            function esc(v) {
+                return String(v == null ? '' : v).replace(/[&<>"']/g, function(c) {
+                    return {
+                        '&': '&amp;',
+                        '<': '&lt;',
+                        '>': '&gt;',
+                        '"': '&quot;',
+                        "'": '&#039;'
+                    } [c]
+                })
+            }
+
+            function money(v) {
+                return Number(v || 0).toLocaleString('en-IN', {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2
+                })
+            }
+
+            function toast(ok, msg) {
+                var x = document.createElement('div');
+                x.className = 'theme-toast ' + (ok ? 'theme-toast-success' : 'theme-toast-error');
+                x.textContent = msg;
+                document.body.appendChild(x);
+                setTimeout(function() {
+                    x.remove()
+                }, 3800)
+            }
+            async function req(obj) {
+                var f = new FormData();
+                Object.keys(obj).forEach(function(k) {
+                    f.append(k, obj[k])
+                });
+                f.append('csrf_token', csrf);
+                var r = await fetch(api, {
+                    method: 'POST',
+                    body: f,
+                    credentials: 'same-origin',
+                    headers: {
+                        Accept: 'application/json'
+                    }
+                });
+                var raw = await r.text();
+                var j;
+                try {
+                    j = JSON.parse(raw)
+                } catch (e) {
+                    throw new Error('Pawn Entry API returned invalid JSON. HTTP ' + r.status + ': ' + raw.replace(/<[^>]*>/g, ' ').slice(0, 300))
+                }
+                if (!r.ok || !j.success) throw new Error(j.message || 'Request failed');
+                return j
+            }
+
+            function selectedCustomer() {
+                return data.customers.find(function(x) {
+                    return String(x.id) === String($('customerSelect').value)
+                }) || null
+            }
+
+            function selectedScheme() {
+                return data.schemes.find(function(x) {
+                    return String(x.id) === String($('schemeSelect').value)
+                }) || null
+            }
+
+            function selectedCategory() {
+                return data.categories.find(function(x) {
+                    return String(x.id) === String($('categorySelect').value)
+                }) || null
+            }
+
+            function selectedFirstStep() {
+                var s = selectedScheme();
+                return s && s.steps && s.steps.length ? s.steps[0] : null
+            }
+
+            function metalOptions(sel) {
+                return data.metals.map(function(m) {
+                    return '<option value="' + m.id + '" ' + (String(sel || '') === String(m.id) ? 'selected' : '') + '>' + esc(m.metal_name) + '</option>'
+                }).join('')
+            }
+
             function itemRow(item) {
-                item = item || {}; return '<div class="item-box">' +
+                item = item || {};
+                return '<div class="item-box">' +
                     '<input type="hidden" name="item_id[]" value="' + esc(item.id || '') + '">' +
                     '<input type="hidden" name="existing_item_image[]" value="' + esc(item.image_path || '') + '">' +
                     '<div class="d-flex justify-content-between align-items-center"><div class="item-title">Pawn Item</div><button type="button" class="btn-soft remove-item">Remove</button></div>' +
@@ -470,24 +566,177 @@ $reregisterFrom = $editId > 0 ? 0 : (isset($_GET['reregister_from']) ? max(0, (i
                     '<div class="col-md-4"><label class="form-label">Item Photo</label><input type="file" name="item_image[]" class="form-control" accept="image/jpeg,image/png,image/webp"></div>' +
                     '</div></div>'
             }
-            function normalizedPurity(v) { return String(v || '').toLowerCase().replace(/\s+/g, '') }
-            function rateFor(metalId, purity) { var p = normalizedPurity(purity), exact = null, fallback = null; data.metal_rates.forEach(function (r) { if (String(r.metal_id) !== String(metalId)) return; if (fallback === null) fallback = Number(r.rate_per_gram || 0); if (normalizedPurity(r.purity) === p) exact = Number(r.rate_per_gram || 0) }); return exact !== null ? exact : (fallback !== null ? fallback : 0) }
-            function updateRate(box) { var m = box.querySelector('.item-metal').value, p = box.querySelector('.purity').value, rate = rateFor(m, p); if (rate > 0 && !box.querySelector('.rate').dataset.manual) box.querySelector('.rate').value = rate.toFixed(2) }
-            function totals() { var g = 0, st = 0, n = 0, v = 0, c = 0; document.querySelectorAll('.item-box').forEach(function (box, i) { box.querySelector('.item-title').textContent = 'Pawn Item ' + (i + 1); var gross = Number(box.querySelector('.gross').value || 0), stone = Number(box.querySelector('.stone').value || 0), net = Math.max(0, gross - stone), rate = Number(box.querySelector('.rate').value || 0), est = net * rate; box.querySelector('.net').value = net.toFixed(3); box.querySelector('.est').value = est.toFixed(2); g += gross; st += stone; n += net; v += est; c++ }); var eligible = v * (maxLoanPercent / 100); $('itemCount').textContent = c; $('totalGross').textContent = g.toFixed(3) + ' g'; $('totalStone').textContent = st.toFixed(3) + ' g'; $('totalNet').textContent = n.toFixed(3) + ' g'; $('totalEstimated').textContent = money(v); $('maxEligible').textContent = money(eligible); $('totalGrossInput').value = g.toFixed(3); $('totalStoneInput').value = st.toFixed(3); $('totalNetInput').value = n.toFixed(3); $('totalEstimatedInput').value = v.toFixed(2); if (!$('principalAmount').dataset.manual && eligible > 0) $('principalAmount').value = eligible.toFixed(2); updateLoan(); updateSchemeCard() }
-            function updateLoan() { var principal = Number($('principalAmount').value || 0), doc = Number($('documentCharge').value || 0), other = Number($('otherCharge').value || 0), given = Math.max(0, principal - doc - other); $('disbursementInput').value = given.toFixed(2); $('amountGiven').textContent = money(given) }
-            function addDate(dateStr, type, value) { if (!dateStr) return ''; var d = new Date(dateStr + 'T00:00:00'); value = Math.max(1, Number(value || 1)); if (type === 'Days') d.setDate(d.getDate() + value); else d.setMonth(d.getMonth() + value); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') }
-            function updateSchemeCard() { var s = selectedScheme(), step = selectedFirstStep(); if (!s || !step) { $('schemeCard').classList.add('d-none'); $('firstDue').value = ''; $('summaryDue').textContent = '-'; $('cycleInterest').textContent = '0.00'; return } $('schemeCard').classList.remove('d-none'); $('scRate').textContent = Number(step.rate_percent).toFixed(3) + '%'; var cycle = step.interest_cycle_type === 'Calendar Month' ? 'Every calendar month' : ('Every ' + step.interest_cycle_value + ' ' + step.interest_cycle_type.toLowerCase()); $('scCycle').textContent = cycle; $('scGrace').textContent = Number(step.grace_days || 0) + ' day(s)'; $('scTenure').textContent = s.tenure_type === 'At Closure' ? 'Until closure' : s.tenure_months + ' month(s)'; var due = addDate($('pawnDate').value, step.interest_cycle_type, step.interest_cycle_value); $('firstDue').value = due; $('summaryDue').textContent = due || '-'; var principal = Number($('principalAmount').value || 0); $('cycleInterest').textContent = money(principal * Number(step.rate_percent || 0) / 100); $('rateLadder').innerHTML = s.steps.map(function (x, i) { return '<span class="rate-step ' + (i === 0 ? 'current' : '') + '">Level ' + x.level_no + ': ' + Number(x.rate_percent).toFixed(3) + '%</span>' }).join(''); var next = s.steps.find(function (x) { return Number(x.level_no) === Number(step.next_level_no) }); $('escalationNote').textContent = next ? 'If this interest due is missed after the grace period, the rate becomes ' + Number(next.rate_percent).toFixed(3) + '% from the ' + (step.escalation_effective === 'Immediately' ? 'current' : 'next') + ' cycle and stays there until this pawn is closed.' : 'This is the final configured interest level for this scheme.' }
-            function updateCustomer() { var c = selectedCustomer(); $('infoCode').textContent = c ? c.customer_code || '-' : '-'; $('infoMobile').textContent = c ? c.mobile || '-' : '-'; $('infoKyc').textContent = c ? (Number(c.kyc_verified || 0) ? 'Verified' : 'Not Verified') : '-'; $('infoRisk').textContent = c ? c.risk_category || '-' : '-'; if (c) { if (!$('idProofType').value) $('idProofType').value = c.id_proof_type || ''; if (!$('idProofNumber').value) $('idProofNumber').value = c.id_proof_number || ''; $('existingProof').value = c.id_proof_image || ''; if (c.id_proof_image) $('proofPreview').textContent = 'Existing proof: ' + c.id_proof_image } }
-            function initSelect2() { if (window.jQuery && jQuery.fn && jQuery.fn.select2) { jQuery('#customerSelect').select2({ placeholder: 'Search customer by name / code / mobile', allowClear: true, width: '100%' }); jQuery('#customerSelect').on('change', updateCustomer) } }
-            function applyCategory() { var c = selectedCategory(); maxLoanPercent = c && c.max_loan_percent != null && c.max_loan_percent !== '' ? Number(c.max_loan_percent) : 100; $('categoryPercent').textContent = c ? maxLoanPercent.toFixed(2) + '%' : '-'; if (c && c.metal_type) { var metal = data.metals.find(function (m) { return String(m.metal_name).toLowerCase() === String(c.metal_type).toLowerCase() }); if (metal) { $('primaryMetal').value = metal.id; document.querySelectorAll('.item-metal').forEach(function (x) { if (!x.value) x.value = metal.id }) } } if (c && c.purity_standard) document.querySelectorAll('.purity').forEach(function (x) { if (!x.value) x.value = c.purity_standard }); document.querySelectorAll('.item-box').forEach(updateRate); totals() }
+
+            function normalizedPurity(v) {
+                return String(v || '').toLowerCase().replace(/\s+/g, '')
+            }
+
+            function rateFor(metalId, purity) {
+                var p = normalizedPurity(purity),
+                    exact = null,
+                    fallback = null;
+                data.metal_rates.forEach(function(r) {
+                    if (String(r.metal_id) !== String(metalId)) return;
+                    if (fallback === null) fallback = Number(r.rate_per_gram || 0);
+                    if (normalizedPurity(r.purity) === p) exact = Number(r.rate_per_gram || 0)
+                });
+                return exact !== null ? exact : (fallback !== null ? fallback : 0)
+            }
+
+            function updateRate(box) {
+                var m = box.querySelector('.item-metal').value,
+                    p = box.querySelector('.purity').value,
+                    rate = rateFor(m, p);
+                if (rate > 0 && !box.querySelector('.rate').dataset.manual) box.querySelector('.rate').value = rate.toFixed(2)
+            }
+
+            function totals() {
+                var g = 0,
+                    st = 0,
+                    n = 0,
+                    v = 0,
+                    c = 0;
+                document.querySelectorAll('.item-box').forEach(function(box, i) {
+                    box.querySelector('.item-title').textContent = 'Pawn Item ' + (i + 1);
+                    var gross = Number(box.querySelector('.gross').value || 0),
+                        stone = Number(box.querySelector('.stone').value || 0),
+                        net = Math.max(0, gross - stone),
+                        rate = Number(box.querySelector('.rate').value || 0),
+                        est = net * rate;
+                    box.querySelector('.net').value = net.toFixed(3);
+                    box.querySelector('.est').value = est.toFixed(2);
+                    g += gross;
+                    st += stone;
+                    n += net;
+                    v += est;
+                    c++
+                });
+                var eligible = v * (maxLoanPercent / 100);
+                $('itemCount').textContent = c;
+                $('totalGross').textContent = g.toFixed(3) + ' g';
+                $('totalStone').textContent = st.toFixed(3) + ' g';
+                $('totalNet').textContent = n.toFixed(3) + ' g';
+                $('totalEstimated').textContent = money(v);
+                $('maxEligible').textContent = money(eligible);
+                $('totalGrossInput').value = g.toFixed(3);
+                $('totalStoneInput').value = st.toFixed(3);
+                $('totalNetInput').value = n.toFixed(3);
+                $('totalEstimatedInput').value = v.toFixed(2);
+                if (!$('principalAmount').dataset.manual && eligible > 0) $('principalAmount').value = eligible.toFixed(2);
+                updateLoan();
+                updateSchemeCard()
+            }
+
+            function updateLoan() {
+                var principal = Number($('principalAmount').value || 0),
+                    doc = Number($('documentCharge').value || 0),
+                    other = Number($('otherCharge').value || 0),
+                    given = Math.max(0, principal - doc - other);
+                $('disbursementInput').value = given.toFixed(2);
+                $('amountGiven').textContent = money(given)
+            }
+
+            function addDate(dateStr, type, value) {
+                if (!dateStr) return '';
+                var d = new Date(dateStr + 'T00:00:00');
+                value = Math.max(1, Number(value || 1));
+                if (type === 'Days') d.setDate(d.getDate() + value);
+                else d.setMonth(d.getMonth() + value);
+                return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0')
+            }
+
+            function updateSchemeCard() {
+                var s = selectedScheme(),
+                    step = selectedFirstStep();
+                if (!s || !step) {
+                    $('schemeCard').classList.add('d-none');
+                    $('firstDue').value = '';
+                    $('summaryDue').textContent = '-';
+                    $('cycleInterest').textContent = '0.00';
+                    return
+                }
+                $('schemeCard').classList.remove('d-none');
+                $('scRate').textContent = Number(step.rate_percent).toFixed(3) + '%';
+                var cycle = step.interest_cycle_type === 'Calendar Month' ? 'Every calendar month' : ('Every ' + step.interest_cycle_value + ' ' + step.interest_cycle_type.toLowerCase());
+                $('scCycle').textContent = cycle;
+                $('scGrace').textContent = Number(step.grace_days || 0) + ' day(s)';
+                $('scTenure').textContent = s.tenure_type === 'At Closure' ? 'Until closure' : s.tenure_months + ' month(s)';
+                var due = addDate($('pawnDate').value, step.interest_cycle_type, step.interest_cycle_value);
+                $('firstDue').value = due;
+                $('summaryDue').textContent = due || '-';
+                var principal = Number($('principalAmount').value || 0);
+                $('cycleInterest').textContent = money(principal * Number(step.rate_percent || 0) / 100);
+                $('rateLadder').innerHTML = s.steps.map(function(x, i) {
+                    return '<span class="rate-step ' + (i === 0 ? 'current' : '') + '">Level ' + x.level_no + ': ' + Number(x.rate_percent).toFixed(3) + '%</span>'
+                }).join('');
+                var next = s.steps.find(function(x) {
+                    return Number(x.level_no) === Number(step.next_level_no)
+                });
+                $('escalationNote').textContent = next ? 'If this interest due is missed after the grace period, the rate becomes ' + Number(next.rate_percent).toFixed(3) + '% from the ' + (step.escalation_effective === 'Immediately' ? 'current' : 'next') + ' cycle and stays there until this pawn is closed.' : 'This is the final configured interest level for this scheme.'
+            }
+
+            function updateCustomer() {
+                var c = selectedCustomer();
+                $('infoCode').textContent = c ? c.customer_code || '-' : '-';
+                $('infoMobile').textContent = c ? c.mobile || '-' : '-';
+                $('infoKyc').textContent = c ? (Number(c.kyc_verified || 0) ? 'Verified' : 'Not Verified') : '-';
+                $('infoRisk').textContent = c ? c.risk_category || '-' : '-';
+                if (c) {
+                    if (!$('idProofType').value) $('idProofType').value = c.id_proof_type || '';
+                    if (!$('idProofNumber').value) $('idProofNumber').value = c.id_proof_number || '';
+                    $('existingProof').value = c.id_proof_image || '';
+                    if (c.id_proof_image) $('proofPreview').textContent = 'Existing proof: ' + c.id_proof_image
+                }
+            }
+
+            function initSelect2() {
+                if (window.jQuery && jQuery.fn && jQuery.fn.select2) {
+                    jQuery('#customerSelect').select2({
+                        placeholder: 'Search customer by name / code / mobile',
+                        allowClear: true,
+                        width: '100%'
+                    });
+                    jQuery('#customerSelect').on('change', updateCustomer)
+                }
+            }
+
+            function applyCategory() {
+                var c = selectedCategory();
+                maxLoanPercent = c && c.max_loan_percent != null && c.max_loan_percent !== '' ? Number(c.max_loan_percent) : 100;
+                $('categoryPercent').textContent = c ? maxLoanPercent.toFixed(2) + '%' : '-';
+                if (c && c.metal_type) {
+                    var metal = data.metals.find(function(m) {
+                        return String(m.metal_name).toLowerCase() === String(c.metal_type).toLowerCase()
+                    });
+                    if (metal) {
+                        $('primaryMetal').value = metal.id;
+                        document.querySelectorAll('.item-metal').forEach(function(x) {
+                            if (!x.value) x.value = metal.id
+                        })
+                    }
+                }
+                if (c && c.purity_standard) document.querySelectorAll('.purity').forEach(function(x) {
+                    if (!x.value) x.value = c.purity_standard
+                });
+                document.querySelectorAll('.item-box').forEach(updateRate);
+                totals()
+            }
 
             function setLocked(disabled) {
-                ['pawnDate','customerSelect','categorySelect','schemeSelect','primaryMetal','principalAmount','documentCharge','otherCharge','paymentMethod'].forEach(function (id) { if ($(id)) $(id).disabled = !!disabled; });
-                ['loan_type','payment_reference'].forEach(function (name) { var x = document.querySelector('[name="' + name + '"]'); if (x) x.disabled = !!disabled; });
-                document.querySelectorAll('#itemsWrap input, #itemsWrap select, #itemsWrap button').forEach(function (x) { x.disabled = !!disabled; });
+                ['pawnDate', 'customerSelect', 'categorySelect', 'schemeSelect', 'primaryMetal', 'principalAmount', 'documentCharge', 'otherCharge', 'paymentMethod'].forEach(function(id) {
+                    if ($(id)) $(id).disabled = !!disabled;
+                });
+                ['loan_type', 'payment_reference'].forEach(function(name) {
+                    var x = document.querySelector('[name="' + name + '"]');
+                    if (x) x.disabled = !!disabled;
+                });
+                document.querySelectorAll('#itemsWrap input, #itemsWrap select, #itemsWrap button').forEach(function(x) {
+                    x.disabled = !!disabled;
+                });
                 $('addItemBtn').disabled = !!disabled;
                 if (window.jQuery && jQuery.fn && jQuery.fn.select2) jQuery('#customerSelect').trigger('change.select2');
             }
+
             function applyEdit(r) {
                 if (!r) return;
                 $('pawnNo').value = r.pawn_no || '';
@@ -510,7 +759,9 @@ $reregisterFrom = $editId > 0 ? 0 : (isset($_GET['reregister_from']) ? max(0, (i
                 document.querySelector('[name="remarks"]').value = r.remarks || '';
                 if ($('existingProof').value) $('proofPreview').textContent = 'Existing proof: ' + $('existingProof').value;
                 $('itemsWrap').innerHTML = '';
-                (r.items || []).forEach(function (it) { $('itemsWrap').insertAdjacentHTML('beforeend', itemRow(it)); });
+                (r.items || []).forEach(function(it) {
+                    $('itemsWrap').insertAdjacentHTML('beforeend', itemRow(it));
+                });
                 if (!(r.items || []).length) $('itemsWrap').innerHTML = itemRow();
                 applyCategory();
                 updateSchemeCard();
@@ -521,11 +772,153 @@ $reregisterFrom = $editId > 0 ? 0 : (isset($_GET['reregister_from']) ? max(0, (i
                     setLocked(true);
                 }
             }
-            function applyReregister(r) { if (!r) return; $('reregisterNotice').classList.remove('d-none'); $('reregisterNotice').textContent = 'Re-registering closed pawn ' + r.pawn_no + '. A new pawn number and a new interest contract will be created.'; $('customerSelect').value = r.customer_id; if (window.jQuery) jQuery('#customerSelect').trigger('change'); $('categorySelect').value = r.pawn_category_id; $('idProofType').value = r.id_proof_type || ''; $('idProofNumber').value = r.id_proof_number || ''; $('existingProof').value = r.id_proof_image || ''; $('itemsWrap').innerHTML = ''; (r.items || []).forEach(function (it) { $('itemsWrap').insertAdjacentHTML('beforeend', itemRow(it)) }); if (!(r.items || []).length) $('itemsWrap').innerHTML = itemRow(); applyCategory(); totals() }
-            async function init() { try { data = await req({ action: 'options', reregister_from: reregisterFrom, edit_id: editId }); $('pawnNo').value = data.edit ? data.edit.pawn_no : data.next_pawn_no; $('categorySelect').innerHTML = '<option value="">Select category</option>' + data.categories.map(function (c) { return '<option value="' + c.id + '">' + esc(c.category_name) + ' (' + esc(c.category_code || '') + ') · Max ' + Number(c.max_loan_percent || 0).toFixed(2) + '%</option>' }).join(''); $('customerSelect').innerHTML = '<option value=""></option>' + data.customers.map(function (c) { return '<option value="' + c.id + '">' + esc(c.customer_name) + ' · ' + esc(c.customer_code || '') + ' · ' + esc(c.mobile || '') + '</option>' }).join(''); $('primaryMetal').innerHTML = '<option value="">Select metal</option>' + metalOptions(); $('paymentMethod').innerHTML = '<option value="">Select Method</option>' + data.payment_methods.map(function (m) { return '<option value="' + m.id + '">' + esc(m.method_name) + '</option>' }).join(''); $('schemeSelect').innerHTML = '<option value="">Select interest scheme</option>' + data.schemes.map(function (s) { var st = s.steps && s.steps.length ? s.steps[0] : null; return '<option value="' + s.id + '">' + esc(s.scheme_name) + ' · ' + (st ? Number(st.rate_percent).toFixed(3) + '%' : 'No rate') + '</option>' }).join(''); $('documentCharge').value = Number(data.general.pawn_default_document_charge || 0).toFixed(2); $('otherCharge').value = Number(data.general.pawn_default_other_charge || 0).toFixed(2); $('itemsWrap').innerHTML = itemRow(); initSelect2(); if (data.edit) applyEdit(data.edit); else if (data.reregister) applyReregister(data.reregister); else { applyCategory(); totals(); } } catch (e) { toast(false, e.message) } }
-            $('addItemBtn').onclick = function () { $('itemsWrap').insertAdjacentHTML('beforeend', itemRow()); totals() }; document.addEventListener('click', function (e) { var b = e.target.closest('.remove-item'); if (b) { if (document.querySelectorAll('.item-box').length <= 1) return toast(false, 'At least one pawn item is required.'); b.closest('.item-box').remove(); totals() } }); document.addEventListener('input', function (e) { if (e.target.classList.contains('gross') || e.target.classList.contains('stone') || e.target.classList.contains('qty')) totals(); if (e.target.classList.contains('purity')) { updateRate(e.target.closest('.item-box')); totals() } if (e.target.classList.contains('rate')) { e.target.dataset.manual = '1'; totals() } }); document.addEventListener('change', function (e) { if (e.target.classList.contains('item-metal')) { updateRate(e.target.closest('.item-box')); totals() } });
-            $('categorySelect').onchange = applyCategory; $('schemeSelect').onchange = updateSchemeCard; $('pawnDate').onchange = updateSchemeCard; $('principalAmount').oninput = function (e) { e.target.dataset.manual = '1'; updateLoan(); updateSchemeCard() }; $('documentCharge').oninput = updateLoan; $('otherCharge').oninput = updateLoan; $('customerSelect').onchange = updateCustomer; $('idProofImage').onchange = function () { var f = this.files && this.files[0]; $('proofPreview').textContent = f ? 'Selected: ' + f.name : 'No new proof selected' };
-            $('pawnForm').onsubmit = async function (e) { e.preventDefault(); totals(); if (!$('customerSelect').value) return toast(false, 'Select customer.'); if (!$('categorySelect').value) return toast(false, 'Select pawn category.'); if (!$('schemeSelect').value) return toast(false, 'Select interest scheme.'); if (Number($('totalNetInput').value || 0) <= 0) return toast(false, 'Total net weight must be greater than zero.'); var principal = Number($('principalAmount').value || 0), eligible = Number(String($('maxEligible').textContent).replace(/,/g, '') || 0); if (principal <= 0) return toast(false, 'Principal amount must be greater than zero.'); if (principal > eligible + 0.01) return toast(false, 'Principal cannot exceed the category maximum eligible loan.'); if (Number($('disbursementInput').value || 0) <= 0) return toast(false, 'Amount given must be greater than zero after charges.'); if (!$('paymentMethod').value) return toast(false, 'Select disbursement payment method.'); var btn = $('saveBtn'), old = btn.innerHTML; btn.disabled = true; btn.textContent = editId > 0 ? 'Updating...' : 'Saving...'; try { if (editId > 0 && data.edit && data.edit.financial_locked) setLocked(false); var fd = new FormData(this); if (editId > 0 && data.edit && data.edit.financial_locked) setLocked(true); var r = await fetch(api, { method: 'POST', body: fd, credentials: 'same-origin', headers: { Accept: 'application/json' } }); var raw = await r.text(), j; try { j = JSON.parse(raw) } catch (x) { throw new Error('Invalid API response: ' + raw.replace(/<[^>]*>/g, ' ').slice(0, 300)) } if (!r.ok || !j.success) throw new Error(j.message || 'Unable to save pawn entry.'); toast(true, j.message); setTimeout(function () { location.href = 'pawn-view.php?id=' + j.pawn_id }, 700) } catch (err) { toast(false, err.message) } finally { btn.disabled = false; btn.innerHTML = old } };
+
+            function applyReregister(r) {
+                if (!r) return;
+                $('reregisterNotice').classList.remove('d-none');
+                $('reregisterNotice').textContent = 'Re-registering closed pawn ' + r.pawn_no + '. A new pawn number and a new interest contract will be created.';
+                $('customerSelect').value = r.customer_id;
+                if (window.jQuery) jQuery('#customerSelect').trigger('change');
+                $('categorySelect').value = r.pawn_category_id;
+                $('idProofType').value = r.id_proof_type || '';
+                $('idProofNumber').value = r.id_proof_number || '';
+                $('existingProof').value = r.id_proof_image || '';
+                $('itemsWrap').innerHTML = '';
+                (r.items || []).forEach(function(it) {
+                    $('itemsWrap').insertAdjacentHTML('beforeend', itemRow(it))
+                });
+                if (!(r.items || []).length) $('itemsWrap').innerHTML = itemRow();
+                applyCategory();
+                totals()
+            }
+            async function init() {
+                try {
+                    data = await req({
+                        action: 'options',
+                        reregister_from: reregisterFrom,
+                        edit_id: editId
+                    });
+                    $('pawnNo').value = data.edit ? data.edit.pawn_no : data.next_pawn_no;
+                    $('categorySelect').innerHTML = '<option value="">Select category</option>' + data.categories.map(function(c) {
+                        return '<option value="' + c.id + '">' + esc(c.category_name) + ' (' + esc(c.category_code || '') + ') · Max ' + Number(c.max_loan_percent || 0).toFixed(2) + '%</option>'
+                    }).join('');
+                    $('customerSelect').innerHTML = '<option value=""></option>' + data.customers.map(function(c) {
+                        return '<option value="' + c.id + '">' + esc(c.customer_name) + ' · ' + esc(c.customer_code || '') + ' · ' + esc(c.mobile || '') + '</option>'
+                    }).join('');
+                    $('primaryMetal').innerHTML = '<option value="">Select metal</option>' + metalOptions();
+                    $('paymentMethod').innerHTML = '<option value="">Select Method</option>' + data.payment_methods.map(function(m) {
+                        return '<option value="' + m.id + '">' + esc(m.method_name) + '</option>'
+                    }).join('');
+                    $('schemeSelect').innerHTML = '<option value="">Select interest scheme</option>' + data.schemes.map(function(s) {
+                        var st = s.steps && s.steps.length ? s.steps[0] : null;
+                        return '<option value="' + s.id + '">' + esc(s.scheme_name) + ' · ' + (st ? Number(st.rate_percent).toFixed(3) + '%' : 'No rate') + '</option>'
+                    }).join('');
+                    $('documentCharge').value = Number(data.general.pawn_default_document_charge || 0).toFixed(2);
+                    $('otherCharge').value = Number(data.general.pawn_default_other_charge || 0).toFixed(2);
+                    $('itemsWrap').innerHTML = itemRow();
+                    initSelect2();
+                    if (data.edit) applyEdit(data.edit);
+                    else if (data.reregister) applyReregister(data.reregister);
+                    else {
+                        applyCategory();
+                        totals();
+                    }
+                } catch (e) {
+                    toast(false, e.message)
+                }
+            }
+            $('addItemBtn').onclick = function() {
+                $('itemsWrap').insertAdjacentHTML('beforeend', itemRow());
+                totals()
+            };
+            document.addEventListener('click', function(e) {
+                var b = e.target.closest('.remove-item');
+                if (b) {
+                    if (document.querySelectorAll('.item-box').length <= 1) return toast(false, 'At least one pawn item is required.');
+                    b.closest('.item-box').remove();
+                    totals()
+                }
+            });
+            document.addEventListener('input', function(e) {
+                if (e.target.classList.contains('gross') || e.target.classList.contains('stone') || e.target.classList.contains('qty')) totals();
+                if (e.target.classList.contains('purity')) {
+                    updateRate(e.target.closest('.item-box'));
+                    totals()
+                }
+                if (e.target.classList.contains('rate')) {
+                    e.target.dataset.manual = '1';
+                    totals()
+                }
+            });
+            document.addEventListener('change', function(e) {
+                if (e.target.classList.contains('item-metal')) {
+                    updateRate(e.target.closest('.item-box'));
+                    totals()
+                }
+            });
+            $('categorySelect').onchange = applyCategory;
+            $('schemeSelect').onchange = updateSchemeCard;
+            $('pawnDate').onchange = updateSchemeCard;
+            $('principalAmount').oninput = function(e) {
+                e.target.dataset.manual = '1';
+                updateLoan();
+                updateSchemeCard()
+            };
+            $('documentCharge').oninput = updateLoan;
+            $('otherCharge').oninput = updateLoan;
+            $('customerSelect').onchange = updateCustomer;
+            $('idProofImage').onchange = function() {
+                var f = this.files && this.files[0];
+                $('proofPreview').textContent = f ? 'Selected: ' + f.name : 'No new proof selected'
+            };
+            $('pawnForm').onsubmit = async function(e) {
+                e.preventDefault();
+                totals();
+                if (!$('customerSelect').value) return toast(false, 'Select customer.');
+                if (!$('categorySelect').value) return toast(false, 'Select pawn category.');
+                if (!$('schemeSelect').value) return toast(false, 'Select interest scheme.');
+                if (Number($('totalNetInput').value || 0) <= 0) return toast(false, 'Total net weight must be greater than zero.');
+                var principal = Number($('principalAmount').value || 0),
+                    eligible = Number(String($('maxEligible').textContent).replace(/,/g, '') || 0);
+                if (principal <= 0) return toast(false, 'Principal amount must be greater than zero.');
+                if (principal > eligible + 0.01) return toast(false, 'Principal cannot exceed the category maximum eligible loan.');
+                if (Number($('disbursementInput').value || 0) <= 0) return toast(false, 'Amount given must be greater than zero after charges.');
+                if (!$('paymentMethod').value) return toast(false, 'Select disbursement payment method.');
+                var btn = $('saveBtn'),
+                    old = btn.innerHTML;
+                btn.disabled = true;
+                btn.textContent = editId > 0 ? 'Updating...' : 'Saving...';
+                try {
+                    if (editId > 0 && data.edit && data.edit.financial_locked) setLocked(false);
+                    var fd = new FormData(this);
+                    if (editId > 0 && data.edit && data.edit.financial_locked) setLocked(true);
+                    var r = await fetch(api, {
+                        method: 'POST',
+                        body: fd,
+                        credentials: 'same-origin',
+                        headers: {
+                            Accept: 'application/json'
+                        }
+                    });
+                    var raw = await r.text(),
+                        j;
+                    try {
+                        j = JSON.parse(raw)
+                    } catch (x) {
+                        throw new Error('Invalid API response: ' + raw.replace(/<[^>]*>/g, ' ').slice(0, 300))
+                    }
+                    if (!r.ok || !j.success) throw new Error(j.message || 'Unable to save pawn entry.');
+                    toast(true, j.message);
+                    setTimeout(function() {
+                        location.href = 'pawn-view.php?id=' + j.pawn_id
+                    }, 700)
+                } catch (err) {
+                    toast(false, err.message)
+                } finally {
+                    btn.disabled = false;
+                    btn.innerHTML = old
+                }
+            };
             init();
         })();
     </script>
