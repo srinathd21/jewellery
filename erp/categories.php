@@ -105,6 +105,41 @@ $canCreate = categoryPermission($conn, 'create');
 $canUpdate = categoryPermission($conn, 'update');
 $canDelete = categoryPermission($conn, 'delete');
 $businessId = (int)($_SESSION['business_id'] ?? 0);
+$branchId = (int)($_SESSION['branch_id'] ?? ($_SESSION['current_branch_id'] ?? ($_SESSION['default_branch_id'] ?? 0)));
+
+// Resolve the active/default branch when the session does not contain a branch id.
+if ($businessId > 0 && $branchId <= 0) {
+    $userId = (int)($_SESSION['user_id'] ?? 0);
+
+    if ($userId > 0) {
+        $branchStmt = $conn->prepare("SELECT COALESCE(uba.branch_id, u.default_branch_id) AS branch_id
+                                      FROM users u
+                                      LEFT JOIN user_branch_access uba
+                                             ON uba.user_id = u.id
+                                            AND uba.business_id = u.business_id
+                                            AND uba.is_default = 1
+                                      WHERE u.id = ? AND u.business_id = ?
+                                      LIMIT 1");
+        if ($branchStmt) {
+            $branchStmt->bind_param('ii', $userId, $businessId);
+            $branchStmt->execute();
+            $branchRow = $branchStmt->get_result()->fetch_assoc();
+            $branchStmt->close();
+            $branchId = (int)($branchRow['branch_id'] ?? 0);
+        }
+    }
+
+    if ($branchId <= 0) {
+        $branchStmt = $conn->prepare("SELECT id FROM branches WHERE business_id = ? AND is_active = 1 ORDER BY is_default DESC, id ASC LIMIT 1");
+        if ($branchStmt) {
+            $branchStmt->bind_param('i', $businessId);
+            $branchStmt->execute();
+            $branchRow = $branchStmt->get_result()->fetch_assoc();
+            $branchStmt->close();
+            $branchId = (int)($branchRow['id'] ?? 0);
+        }
+    }
+}
 
 if ($businessId <= 0) {
     http_response_code(403);
@@ -119,9 +154,9 @@ $csrfToken = $_SESSION['categories_csrf'];
 $categories = [];
 $sql = "SELECT c.id, c.parent_id, c.category_code, c.category_name, c.description, c.sort_order, c.is_active,
                p.category_name AS parent_name,
-               COUNT(pr.id) AS product_count,
-               COALESCE(SUM(pr.gross_weight), 0) AS total_gross_weight,
-               COALESCE(SUM(pr.net_weight), 0) AS total_net_weight
+               COUNT(DISTINCT pr.id) AS product_count,
+               COALESCE(SUM(CASE WHEN ps.product_id IS NULL THEN pr.gross_weight ELSE ps.gross_weight END), 0) AS total_gross_weight,
+               COALESCE(SUM(CASE WHEN ps.product_id IS NULL THEN pr.net_weight ELSE ps.net_weight END), 0) AS total_net_weight
         FROM product_categories c
         LEFT JOIN product_categories p
                ON p.id = c.parent_id
@@ -129,17 +164,62 @@ $sql = "SELECT c.id, c.parent_id, c.category_code, c.category_name, c.descriptio
         LEFT JOIN products pr
                ON pr.category_id = c.id
               AND pr.business_id = c.business_id
+        LEFT JOIN (
+            SELECT product_id,
+                   SUM(gross_weight) AS gross_weight,
+                   SUM(net_weight) AS net_weight
+            FROM product_stock
+            WHERE business_id = ? AND branch_id = ?
+            GROUP BY product_id
+        ) ps ON ps.product_id = pr.id
         WHERE c.business_id = ?
         GROUP BY c.id, c.parent_id, c.category_code, c.category_name, c.description, c.sort_order, c.is_active, p.category_name
         ORDER BY c.sort_order ASC, c.category_name ASC";
 $stmt = $conn->prepare($sql);
-$stmt->bind_param('i', $businessId);
+$stmt->bind_param('iii', $businessId, $branchId, $businessId);
 $stmt->execute();
 $result = $stmt->get_result();
 while ($row = $result->fetch_assoc()) {
     $categories[] = $row;
 }
 $stmt->close();
+
+$categoryProducts = [];
+$productSql = "SELECT pr.id, pr.category_id, pr.product_code, pr.barcode, pr.product_name, pr.product_type,
+                      pr.purity, pr.gross_weight AS unit_gross_weight, pr.net_weight AS unit_net_weight,
+                      pr.is_active, COALESCE(m.metal_name, pr.product_type, '-') AS metal_name,
+                      CASE WHEN ps.product_id IS NULL THEN 1 ELSE COALESCE(ps.quantity, 0) END AS stock_quantity,
+                      CASE WHEN ps.product_id IS NULL THEN pr.gross_weight ELSE COALESCE(ps.gross_weight, 0) END AS stock_gross_weight,
+                      CASE WHEN ps.product_id IS NULL THEN pr.net_weight ELSE COALESCE(ps.net_weight, 0) END AS stock_net_weight
+               FROM products pr
+               LEFT JOIN metals m
+                      ON m.id = pr.metal_id
+                     AND m.business_id = pr.business_id
+               LEFT JOIN (
+                   SELECT product_id,
+                          SUM(quantity) AS quantity,
+                          SUM(gross_weight) AS gross_weight,
+                          SUM(net_weight) AS net_weight
+                   FROM product_stock
+                   WHERE business_id = ? AND branch_id = ?
+                   GROUP BY product_id
+               ) ps ON ps.product_id = pr.id
+               WHERE pr.business_id = ?
+               ORDER BY pr.category_id, pr.product_name, pr.product_code";
+$productStmt = $conn->prepare($productSql);
+if ($productStmt) {
+    $productStmt->bind_param('iii', $businessId, $branchId, $businessId);
+    $productStmt->execute();
+    $productResult = $productStmt->get_result();
+    while ($product = $productResult->fetch_assoc()) {
+        $categoryId = (int)$product['category_id'];
+        if (!isset($categoryProducts[$categoryId])) {
+            $categoryProducts[$categoryId] = [];
+        }
+        $categoryProducts[$categoryId][] = $product;
+    }
+    $productStmt->close();
+}
 
 $nextSortOrder = 1;
 if ($categories) {
@@ -257,6 +337,13 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
         .theme-toast.show{opacity:1;transform:translateY(0);}
         .theme-toast-success{background:#168449;}.theme-toast-error{background:#c0392b;}
         .empty-state{padding:50px 20px;text-align:center;color:var(--muted-color);}.empty-state i{font-size:34px;margin-bottom:10px;}
+        .product-view-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:12px;}
+        .product-view-summary .mini-stat{border:1px solid var(--border-color);border-radius:9px;padding:9px 10px;background:var(--card-bg);}
+        .product-view-summary .mini-label{font-size:9px;color:var(--muted-color);}
+        .product-view-summary .mini-value{font-size:13px;font-weight:700;margin-top:3px;}
+        .product-view-table{font-size:10px;margin:0;}
+        .product-view-table th{font-size:9px;text-transform:uppercase;white-space:nowrap;color:var(--muted-color);}
+        .product-view-table td,.product-view-table th{padding:8px 9px;vertical-align:middle;border-color:var(--border-color);}
         body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark"] body{--page-bg:#0f151b;--card-bg:#182129;--text-color:#f3f6f8;--muted-color:#9aa7b3;--border-color:#2c3944;}
         @media(max-width:991.98px){
             .stat-grid{grid-template-columns:repeat(2,minmax(0,1fr));}
@@ -335,6 +422,7 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
                                 <td data-label="Sort Order"><?php echo (int)$category['sort_order']; ?></td>
                                 <td data-label="Status"><span class="status-badge <?php echo (int)$category['is_active'] === 1 ? 'status-active' : 'status-inactive'; ?>"><?php echo (int)$category['is_active'] === 1 ? 'Active' : 'Inactive'; ?></span></td>
                                 <td class="text-end actions-column" data-label="Actions"><div class="d-inline-flex gap-1">
+                                    <button class="action-btn view-category-products" type="button" title="View Products" data-id="<?php echo (int)$category['id']; ?>" data-name="<?php echo e($category['category_name']); ?>"><i class="fa-solid fa-eye"></i></button>
                                     <?php if ($canUpdate): ?>
                                         <button class="action-btn edit-category" type="button" title="Edit" data-id="<?php echo (int)$category['id']; ?>"><i class="fa-solid fa-pen"></i></button>
                                         <button class="action-btn toggle-category" type="button" title="<?php echo (int)$category['is_active'] === 1 ? 'Deactivate' : 'Activate'; ?>" data-id="<?php echo (int)$category['id']; ?>" data-active="<?php echo (int)$category['is_active']; ?>"><i class="fa-solid <?php echo (int)$category['is_active'] === 1 ? 'fa-ban' : 'fa-circle-check'; ?>"></i></button>
@@ -377,6 +465,38 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
     </div>
 </div>
 
+<div class="modal fade" id="categoryProductsModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div>
+                    <h5 class="modal-title" id="categoryProductsTitle">Category Products</h5>
+                    <div class="category-sub" id="categoryProductsSubtitle">Current branch stock details</div>
+                </div>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <div class="product-view-summary">
+                    <div class="mini-stat"><div class="mini-label">Linked Products</div><div class="mini-value" id="viewLinkedProducts">0</div></div>
+                    <div class="mini-stat"><div class="mini-label">Stock Quantity</div><div class="mini-value" id="viewStockQty">0.000</div></div>
+                    <div class="mini-stat"><div class="mini-label">Gross Weight</div><div class="mini-value" id="viewGrossWeight">0.000 g</div></div>
+                    <div class="mini-stat"><div class="mini-label">Net Weight</div><div class="mini-value" id="viewNetWeight">0.000 g</div></div>
+                </div>
+                <div class="table-responsive">
+                    <table class="table product-view-table align-middle">
+                        <thead>
+                            <tr><th>#</th><th>Product</th><th>Code</th><th>Barcode</th><th>Metal</th><th>Purity</th><th class="text-end">Unit G</th><th class="text-end">Unit N</th><th class="text-end">Stock Qty</th><th class="text-end">Stock G</th><th class="text-end">Stock N</th><th>Status</th></tr>
+                        </thead>
+                        <tbody id="categoryProductsBody"></tbody>
+                    </table>
+                </div>
+                <div class="empty-state d-none" id="categoryProductsEmpty"><i class="fa-regular fa-folder-open"></i><div>No products linked to this category.</div></div>
+            </div>
+            <div class="modal-footer"><button type="button" class="btn btn-light btn-sm" data-bs-dismiss="modal">Close</button></div>
+        </div>
+    </div>
+</div>
+
 <div class="modal fade" id="confirmActionModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-dialog-centered modal-sm">
         <div class="modal-content">
@@ -414,6 +534,9 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
     const categoryForm = document.getElementById('categoryForm');
     const confirmModalElement = document.getElementById('confirmActionModal');
     const confirmActionModal = confirmModalElement ? new bootstrap.Modal(confirmModalElement) : null;
+    const categoryProducts = <?php echo json_encode($categoryProducts, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); ?>;
+    const productsModalElement = document.getElementById('categoryProductsModal');
+    const categoryProductsModal = productsModalElement ? new bootstrap.Modal(productsModalElement) : null;
 
     function modalConfirm(options){
         return new Promise(function(resolve){
@@ -452,7 +575,47 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
     const addButton=document.getElementById('addCategoryButton');
     if(addButton)addButton.addEventListener('click',()=>{resetForm();categoryModal.show();});
 
+    function esc(value){return String(value==null?'':value).replace(/[&<>"']/g,function(ch){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[ch];});}
+    function fmt3(value){const n=Number(value||0);return Number.isFinite(n)?n.toFixed(3):'0.000';}
+    function showCategoryProducts(button){
+        const categoryId=String(button.dataset.id||'0');
+        const rows=Array.isArray(categoryProducts[categoryId])?categoryProducts[categoryId]:[];
+        document.getElementById('categoryProductsTitle').textContent=(button.dataset.name||'Category')+' Products';
+        const body=document.getElementById('categoryProductsBody');
+        const empty=document.getElementById('categoryProductsEmpty');
+        let qty=0,gross=0,net=0;
+        rows.forEach(function(row){qty+=Number(row.stock_quantity||0);gross+=Number(row.stock_gross_weight||0);net+=Number(row.stock_net_weight||0);});
+        document.getElementById('viewLinkedProducts').textContent=String(rows.length);
+        document.getElementById('viewStockQty').textContent=fmt3(qty);
+        document.getElementById('viewGrossWeight').textContent=fmt3(gross)+' g';
+        document.getElementById('viewNetWeight').textContent=fmt3(net)+' g';
+        if(!rows.length){body.innerHTML='';empty.classList.remove('d-none');}
+        else{
+            empty.classList.add('d-none');
+            body.innerHTML=rows.map(function(row,index){
+                return '<tr>'+
+                    '<td>'+(index+1)+'</td>'+
+                    '<td><div class="category-name">'+esc(row.product_name)+'</div><div class="category-sub">ID: '+Number(row.id||0)+'</div></td>'+
+                    '<td>'+esc(row.product_code||'-')+'</td>'+
+                    '<td>'+esc(row.barcode||'-')+'</td>'+
+                    '<td>'+esc(row.metal_name||'-')+'</td>'+
+                    '<td>'+esc(row.purity||'-')+'</td>'+
+                    '<td class="text-end">'+fmt3(row.unit_gross_weight)+' g</td>'+
+                    '<td class="text-end">'+fmt3(row.unit_net_weight)+' g</td>'+
+                    '<td class="text-end">'+fmt3(row.stock_quantity)+'</td>'+
+                    '<td class="text-end"><strong>'+fmt3(row.stock_gross_weight)+' g</strong></td>'+
+                    '<td class="text-end">'+fmt3(row.stock_net_weight)+' g</td>'+
+                    '<td><span class="status-badge '+(Number(row.is_active)===1?'status-active':'status-inactive')+'">'+(Number(row.is_active)===1?'Active':'Inactive')+'</span></td>'+
+                '</tr>';
+            }).join('');
+        }
+        if(categoryProductsModal)categoryProductsModal.show();
+    }
+
     document.addEventListener('click',async function(event){
+        const view=event.target.closest('.view-category-products');
+        if(view){showCategoryProducts(view);return;}
+
         const edit=event.target.closest('.edit-category');
         if(edit){try{const fd=new FormData();fd.append('action','get');fd.append('csrf_token',csrfToken);fd.append('category_id',edit.dataset.id);const result=await api(fd);resetForm();const c=result.category;document.getElementById('categoryModalTitle').textContent='Edit Category';document.getElementById('category_id').value=c.id;document.getElementById('category_name').value=c.category_name||'';document.getElementById('category_code').value=c.category_code||'';document.getElementById('description').value=c.description||'';document.getElementById('parent_id').value=String(c.parent_id||0);document.getElementById('sort_order').value=String(c.sort_order||0);document.getElementById('is_active').value=String(c.is_active);const own=document.querySelector('#parent_id option[value="'+c.id+'"]');if(own)own.disabled=true;categoryModal.show();}catch(err){showToast('error',err.message)}}
 
