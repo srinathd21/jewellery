@@ -316,20 +316,20 @@ $resetFrequencies = ['Never','Financial Year','Calendar Year','Monthly','Daily']
                         <thead><tr><th>Setting</th><th>Document</th><th>Branch</th><th>Paper</th><th>Number Format</th><th>Status</th><th class="text-end">Actions</th></tr></thead>
                         <tbody>
                         <?php foreach ($settings as $setting): ?>
-                            <tr data-setting-id="<?php echo (int) $setting['id']; ?>" data-search="<?php echo e(strtolower(implode(' ', [$setting['setting_name'],$setting['document_type'],$setting['branch_name'],$setting['paper_size'],$setting['sample_output']] ))); ?>" data-document="<?php echo e(strtolower($setting['document_type'])); ?>" data-status="<?php echo (int) $setting['is_active'] === 1 ? 'active' : 'inactive'; ?>">
+                            <tr data-setting-id="<?php echo (int) $setting['id']; ?>" data-search="<?php echo e(strtolower(implode(' ', [$setting['setting_name'],$setting['document_type'],$setting['branch_name'],$setting['paper_size'],$setting['sample_output']] ))); ?>" data-document="<?php echo e(strtolower($setting['document_type'])); ?>" data-status="<?php echo (int) $setting['is_active'] === 1 ? 'active' : 'inactive'; ?>" data-paper="<?php echo e(strtolower($setting['paper_size'])); ?>" data-default="<?php echo (int) $setting['is_default'] === 1 ? '1' : '0'; ?>">
                                 <td class="main-column" data-label="Setting"><div class="d-flex align-items-center gap-2"><div class="stat-icon" style="width:34px;height:34px;flex-basis:34px;font-size:13px"><i class="fa-solid fa-file-invoice-dollar"></i></div><div><div class="setting-name"><?php echo e($setting['setting_name']); ?></div><div class="subtext"><?php echo (int) $setting['is_default'] === 1 ? 'Default configuration' : 'Custom configuration'; ?></div></div></div></td>
                                 <td data-label="Document"><span class="badge-soft"><?php echo e($setting['document_type']); ?></span></td>
                                 <td data-label="Branch"><span class="badge-blue"><?php echo e($setting['branch_name'] ?: 'All Branches'); ?></span></td>
                                 <td data-label="Paper"><div><?php echo e($setting['paper_size']); ?> · <?php echo e($setting['orientation']); ?></div><?php if ($setting['paper_size'] === 'Custom'): ?><div class="subtext"><?php echo e($setting['custom_width_mm']); ?> × <?php echo e($setting['custom_height_mm']); ?> mm</div><?php endif; ?></td>
                                 <td data-label="Number Format"><div class="fw-semibold"><?php echo e($setting['sample_output']); ?></div><div class="subtext"><?php echo e($setting['reset_frequency']); ?></div></td>
                                 <td data-label="Status"><span class="<?php echo (int) $setting['is_active'] === 1 ? 'badge-green' : 'badge-red'; ?>"><?php echo (int) $setting['is_active'] === 1 ? 'Active' : 'Inactive'; ?></span><?php if ((int) $setting['is_default'] === 1): ?><div class="subtext">Default</div><?php endif; ?></td>
-                                <td class="text-end actions-column" data-label="Actions"><div class="d-inline-flex gap-1"><?php if ($canUpdate): ?><button class="action-btn edit-setting" type="button" title="Edit" data-id="<?php echo (int) $setting['id']; ?>"><i class="fa-solid fa-pen"></i></button><button class="action-btn clone-setting" type="button" title="Clone" data-id="<?php echo (int) $setting['id']; ?>"><i class="fa-regular fa-copy"></i></button><?php endif; ?><?php if ($canDelete): ?><button class="action-btn danger delete-setting" type="button" title="Delete" data-id="<?php echo (int) $setting['id']; ?>" data-name="<?php echo e($setting['setting_name']); ?>"><i class="fa-solid fa-trash"></i></button><?php endif; ?></div></td>
+                                <td class="text-end actions-column" data-label="Actions"><div class="d-inline-flex gap-1"><?php if ($canUpdate): ?><button class="action-btn edit-setting" type="button" title="Edit" data-id="<?php echo (int) $setting['id']; ?>"><i class="fa-solid fa-pen"></i></button><?php endif; ?><?php if ($canCreate): ?><button class="action-btn clone-setting" type="button" title="Clone" data-id="<?php echo (int) $setting['id']; ?>"><i class="fa-regular fa-copy"></i></button><?php endif; ?><?php if ($canDelete && (int) $setting['is_default'] !== 1): ?><button class="action-btn danger delete-setting" type="button" title="Delete" data-id="<?php echo (int) $setting['id']; ?>" data-name="<?php echo e($setting['setting_name']); ?>"><i class="fa-solid fa-trash"></i></button><?php elseif ($canDelete): ?><button class="action-btn" type="button" title="Default setting cannot be deleted" disabled><i class="fa-solid fa-lock"></i></button><?php endif; ?></div></td>
                             </tr>
                         <?php endforeach; ?>
                         </tbody>
                     </table>
                 </div>
-                <?php if (!$settings): ?><div class="empty-state"><i class="fa-regular fa-file-lines fs-3 mb-2"></i><div>No invoice settings found.</div></div><?php endif; ?>
+                <div class="empty-state <?php echo $settings ? 'd-none' : ''; ?>" id="settingsEmptyState"><i class="fa-regular fa-file-lines fs-3 mb-2"></i><div>No invoice settings found.</div></div>
             </div>
         <?php endif; ?>
         <?php include('includes/footer.php'); ?>
@@ -357,9 +357,9 @@ $resetFrequencies = ['Never','Financial Year','Calendar Year','Monthly','Daily']
 
                 <div class="section-title mt-4">Branding & Display</div>
                 <div class="row g-3">
-                    <div class="col-md-4"><label class="field-label">Invoice logo</label><input class="form-control" type="file" name="invoice_logo" id="invoice_logo" accept=".png,.jpg,.jpeg,.webp"></div>
-                    <div class="col-md-4"><label class="field-label">Signature</label><input class="form-control" type="file" name="signature" id="signature" accept=".png,.jpg,.jpeg,.webp"></div>
-                    <div class="col-md-4"><label class="field-label">Stamp</label><input class="form-control" type="file" name="stamp" id="stamp" accept=".png,.jpg,.jpeg,.webp"></div>
+                    <div class="col-md-4"><label class="field-label">Invoice logo</label><input class="form-control" type="file" name="invoice_logo" id="invoice_logo" accept=".png,.jpg,.jpeg,.webp"><div class="subtext mt-1" id="current_invoice_logo">No existing logo</div><div class="form-check mt-1"><input class="form-check-input remove-file" type="checkbox" name="remove_invoice_logo" value="1" id="remove_invoice_logo" disabled><label class="form-check-label" for="remove_invoice_logo">Remove existing logo</label></div></div>
+                    <div class="col-md-4"><label class="field-label">Signature</label><input class="form-control" type="file" name="signature" id="signature" accept=".png,.jpg,.jpeg,.webp"><div class="subtext mt-1" id="current_signature">No existing signature</div><div class="form-check mt-1"><input class="form-check-input remove-file" type="checkbox" name="remove_signature" value="1" id="remove_signature" disabled><label class="form-check-label" for="remove_signature">Remove existing signature</label></div></div>
+                    <div class="col-md-4"><label class="field-label">Stamp</label><input class="form-control" type="file" name="stamp" id="stamp" accept=".png,.jpg,.jpeg,.webp"><div class="subtext mt-1" id="current_stamp">No existing stamp</div><div class="form-check mt-1"><input class="form-check-input remove-file" type="checkbox" name="remove_stamp" value="1" id="remove_stamp" disabled><label class="form-check-label" for="remove_stamp">Remove existing stamp</label></div></div>
                     <div class="col-12"><div class="row g-2">
                         <?php $toggles = ['show_business_logo'=>'Show business logo','show_gstin'=>'Show GSTIN','show_hsn'=>'Show HSN','show_tax_breakup'=>'Show tax breakup','show_customer_balance'=>'Show customer balance','show_qr_code'=>'Show QR code']; foreach ($toggles as $name=>$label): ?>
                         <div class="col-md-4 col-sm-6"><div class="form-check"><input class="form-check-input" type="checkbox" name="<?php echo e($name); ?>" value="1" id="<?php echo e($name); ?>"><label class="form-check-label" for="<?php echo e($name); ?>"><?php echo e($label); ?></label></div></div>
@@ -384,14 +384,14 @@ $resetFrequencies = ['Never','Financial Year','Calendar Year','Monthly','Daily']
                     <div class="col-md-3"><label class="field-label">Reset frequency</label><select class="form-select" name="reset_frequency" id="reset_frequency"><?php foreach ($resetFrequencies as $frequency): ?><option value="<?php echo e($frequency); ?>"><?php echo e($frequency); ?></option><?php endforeach; ?></select></div>
                     <div class="col-md-3"><label class="field-label">Sequence digits</label><input class="form-control" type="number" min="1" max="10" name="sequence_digits" id="sequence_digits" value="3"></div>
                     <div class="col-md-3"><label class="field-label">Sequence start</label><input class="form-control" type="number" min="1" name="sequence_start" id="sequence_start" value="1"></div>
-                    <div class="col-md-6"><label class="field-label">Format template</label><input class="form-control" type="text" name="format_template" id="format_template" maxlength="150" value="{PREFIX}{SPLITTER}{FY_SHORT}{SPLITTER}{SEQ}"><div class="subtext">Tokens: {PREFIX}, {YYYY}, {YY}, {FY_SHORT}, {FY_2DIGIT}, {MM}, {DD}, {SEQ}, {SPLITTER}, {SUFFIX}</div></div>
+                    <div class="col-md-6"><label class="field-label">Format template</label><input class="form-control" type="text" name="format_template" id="format_template" maxlength="150" value="{PREFIX}{SPLITTER}{MIDDLE}{SPLITTER}{SEQ}{SUFFIX}"><div class="subtext">Tokens: {PREFIX}, {MIDDLE}, {YYYY}, {YY}, {FY_SHORT}, {FY_2DIGIT}, {MM}, {DD}, {SEQ}, {SPLITTER}, {SUFFIX}. Middle format can also use the date tokens.</div></div>
                     <div class="col-md-6"><label class="field-label">Sample output</label><input class="form-control" type="text" name="sample_output" id="sample_output" maxlength="150" readonly></div>
                     <div class="col-md-3"><div class="form-check mt-4"><input class="form-check-input" type="checkbox" name="is_default" value="1" id="is_default"><label class="form-check-label" for="is_default">Default setting</label></div></div>
                     <div class="col-md-3"><div class="form-check mt-4"><input class="form-check-input" type="checkbox" name="is_active" value="1" id="is_active" checked><label class="form-check-label" for="is_active">Active</label></div></div>
                 </div>
 
                 <div class="section-title mt-4">Live Preview</div>
-                <div class="preview-box"><div class="preview-paper"><div class="preview-title" id="previewHeader">TAX INVOICE</div><div class="preview-line"></div><div class="d-flex justify-content-between"><div><strong>Invoice No:</strong> <span id="previewNumber">INV/26-27/001</span></div><div><strong>Date:</strong> <?php echo date('d-m-Y'); ?></div></div><div class="preview-line"></div><div class="small">Customer: Sample Customer</div><div class="preview-line"></div><div class="small">Item details, quantity, weight, rate and tax will appear here.</div><div class="preview-line"></div><div class="text-end fw-bold">Grand Total: ₹ 0.00</div><div class="preview-line"></div><div class="text-center small" id="previewFooter">Thank you for your business.</div></div></div>
+                <div class="preview-box"><div class="preview-paper"><div class="preview-title" id="previewHeader">TAX INVOICE</div><div class="preview-line"></div><div class="d-flex justify-content-between"><div><strong>Document No:</strong> <span id="previewNumber">INV/26-27/001</span></div><div><strong>Date:</strong> <?php echo date('d-m-Y'); ?></div></div><div class="preview-line"></div><div class="small">Customer: Sample Customer</div><div class="preview-line"></div><div class="small">Item details, quantity, weight, rate and tax will appear here.</div><div class="preview-line"></div><div class="text-end fw-bold">Grand Total: ₹ 0.00</div><div class="preview-line"></div><div class="text-center small" id="previewFooter">Thank you for your business.</div></div></div>
             </div>
             <div class="modal-footer"><button type="button" class="btn btn-light btn-sm" data-bs-dismiss="modal">Cancel</button><button type="submit" class="btn btn-theme" id="saveSettingButton"><i class="fa-solid fa-floppy-disk me-2"></i>Save Setting</button></div>
         </form>
@@ -404,36 +404,272 @@ $resetFrequencies = ['Never','Financial Year','Calendar Year','Monthly','Daily']
 <script>
 (function(){
     'use strict';
+
     const csrfToken = <?php echo json_encode($csrfToken); ?>;
     const modalEl = document.getElementById('settingModal');
-    const modal = modalEl ? new bootstrap.Modal(modalEl) : null;
+    const modal = modalEl && window.bootstrap ? new bootstrap.Modal(modalEl) : null;
     const form = document.getElementById('settingForm');
+    const defaultTemplate = '{PREFIX}{SPLITTER}{MIDDLE}{SPLITTER}{SEQ}{SUFFIX}';
+    const legacyTemplate = '{PREFIX}{SPLITTER}{FY_SHORT}{SPLITTER}{SEQ}';
+    const documentTitles = {
+        'Invoice': 'TAX INVOICE',
+        'Estimate': 'ESTIMATE',
+        'Sales Return': 'SALES RETURN',
+        'Purchase': 'PURCHASE',
+        'Purchase Return': 'PURCHASE RETURN',
+        'Receipt': 'RECEIPT',
+        'Pawn Receipt': 'PAWN RECEIPT',
+        'Chit Receipt': 'CHIT RECEIPT'
+    };
 
-    function toast(type,message){const t=document.createElement('div');t.className='theme-toast theme-toast-'+type;t.innerHTML='<i class="fa-solid '+(type==='success'?'fa-circle-check':'fa-circle-exclamation')+'"></i><span></span>';t.querySelector('span').textContent=message;document.body.appendChild(t);requestAnimationFrame(()=>t.classList.add('show'));setTimeout(()=>{t.classList.remove('show');setTimeout(()=>t.remove(),250)},3200)}
-    async function api(fd){const r=await fetch('api/invoice-settings-save.php',{method:'POST',body:fd,credentials:'same-origin',headers:{'X-Requested-With':'XMLHttpRequest'}});const j=await r.json().catch(()=>({success:false,message:'Invalid response received from the server.'}));if(!r.ok||!j.success)throw new Error(j.message||'Request failed.');return j}
+    function toast(type,message){
+        const t=document.createElement('div');
+        t.className='theme-toast theme-toast-'+type;
+        t.innerHTML='<i class="fa-solid '+(type==='success'?'fa-circle-check':'fa-circle-exclamation')+'"></i><span></span>';
+        t.querySelector('span').textContent=message;
+        document.body.appendChild(t);
+        requestAnimationFrame(()=>t.classList.add('show'));
+        setTimeout(()=>{t.classList.remove('show');setTimeout(()=>t.remove(),250)},3200);
+    }
+
+    async function api(fd){
+        const r=await fetch('api/invoice-settings-save.php',{
+            method:'POST',
+            body:fd,
+            credentials:'same-origin',
+            headers:{'X-Requested-With':'XMLHttpRequest','Accept':'application/json'}
+        });
+        const raw=await r.text();
+        let j;
+        try{j=JSON.parse(raw)}catch(e){throw new Error('Invalid server response: '+raw.replace(/<[^>]*>/g,' ').slice(0,220))}
+        if(!r.ok||!j.success)throw new Error(j.message||'Request failed.');
+        return j;
+    }
+
     function pad(value,len){return String(value).padStart(len,'0')}
-    function buildSample(){const template=document.getElementById('format_template').value||'{PREFIX}{SPLITTER}{FY_SHORT}{SPLITTER}{SEQ}';const splitter=document.getElementById('splitter_symbol').value||'';const prefix=document.getElementById('prefix').value||'';const suffix=document.getElementById('suffix').value||'';const digits=Math.max(1,parseInt(document.getElementById('sequence_digits').value||'3',10));const start=Math.max(1,parseInt(document.getElementById('sequence_start').value||'1',10));const now=new Date();const year=now.getFullYear();const month=String(now.getMonth()+1).padStart(2,'0');const day=String(now.getDate()).padStart(2,'0');const fyStart=(now.getMonth()+1)>=4?year:year-1;const fyShort=String(fyStart).slice(-2)+'-'+String(fyStart+1).slice(-2);let out=template;const map={'{PREFIX}':prefix,'{YYYY}':String(year),'{YY}':String(year).slice(-2),'{FY_SHORT}':fyShort,'{FY_2DIGIT}':String(fyStart).slice(-2)+String(fyStart+1).slice(-2),'{MM}':month,'{DD}':day,'{SEQ}':pad(start,digits),'{SPLITTER}':splitter,'{SUFFIX}':suffix};Object.keys(map).forEach(k=>out=out.split(k).join(map[k]));document.getElementById('sample_output').value=out;document.getElementById('previewNumber').textContent=out;document.getElementById('previewHeader').textContent=document.getElementById('header_text').value||'TAX INVOICE';document.getElementById('previewFooter').textContent=document.getElementById('footer_text').value||'Thank you for your business.'}
-    function toggleCustom(){document.querySelectorAll('.custom-size-field').forEach(el=>el.classList.toggle('d-none',document.getElementById('paper_size').value!=='Custom'))}
-    function resetForm(){form.reset();document.getElementById('setting_id').value='0';document.getElementById('settingModalTitle').textContent='Add Invoice Setting';document.getElementById('prefix').value='INV';document.getElementById('middle_format').value='{FY_SHORT}';document.getElementById('splitter_symbol').value='/';document.getElementById('sequence_digits').value='3';document.getElementById('sequence_start').value='1';document.getElementById('format_template').value='{PREFIX}{SPLITTER}{FY_SHORT}{SPLITTER}{SEQ}';document.getElementById('show_business_logo').checked=true;document.getElementById('show_gstin').checked=true;document.getElementById('show_hsn').checked=true;document.getElementById('show_tax_breakup').checked=true;document.getElementById('is_active').checked=true;toggleCustom();buildSample()}
+    function replaceTokens(value,map){let out=String(value??'');Object.keys(map).forEach(k=>{out=out.split(k).join(map[k])});return out}
 
-    ['prefix','middle_format','suffix','splitter_symbol','sequence_digits','sequence_start','format_template','header_text','footer_text'].forEach(id=>document.getElementById(id).addEventListener('input',buildSample));
-    document.getElementById('paper_size').addEventListener('change',toggleCustom);
-    const addBtn=document.getElementById('addSettingButton'); if(addBtn)addBtn.addEventListener('click',()=>{resetForm();modal.show()});
+    function buildSample(){
+        const template=document.getElementById('format_template').value||defaultTemplate;
+        const middleFormat=document.getElementById('middle_format').value||'';
+        const splitter=document.getElementById('splitter_symbol').value||'';
+        const prefix=document.getElementById('prefix').value||'';
+        const suffix=document.getElementById('suffix').value||'';
+        const digits=Math.max(1,Math.min(10,parseInt(document.getElementById('sequence_digits').value||'3',10)||3));
+        const start=Math.max(1,parseInt(document.getElementById('sequence_start').value||'1',10)||1);
+        const now=new Date();
+        const year=now.getFullYear();
+        const month=String(now.getMonth()+1).padStart(2,'0');
+        const day=String(now.getDate()).padStart(2,'0');
+        const fyStart=(now.getMonth()+1)>=4?year:year-1;
+        const baseMap={
+            '{YYYY}':String(year),
+            '{YY}':String(year).slice(-2),
+            '{FY_SHORT}':String(fyStart).slice(-2)+'-'+String(fyStart+1).slice(-2),
+            '{FY_2DIGIT}':String(fyStart).slice(-2)+String(fyStart+1).slice(-2),
+            '{MM}':month,
+            '{DD}':day,
+            '{SPLITTER}':splitter
+        };
+        const middle=replaceTokens(middleFormat,baseMap);
+        const map={...baseMap,'{PREFIX}':prefix,'{MIDDLE}':middle,'{SEQ}':pad(start,digits),'{SUFFIX}':suffix};
+        const out=replaceTokens(template,map);
+        document.getElementById('sample_output').value=out;
+        document.getElementById('previewNumber').textContent=out||'—';
+        const doc=document.getElementById('document_type').value||'Invoice';
+        document.getElementById('previewHeader').textContent=(document.getElementById('header_text').value||'').trim()||documentTitles[doc]||doc.toUpperCase();
+        document.getElementById('previewFooter').textContent=(document.getElementById('footer_text').value||'').trim()||'Thank you for your business.';
+    }
 
-    const search=document.getElementById('settingSearch'),docFilter=document.getElementById('documentFilter'),statusFilter=document.getElementById('statusFilter');
-    function filterRows(){const q=(search?.value||'').trim().toLowerCase(),d=docFilter?.value||'',s=statusFilter?.value||'';document.querySelectorAll('#settingsTable tbody tr').forEach(row=>{row.style.display=((!q||row.dataset.search.includes(q))&&(!d||row.dataset.document===d)&&(!s||row.dataset.status===s))?'':'none'})}
-    [search,docFilter,statusFilter].forEach(el=>el&&el.addEventListener('input',filterRows));
+    function toggleCustom(){
+        const custom=document.getElementById('paper_size').value==='Custom';
+        document.querySelectorAll('.custom-size-field').forEach(el=>el.classList.toggle('d-none',!custom));
+        document.getElementById('custom_width_mm').required=custom;
+        document.getElementById('custom_height_mm').required=custom;
+        if(!custom){document.getElementById('custom_width_mm').value='';document.getElementById('custom_height_mm').value=''}
+    }
+
+    function shortFile(path){
+        const value=String(path||'');
+        if(!value)return '';
+        const parts=value.replace(/\\/g,'/').split('/');
+        return parts[parts.length-1]||value;
+    }
+
+    function setFileState(setting){
+        const files=[
+            ['invoice_logo_path','current_invoice_logo','remove_invoice_logo','No existing logo'],
+            ['signature_path','current_signature','remove_signature','No existing signature'],
+            ['stamp_path','current_stamp','remove_stamp','No existing stamp']
+        ];
+        files.forEach(([field,labelId,removeId,emptyText])=>{
+            const path=String(setting?.[field]||'');
+            const label=document.getElementById(labelId);
+            const remove=document.getElementById(removeId);
+            label.textContent=path?'Existing: '+shortFile(path):emptyText;
+            label.title=path;
+            remove.checked=false;
+            remove.disabled=!path;
+        });
+    }
+
+    function normalizeLegacyTemplate(){
+        const template=document.getElementById('format_template');
+        if(template.value===legacyTemplate){
+            template.value=defaultTemplate;
+        }
+    }
+
+    function resetForm(){
+        if(!form)return;
+        form.reset();
+        document.getElementById('setting_id').value='0';
+        document.getElementById('settingModalTitle').textContent='Add Invoice Setting';
+        document.getElementById('prefix').value='INV';
+        document.getElementById('middle_format').value='{FY_SHORT}';
+        document.getElementById('suffix').value='';
+        document.getElementById('splitter_symbol').value='/';
+        document.getElementById('sequence_digits').value='3';
+        document.getElementById('sequence_start').value='1';
+        document.getElementById('format_template').value=defaultTemplate;
+        document.getElementById('show_business_logo').checked=true;
+        document.getElementById('show_gstin').checked=true;
+        document.getElementById('show_hsn').checked=true;
+        document.getElementById('show_tax_breakup').checked=true;
+        document.getElementById('show_customer_balance').checked=false;
+        document.getElementById('show_qr_code').checked=false;
+        document.getElementById('is_default').checked=false;
+        document.getElementById('is_active').checked=true;
+        setFileState(null);
+        toggleCustom();
+        buildSample();
+    }
+
+    function fillForm(setting,mode){
+        resetForm();
+        Object.keys(setting).forEach(k=>{
+            if(k==='id')return;
+            const el=document.getElementById(k);
+            if(!el||el.type==='file')return;
+            if(el.type==='checkbox')el.checked=Number(setting[k])===1;
+            else el.value=setting[k]??'';
+        });
+        normalizeLegacyTemplate();
+        if(mode==='edit'){
+            document.getElementById('setting_id').value=String(setting.id||0);
+            document.getElementById('settingModalTitle').textContent='Edit Invoice Setting';
+            setFileState(setting);
+        }else{
+            document.getElementById('setting_id').value='0';
+            document.getElementById('setting_name').value=((setting.setting_name||'Setting')+' Copy').slice(0,100);
+            document.getElementById('is_default').checked=false;
+            document.getElementById('settingModalTitle').textContent='Clone Invoice Setting';
+            setFileState(null);
+        }
+        if(document.getElementById('is_default').checked)document.getElementById('is_active').checked=true;
+        toggleCustom();
+        buildSample();
+    }
+
+    function refreshStats(){
+        const rows=[...document.querySelectorAll('#settingsTable tbody tr')];
+        const active=rows.filter(r=>r.dataset.status==='active').length;
+        const defaults=rows.filter(r=>r.dataset.default==='1').length;
+        const thermal=rows.filter(r=>r.dataset.paper==='80mm'||r.dataset.paper==='58mm').length;
+        const set=(id,val)=>{const el=document.getElementById(id);if(el)el.textContent=String(val)};
+        set('statTotal',rows.length);set('statActive',active);set('statDefault',defaults);set('statThermal',thermal);
+        const empty=document.getElementById('settingsEmptyState');
+        if(empty)empty.classList.toggle('d-none',rows.length>0);
+    }
+
+    ['prefix','middle_format','suffix','splitter_symbol','sequence_digits','sequence_start','format_template','header_text','footer_text'].forEach(id=>{
+        const el=document.getElementById(id);if(el)el.addEventListener('input',buildSample);
+    });
+    document.getElementById('document_type').addEventListener('change',buildSample);
+    document.getElementById('paper_size').addEventListener('change',()=>{toggleCustom();buildSample()});
+    document.getElementById('is_default').addEventListener('change',function(){if(this.checked)document.getElementById('is_active').checked=true});
+    document.getElementById('is_active').addEventListener('change',function(){if(!this.checked)document.getElementById('is_default').checked=false});
+    [['invoice_logo','remove_invoice_logo'],['signature','remove_signature'],['stamp','remove_stamp']].forEach(([fileId,removeId])=>{
+        document.getElementById(fileId).addEventListener('change',function(){if(this.files&&this.files.length)document.getElementById(removeId).checked=false});
+    });
+
+    const addBtn=document.getElementById('addSettingButton');
+    if(addBtn)addBtn.addEventListener('click',()=>{resetForm();if(modal)modal.show()});
+
+    const search=document.getElementById('settingSearch');
+    const docFilter=document.getElementById('documentFilter');
+    const statusFilter=document.getElementById('statusFilter');
+    function filterRows(){
+        const q=(search?.value||'').trim().toLowerCase();
+        const d=docFilter?.value||'';
+        const status=statusFilter?.value||'';
+        document.querySelectorAll('#settingsTable tbody tr').forEach(row=>{
+            const visible=(!q||row.dataset.search.includes(q))&&(!d||row.dataset.document===d)&&(!status||row.dataset.status===status);
+            row.style.display=visible?'':'none';
+        });
+    }
+    if(search)search.addEventListener('input',filterRows);
+    if(docFilter)docFilter.addEventListener('change',filterRows);
+    if(statusFilter)statusFilter.addEventListener('change',filterRows);
 
     document.addEventListener('click',async function(event){
         const edit=event.target.closest('.edit-setting');
-        if(edit){try{const fd=new FormData();fd.append('action','get');fd.append('csrf_token',csrfToken);fd.append('setting_id',edit.dataset.id);const r=await api(fd);resetForm();const s=r.setting;document.getElementById('settingModalTitle').textContent='Edit Invoice Setting';document.getElementById('setting_id').value=String(s.id||edit.dataset.id);Object.keys(s).forEach(k=>{if(k==='id')return;const el=document.getElementById(k);if(!el)return;if(el.type==='checkbox')el.checked=Number(s[k])===1;else el.value=s[k]??''});toggleCustom();buildSample();modal.show()}catch(err){toast('error',err.message)}}
+        if(edit){
+            try{
+                const fd=new FormData();fd.append('action','get');fd.append('csrf_token',csrfToken);fd.append('setting_id',edit.dataset.id);
+                const r=await api(fd);fillForm(r.setting,'edit');if(modal)modal.show();
+            }catch(err){toast('error',err.message)}
+            return;
+        }
+
         const clone=event.target.closest('.clone-setting');
-        if(clone){try{const fd=new FormData();fd.append('action','get');fd.append('csrf_token',csrfToken);fd.append('setting_id',clone.dataset.id);const r=await api(fd);resetForm();const s=r.setting;Object.keys(s).forEach(k=>{const el=document.getElementById(k);if(!el||k==='id')return;if(el.type==='checkbox')el.checked=Number(s[k])===1;else el.value=s[k]??''});document.getElementById('setting_id').value='0';document.getElementById('setting_name').value=(s.setting_name||'Setting')+' Copy';document.getElementById('is_default').checked=false;document.getElementById('settingModalTitle').textContent='Clone Invoice Setting';toggleCustom();buildSample();modal.show()}catch(err){toast('error',err.message)}}
+        if(clone){
+            try{
+                const fd=new FormData();fd.append('action','get');fd.append('csrf_token',csrfToken);fd.append('setting_id',clone.dataset.id);
+                const r=await api(fd);fillForm(r.setting,'clone');if(modal)modal.show();
+            }catch(err){toast('error',err.message)}
+            return;
+        }
+
         const del=event.target.closest('.delete-setting');
-        if(del){if(!confirm('Delete '+del.dataset.name+'?'))return;const fd=new FormData();fd.append('action','delete');fd.append('csrf_token',csrfToken);fd.append('setting_id',del.dataset.id);try{const r=await api(fd);toast('success',r.message);del.closest('tr').remove()}catch(err){toast('error',err.message)}}
+        if(del){
+            if(!confirm('Delete '+del.dataset.name+'?'))return;
+            const fd=new FormData();fd.append('action','delete');fd.append('csrf_token',csrfToken);fd.append('setting_id',del.dataset.id);
+            try{
+                const r=await api(fd);
+                toast('success',r.message);
+                const row=del.closest('tr');if(row)row.remove();
+                refreshStats();
+            }catch(err){toast('error',err.message)}
+        }
     });
 
-    form.addEventListener('submit',async function(event){event.preventDefault();const btn=document.getElementById('saveSettingButton'),old=btn.innerHTML;btn.disabled=true;btn.innerHTML='<i class="fa-solid fa-spinner fa-spin me-2"></i>Saving...';try{const r=await api(new FormData(form));toast('success',r.message);modal.hide();setTimeout(()=>location.reload(),450)}catch(err){toast('error',err.message)}finally{btn.disabled=false;btn.innerHTML=old}});
+    if(form){
+        form.addEventListener('submit',async function(event){
+            event.preventDefault();
+            if(!form.reportValidity())return;
+            const template=document.getElementById('format_template').value;
+            if(!template.includes('{SEQ}')){toast('error','Format template must contain the {SEQ} token.');return}
+            const btn=document.getElementById('saveSettingButton');
+            const old=btn.innerHTML;
+            btn.disabled=true;
+            btn.innerHTML='<i class="fa-solid fa-spinner fa-spin me-2"></i>Saving...';
+            try{
+                const r=await api(new FormData(form));
+                toast('success',r.message);
+                if(modal)modal.hide();
+                setTimeout(()=>location.reload(),350);
+            }catch(err){
+                toast('error',err.message);
+            }finally{
+                btn.disabled=false;
+                btn.innerHTML=old;
+            }
+        });
+    }
+
+    refreshStats();
+    toggleCustom();
     buildSample();
 })();
 </script>

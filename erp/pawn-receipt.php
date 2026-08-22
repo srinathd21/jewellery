@@ -277,27 +277,27 @@ if ($itemStmt) {
     $itemStmt->close();
 }
 
-$settings = [];
-if (tableExists($conn, 'invoice_settings')) {
-    try {
-        $settings = allRows(
-            $conn,
-            "SELECT *
-             FROM invoice_settings
-             WHERE business_id=?
-               AND (branch_id=? OR branch_id IS NULL)
-               AND document_type='Invoice'
-               AND is_active=1
-             ORDER BY (branch_id=?) DESC, is_default DESC, id DESC
-             LIMIT 1",
-            'iii',
-            [$businessId, $branchId, $branchId]
-        );
-    } catch (Throwable $e) {
-        $settings = [];
-    }
+/* Separate Pawn Receipt settings. These do NOT use invoice_settings. */
+$set = [];
+$receiptDefaults = [
+    'pawn_receipt_business_name'=>'',
+    'pawn_receipt_tagline'=>'GOLD - SILVER - DIAMOND - PRECIOUS JEWELLERY',
+    'pawn_receipt_title'=>'PAWN LOAN RECEIPT',
+    'pawn_receipt_copy_label'=>'ORIGINAL FOR CUSTOMER',
+    'pawn_receipt_address'=>'','pawn_receipt_mobile'=>'','pawn_receipt_email'=>'','pawn_receipt_website'=>'','pawn_receipt_gstin'=>'',
+    'pawn_receipt_footer_text'=>'This is a system-generated pawn receipt.','pawn_receipt_terms_conditions'=>'','pawn_receipt_upi_id'=>'','pawn_receipt_watermark_text'=>'',
+    'pawn_receipt_logo_path'=>'','pawn_receipt_signature_path'=>'','pawn_receipt_stamp_path'=>'','pawn_receipt_qr_path'=>'',
+    'pawn_receipt_show_logo'=>'1','pawn_receipt_show_address'=>'1','pawn_receipt_show_mobile'=>'1','pawn_receipt_show_email'=>'1','pawn_receipt_show_website'=>'1','pawn_receipt_show_gstin'=>'1',
+    'pawn_receipt_show_watermark'=>'1','pawn_receipt_show_terms'=>'1','pawn_receipt_show_signature'=>'1','pawn_receipt_show_stamp'=>'1','pawn_receipt_show_upi'=>'1','pawn_receipt_show_qr'=>'1'
+];
+$set = $receiptDefaults;
+if (tableExists($conn, 'business_settings')) {
+    $keys = array_keys($receiptDefaults);
+    $quoted = [];
+    foreach ($keys as $k) $quoted[] = "'" . $conn->real_escape_string($k) . "'";
+    $q = $conn->query('SELECT setting_key,setting_value FROM business_settings WHERE business_id='.(int)$businessId.' AND setting_key IN ('.implode(',',$quoted).')');
+    if ($q) while ($x=$q->fetch_assoc()) $set[$x['setting_key']] = (string)$x['setting_value'];
 }
-$set = $settings[0] ?? [];
 
 $principal = (float)($pawn['principal_amount'] ?? 0);
 $documentCharge = (float)($pawn['document_charge'] ?? 0);
@@ -483,15 +483,25 @@ class PawnReceiptPDF extends FPDF
     }
 }
 
-$logo = (string)($set['invoice_logo_path'] ?? '');
+$logo = (string)($set['pawn_receipt_logo_path'] ?? '');
 $logoFile = $logo !== '' ? __DIR__ . '/' . ltrim($logo, '/') : '';
+$signaturePath = (string)($set['pawn_receipt_signature_path'] ?? '');
+$signatureFile = $signaturePath !== '' ? __DIR__ . '/' . ltrim($signaturePath, '/') : '';
+$stampPath = (string)($set['pawn_receipt_stamp_path'] ?? '');
+$stampFile = $stampPath !== '' ? __DIR__ . '/' . ltrim($stampPath, '/') : '';
+$qrPath = (string)($set['pawn_receipt_qr_path'] ?? '');
+$qrFile = $qrPath !== '' ? __DIR__ . '/' . ltrim($qrPath, '/') : '';
 
 $pdf = new PawnReceiptPDF('P', 'mm', 'A4');
 $pdf->SetMargins(8, 8, 8);
 $pdf->SetAutoPageBreak(true, 17);
-$pdf->footerText = (string)($set['footer_text'] ?? 'This is a system-generated pawn receipt.');
-$pdf->watermark = strtoupper((string)($pawn['business_name'] ?? 'JEWELLERY'));
-$pdf->watermarkLogo = is_file($logoFile) ? $logoFile : '';
+$pdf->footerText = (string)($set['pawn_receipt_footer_text'] ?? 'This is a system-generated pawn receipt.');
+$displayBusinessName = trim((string)($set['pawn_receipt_business_name'] ?? ''));
+if ($displayBusinessName === '') $displayBusinessName = (string)(($pawn['business_name'] ?? '') ?: ($pawn['legal_name'] ?? '') ?: 'Jewellery Business');
+$watermarkText = trim((string)($set['pawn_receipt_watermark_text'] ?? ''));
+$pdf->watermark = strtoupper($watermarkText !== '' ? $watermarkText : $displayBusinessName);
+$pdf->watermarkLogo = (($set['pawn_receipt_show_watermark'] ?? '1') === '1' && ($set['pawn_receipt_show_logo'] ?? '1') === '1' && is_file($logoFile)) ? $logoFile : '';
+if (($set['pawn_receipt_show_watermark'] ?? '1') !== '1') $pdf->watermark = '';
 $pdf->AddPage();
 
 $P = [123, 31, 58];
@@ -501,7 +511,7 @@ $GS = [248, 236, 208];
 $B = [216, 201, 172];
 $W = 194;
 
-if (!empty($set['show_business_logo']) && is_file($logoFile)) {
+if (($set['pawn_receipt_show_logo'] ?? '1') === '1' && is_file($logoFile)) {
     $pdf->Image($logoFile, 8, 8, 23, 23);
 } else {
     $pdf->SetXY(8, 8);
@@ -519,20 +529,29 @@ if (!empty($set['show_business_logo']) && is_file($logoFile)) {
     $pdf->Cell(23, 23, txt($initials ?: 'JW'), 1, 0, 'C', true);
 }
 
-$name = $pawn['business_name'] ?: $pawn['legal_name'] ?: 'Jewellery Business';
-$address = trim(implode(', ', array_filter([
-    $pawn['branch_address1'] ?? '',
-    $pawn['branch_address2'] ?? '',
-    $pawn['branch_city'] ?? '',
-    $pawn['branch_state'] ?? '',
-    $pawn['branch_pincode'] ?? ''
-])));
-$contact = trim(implode(' | ', array_filter([
-    ($pawn['branch_mobile'] ?? '') ?: ($pawn['business_mobile'] ?? ''),
-    ($pawn['branch_email'] ?? '') ?: ($pawn['business_email'] ?? ''),
-    $pawn['website'] ?? ''
-])));
-$gst = ($pawn['branch_gstin'] ?? '') ?: ($pawn['business_gstin'] ?? '');
+$name = $displayBusinessName;
+$address = trim((string)($set['pawn_receipt_address'] ?? ''));
+if ($address === '') {
+    $address = trim(implode(', ', array_filter([
+        $pawn['branch_address1'] ?? '',$pawn['branch_address2'] ?? '',$pawn['branch_city'] ?? '',$pawn['branch_state'] ?? '',$pawn['branch_pincode'] ?? ''
+    ])));
+}
+$mobile = trim((string)($set['pawn_receipt_mobile'] ?? ''));
+if ($mobile === '') $mobile = (string)(($pawn['branch_mobile'] ?? '') ?: ($pawn['business_mobile'] ?? ''));
+$email = trim((string)($set['pawn_receipt_email'] ?? ''));
+if ($email === '') $email = (string)(($pawn['branch_email'] ?? '') ?: ($pawn['business_email'] ?? ''));
+$website = trim((string)($set['pawn_receipt_website'] ?? ''));
+if ($website === '') $website = (string)($pawn['website'] ?? '');
+$contactParts=[];
+if (($set['pawn_receipt_show_mobile'] ?? '1') === '1' && $mobile!=='') $contactParts[]=$mobile;
+if (($set['pawn_receipt_show_email'] ?? '1') === '1' && $email!=='') $contactParts[]=$email;
+if (($set['pawn_receipt_show_website'] ?? '1') === '1' && $website!=='') $contactParts[]=$website;
+$contact = implode(' | ', $contactParts);
+$gst = trim((string)($set['pawn_receipt_gstin'] ?? ''));
+if ($gst === '') $gst = (string)(($pawn['branch_gstin'] ?? '') ?: ($pawn['business_gstin'] ?? ''));
+$tagline = trim((string)($set['pawn_receipt_tagline'] ?? ''));
+$receiptTitle = trim((string)($set['pawn_receipt_title'] ?? 'PAWN LOAN RECEIPT'));
+$copyLabel = trim((string)($set['pawn_receipt_copy_label'] ?? 'ORIGINAL FOR CUSTOMER'));
 
 $pdf->SetXY(34, 8);
 $pdf->SetTextColor(...$P);
@@ -542,30 +561,30 @@ $pdf->Cell(116, 7, txt(strtoupper($name)), 0, 1, 'C');
 $pdf->SetX(34);
 $pdf->SetTextColor(...$G);
 $pdf->SetFont('Arial', 'B', 7);
-$pdf->Cell(116, 4, txt('GOLD - SILVER - DIAMOND - PRECIOUS JEWELLERY'), 0, 1, 'C');
+$pdf->Cell(116, 4, txt($tagline), 0, 1, 'C');
 
 $pdf->SetX(34);
 $pdf->SetTextColor(68);
 $pdf->SetFont('Arial', '', 6.5);
-if ($address !== '') $pdf->MultiCell(116, 3.4, txt($address), 0, 'C');
+if (($set['pawn_receipt_show_address'] ?? '1') === '1' && $address !== '') $pdf->MultiCell(116, 3.4, txt($address), 0, 'C');
 $pdf->SetX(34);
 if ($contact !== '') $pdf->MultiCell(116, 3.4, txt($contact), 0, 'C');
 $pdf->SetX(34);
-if (!empty($set['show_gstin']) && $gst) {
+if (($set['pawn_receipt_show_gstin'] ?? '1') === '1' && $gst) {
     $pdf->Cell(116, 3.4, txt('GSTIN: ' . $gst), 0, 1, 'C');
 }
 
 $pdf->SetXY(153, 8);
 $pdf->SetTextColor(...$P);
 $pdf->SetFont('Arial', 'B', 11);
-$pdf->Cell(49, 7, txt('PAWN LOAN RECEIPT'), 0, 1, 'R');
+$pdf->Cell(49, 7, txt($receiptTitle !== '' ? $receiptTitle : 'PAWN LOAN RECEIPT'), 0, 1, 'R');
 
 $pdf->SetX(153);
 $pdf->SetFillColor(...$GS);
 $pdf->SetDrawColor(...$G);
 $pdf->SetTextColor(...$P);
 $pdf->SetFont('Arial', 'B', 6);
-$pdf->Cell(49, 6, txt('ORIGINAL FOR CUSTOMER'), 1, 1, 'C', true);
+$pdf->Cell(49, 6, txt($copyLabel !== '' ? $copyLabel : 'ORIGINAL FOR CUSTOMER'), 1, 1, 'C', true);
 
 $pdf->SetDrawColor(...$P);
 $pdf->SetLineWidth(.8);
@@ -821,10 +840,36 @@ $pdf->Cell($W, 6, txt('AMOUNT IN WORDS'), 1, 1, 'L', true);
 $pdf->SetFont('Arial', '', 7);
 $pdf->MultiCell($W, 5, txt(amountWords((int)round($disbursement))), 1, 'L');
 
+$terms = trim((string)($set['pawn_receipt_terms_conditions'] ?? ''));
+$upiId = trim((string)($set['pawn_receipt_upi_id'] ?? ''));
+if ((($set['pawn_receipt_show_terms'] ?? '1') === '1' && $terms !== '') || (($set['pawn_receipt_show_upi'] ?? '1') === '1' && $upiId !== '') || (($set['pawn_receipt_show_qr'] ?? '1') === '1' && is_file($qrFile))) {
+    $pdf->Ln(4);
+    $pdf->need(28);
+    if (($set['pawn_receipt_show_terms'] ?? '1') === '1' && $terms !== '') {
+        $pdf->SetFillColor(...$GS);$pdf->SetTextColor(...$P);$pdf->SetFont('Arial','B',7);
+        $pdf->Cell($W,6,txt('TERMS & CONDITIONS'),1,1,'L',true);
+        $pdf->SetTextColor(36);$pdf->SetFont('Arial','',6.3);
+        $pdf->MultiCell($W,4,txt($terms),1,'L');
+    }
+    if (($set['pawn_receipt_show_upi'] ?? '1') === '1' && $upiId !== '') {
+        $pdf->Ln(2);$pdf->SetFont('Arial','B',6.7);$pdf->Cell(0,5,txt('UPI ID: '.$upiId),0,1,'L');
+    }
+    if (($set['pawn_receipt_show_qr'] ?? '1') === '1' && is_file($qrFile)) {
+        $pdf->Image($qrFile, 176, max(8,$pdf->GetY()-12), 22, 22);
+    }
+}
+
 $pdf->Ln(16);
 $pdf->need(22);
 $sigY = $pdf->GetY();
 $sw = $W / 3;
+
+if (($set['pawn_receipt_show_signature'] ?? '1') === '1' && is_file($signatureFile)) {
+    $pdf->Image($signatureFile, 8 + $sw * 2 + 15, max(8,$sigY - 14), 28, 12);
+}
+if (($set['pawn_receipt_show_stamp'] ?? '1') === '1' && is_file($stampFile)) {
+    $pdf->Image($stampFile, 8 + $sw + 19, max(8,$sigY - 15), 24, 14);
+}
 
 $pdf->SetDrawColor(90);
 $pdf->Line(12, $sigY, 8 + $sw - 4, $sigY);
