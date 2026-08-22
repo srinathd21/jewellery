@@ -114,9 +114,48 @@ if (!categoryReportPermission($conn, 'open') || !categoryReportPermission($conn,
 }
 
 $businessId = (int)($_SESSION['business_id'] ?? 0);
-$branchId = (int)($_SESSION['branch_id'] ?? 0);
+$branchId = (int)($_SESSION['branch_id'] ?? ($_SESSION['current_branch_id'] ?? ($_SESSION['default_branch_id'] ?? 0)));
+
 if ($businessId <= 0) {
     die('A valid business must be selected.');
+}
+
+// Resolve the same active/default branch used by the Categories page.
+if ($branchId <= 0) {
+    $userId = (int)($_SESSION['user_id'] ?? 0);
+
+    if ($userId > 0 && tableExists($conn, 'users')) {
+        $branchStmt = $conn->prepare("SELECT COALESCE(uba.branch_id, u.default_branch_id) AS branch_id
+                                      FROM users u
+                                      LEFT JOIN user_branch_access uba
+                                             ON uba.user_id = u.id
+                                            AND uba.business_id = u.business_id
+                                            AND uba.is_default = 1
+                                      WHERE u.id = ? AND u.business_id = ?
+                                      LIMIT 1");
+        if ($branchStmt) {
+            $branchStmt->bind_param('ii', $userId, $businessId);
+            $branchStmt->execute();
+            $branchRow = $branchStmt->get_result()->fetch_assoc();
+            $branchStmt->close();
+            $branchId = (int)($branchRow['branch_id'] ?? 0);
+        }
+    }
+
+    if ($branchId <= 0 && tableExists($conn, 'branches')) {
+        $branchStmt = $conn->prepare("SELECT id
+                                      FROM branches
+                                      WHERE business_id = ? AND is_active = 1
+                                      ORDER BY is_default DESC, id ASC
+                                      LIMIT 1");
+        if ($branchStmt) {
+            $branchStmt->bind_param('i', $businessId);
+            $branchStmt->execute();
+            $branchRow = $branchStmt->get_result()->fetch_assoc();
+            $branchStmt->close();
+            $branchId = (int)($branchRow['id'] ?? 0);
+        }
+    }
 }
 
 $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
@@ -169,9 +208,9 @@ if ($branchId > 0 && tableExists($conn, 'branches')) {
 $categories = [];
 $sql = "SELECT c.id, c.category_code, c.category_name, c.description, c.sort_order, c.is_active,
                p.category_name AS parent_name,
-               COUNT(pr.id) AS product_count,
-               COALESCE(SUM(pr.gross_weight), 0) AS total_gross_weight,
-               COALESCE(SUM(pr.net_weight), 0) AS total_net_weight
+               COUNT(DISTINCT pr.id) AS product_count,
+               COALESCE(SUM(CASE WHEN ps.product_id IS NULL THEN pr.gross_weight ELSE ps.gross_weight END), 0) AS total_gross_weight,
+               COALESCE(SUM(CASE WHEN ps.product_id IS NULL THEN pr.net_weight ELSE ps.net_weight END), 0) AS total_net_weight
         FROM product_categories c
         LEFT JOIN product_categories p
                ON p.id = c.parent_id
@@ -179,6 +218,14 @@ $sql = "SELECT c.id, c.category_code, c.category_name, c.description, c.sort_ord
         LEFT JOIN products pr
                ON pr.category_id = c.id
               AND pr.business_id = c.business_id
+        LEFT JOIN (
+            SELECT product_id,
+                   SUM(gross_weight) AS gross_weight,
+                   SUM(net_weight) AS net_weight
+            FROM product_stock
+            WHERE business_id = ? AND branch_id = ?
+            GROUP BY product_id
+        ) ps ON ps.product_id = pr.id
         WHERE c.business_id = ?
         GROUP BY c.id, c.category_code, c.category_name, c.description, c.sort_order, c.is_active, p.category_name
         ORDER BY c.sort_order ASC, c.category_name ASC";
@@ -186,7 +233,7 @@ $stmt = $conn->prepare($sql);
 if (!$stmt) {
     die('Unable to prepare category report.');
 }
-$stmt->bind_param('i', $businessId);
+$stmt->bind_param('iii', $businessId, $branchId, $businessId);
 $stmt->execute();
 $result = $stmt->get_result();
 while ($row = $result->fetch_assoc()) {
