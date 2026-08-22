@@ -434,8 +434,14 @@ $summaryY=$pdf->GetY();
 $summaryPage=$pdf->PageNo();
 
 /* ---------------- RIGHT SIDE: TOTALS ---------------- */
+// Summary Taxable Amount must show the value before discount and round off.
+// sales.taxable_amount is stored after discounts, so add the saved discount back.
+$summaryTaxableBeforeDiscount =
+    (float)($s['taxable_amount'] ?? $s['subtotal'] ?? 0)
+    + (float)($s['discount_amount'] ?? 0);
+
 $totals=[
-    ['Taxable Amount',(float)($s['taxable_amount']??$s['subtotal']??0)],
+    ['Taxable Amount',$summaryTaxableBeforeDiscount],
     ['CGST',(float)($s['cgst_amount']??0)],
     ['SGST',(float)($s['sgst_amount']??0)],
     ['IGST',(float)($s['igst_amount']??0)],
