@@ -218,6 +218,7 @@ $sql = "SELECT c.id, c.category_code, c.category_name, c.description, c.sort_ord
         LEFT JOIN products pr
                ON pr.category_id = c.id
               AND pr.business_id = c.business_id
+              AND pr.is_active = 1
         LEFT JOIN (
             SELECT product_id,
                    SUM(gross_weight) AS gross_weight,
