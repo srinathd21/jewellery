@@ -219,6 +219,58 @@ function tableExists(mysqli $conn, string $table): bool
     return $result && $result->num_rows > 0;
 }
 
+
+function reactivateProductAfterRestock(mysqli $conn, int $businessId, int $productId): void
+{
+    if ($businessId <= 0 || $productId <= 0) {
+        return;
+    }
+
+    // Reactivate only when restored stock is actually available somewhere in the business.
+    // This matches the billing-side auto-inactive rule that deactivates a product only
+    // when its total stock across branches reaches zero.
+    $stmt = $conn->prepare(
+        'SELECT COALESCE(SUM(quantity),0) AS total_qty
+'
+        . 'FROM product_stock
+'
+        . 'WHERE business_id=? AND product_id=?'
+    );
+    if (!$stmt) {
+        throw new RuntimeException('Unable to check restored product stock: ' . $conn->error);
+    }
+
+    $stmt->bind_param('ii', $businessId, $productId);
+    if (!$stmt->execute()) {
+        $error = $stmt->error;
+        $stmt->close();
+        throw new RuntimeException('Unable to check restored product stock: ' . $error);
+    }
+
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    $totalQty = (float)($row['total_qty'] ?? 0);
+
+    if ($totalQty <= 0.0001) {
+        return;
+    }
+
+    $update = $conn->prepare(
+        'UPDATE products SET is_active=1 WHERE id=? AND business_id=? AND is_active=0'
+    );
+    if (!$update) {
+        throw new RuntimeException('Unable to prepare product reactivation: ' . $conn->error);
+    }
+
+    $update->bind_param('ii', $productId, $businessId);
+    if (!$update->execute()) {
+        $error = $update->error;
+        $update->close();
+        throw new RuntimeException('Unable to reactivate restored product: ' . $error);
+    }
+    $update->close();
+}
+
 $action = (string)($_POST['action'] ?? '');
 $businessId = (int)($_SESSION['business_id'] ?? 0);
 $branchId = (int)($_SESSION['branch_id'] ?? ($_SESSION['default_branch_id'] ?? 0));
@@ -489,6 +541,10 @@ if ($action === 'delete' || $action === 'cancel') {
             $stmt->bind_param('iiiddd', $businessId, $saleBranchId, $productId, $quantity, $grossWeight, $netWeight);
             if (!$stmt->execute()) throw new Exception('Unable to restore product stock: ' . $stmt->error);
             $stmt->close();
+
+            // If this product was auto-inactivated because its stock reached zero,
+            // restoring stock from a cancelled/deleted invoice makes it active again.
+            reactivateProductAfterRestock($conn, $businessId, $productId);
 
             $movementDate = date('Y-m-d H:i:s');
             $remarksText = 'Cancelled invoice ' . $sale['invoice_no'] . ' - stock restored';

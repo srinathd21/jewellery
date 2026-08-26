@@ -164,6 +164,7 @@ $sql = "SELECT c.id, c.parent_id, c.category_code, c.category_name, c.descriptio
         LEFT JOIN products pr
                ON pr.category_id = c.id
               AND pr.business_id = c.business_id
+              AND pr.is_active = 1
         LEFT JOIN (
             SELECT product_id,
                    SUM(gross_weight) AS gross_weight,
@@ -205,6 +206,7 @@ $productSql = "SELECT pr.id, pr.category_id, pr.product_code, pr.barcode, pr.pro
                    GROUP BY product_id
                ) ps ON ps.product_id = pr.id
                WHERE pr.business_id = ?
+                 AND pr.is_active = 1
                ORDER BY pr.category_id, pr.product_name, pr.product_code";
 $productStmt = $conn->prepare($productSql);
 if ($productStmt) {
