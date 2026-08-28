@@ -940,7 +940,14 @@ unset($adjustmentRow);
                 <div class="row g-2">
                     <div class="col-lg-7">
                         <div class="panel">
-                            <div class="panel-title">Adjustment Entry</div>
+                            <div class="d-flex align-items-center justify-content-between gap-2 flex-wrap mb-2">
+                                <div class="panel-title mb-0">Adjustment Entry</div>
+                                <?php if ($canCreate): ?>
+                                    <a href="bulk-stock-adjustment.php" class="btn btn-theme btn-sm">
+                                        <i class="fa-solid fa-layer-group me-2"></i>Bulk Add Stock
+                                    </a>
+                                <?php endif; ?>
+                            </div>
                             <form id="adjustmentForm"
                                 data-current-qty="<?php echo h((string) ($selectedProduct['quantity'] ?? 0)); ?>"
                                 data-current-weight="<?php echo h((string) ($selectedProduct['gross_weight'] ?? 0)); ?>"
