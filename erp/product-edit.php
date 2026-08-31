@@ -387,14 +387,39 @@ $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
                         <div class="col-md-8"><label class="field-label">Description</label><textarea
                                 class="form-control" rows="5"
                                 name="description"><?= e($product['description']) ?></textarea>
-                            <div class="d-flex gap-4 mt-3">
-                                <div class="form-check"><input class="form-check-input" type="checkbox"
-                                        name="track_stock" value="1" id="track_stock"
-                                        <?= (int) $product['track_stock'] === 1 ? 'checked' : '' ?>><label
-                                        class="form-check-label" for="track_stock">Track stock</label></div>
-                                <div class="form-check"><input class="form-check-input" type="checkbox" name="is_active"
-                                        value="1" id="is_active" <?= (int) $product['is_active'] === 1 ? 'checked' : '' ?>><label
-                                        class="form-check-label" for="is_active">Active</label></div>
+                            <div class="row g-3 mt-1">
+                                <div class="col-md-4">
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="checkbox" name="track_stock" value="1"
+                                            id="track_stock" <?= (int) ($product['track_stock'] ?? 0) === 1 ? 'checked' : '' ?>>
+                                        <label class="form-check-label fw-semibold" for="track_stock">Track stock</label>
+                                    </div>
+                                    <div class="small text-muted ms-4 mt-1">
+                                        Enable stock quantity tracking for this product.
+                                    </div>
+                                </div>
+
+                                <div class="col-md-4">
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="checkbox" name="dynamic_stock" value="1"
+                                            id="dynamic_stock" <?= (int) ($product['dynamic_stock'] ?? 0) === 1 ? 'checked' : '' ?>>
+                                        <label class="form-check-label fw-semibold" for="dynamic_stock">Dynamic stock weight</label>
+                                    </div>
+                                    <div class="small text-muted ms-4 mt-1">
+                                        Use this when each quantity can have a different weight. Total stock weight is the sum of individual piece weights.
+                                    </div>
+                                </div>
+
+                                <div class="col-md-4">
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="checkbox" name="is_active" value="1"
+                                            id="is_active" <?= (int) ($product['is_active'] ?? 0) === 1 ? 'checked' : '' ?>>
+                                        <label class="form-check-label fw-semibold" for="is_active">Active</label>
+                                    </div>
+                                    <div class="small text-muted ms-4 mt-1">
+                                        Active products appear in billing, purchase and inventory screens.
+                                    </div>
+                                </div>
                             </div>
                         </div>
                         <div class="col-md-4"><label class="field-label">Product image</label>
@@ -461,6 +486,8 @@ $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
             const taxPercentInput = document.getElementById('taxPercentInput');
             const gstTypeFieldWrap = document.getElementById('gstTypeFieldWrap');
             const gstTypeSelect = document.getElementById('gstTypeSelect');
+            const trackStockInput = document.getElementById('track_stock');
+            const dynamicStockInput = document.getElementById('dynamic_stock');
             let savedGstTaxPercent = taxPercentInput ? (taxPercentInput.value || '3') : '3';
             let savedHsnCode = hsnCodeInput ? hsnCodeInput.value : '';
 
@@ -515,6 +542,34 @@ $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
             window.addEventListener('nonGstModeChanged', event => {
                 applyNonGstMode(!!event.detail?.active);
             });
+
+            function syncDynamicStockSetting() {
+                if (!trackStockInput || !dynamicStockInput) return;
+
+                if (dynamicStockInput.checked) {
+                    trackStockInput.checked = true;
+                }
+
+                dynamicStockInput.disabled = !trackStockInput.checked;
+                if (!trackStockInput.checked) {
+                    dynamicStockInput.checked = false;
+                }
+            }
+
+            trackStockInput?.addEventListener('change', () => {
+                syncDynamicStockSetting();
+                markDirty();
+            });
+
+            dynamicStockInput?.addEventListener('change', () => {
+                if (dynamicStockInput.checked && trackStockInput) {
+                    trackStockInput.checked = true;
+                }
+                syncDynamicStockSetting();
+                markDirty();
+            });
+
+            syncDynamicStockSetting();
             const discardButton = document.getElementById('discardChangesBtn');
             const unsavedElement = document.getElementById('unsavedChangesModal');
             const unsavedTitle = document.getElementById('unsavedChangesTitle');

@@ -164,7 +164,9 @@ if(isset($_GET['action']) && $_GET['action']==='share_link'){
 try{
     $saleRows=allRows($conn,"SELECT s.*,c.customer_code,c.mobile customer_master_mobile,c.email,c.gstin customer_gstin,c.address_line1,c.address_line2,c.city,c.state,c.pincode,b.business_name,b.legal_name,b.mobile business_mobile,b.email business_email,b.website,b.gstin business_gstin,b.pan_no,br.branch_name,br.mobile branch_mobile,br.email branch_email,br.address_line1 branch_address1,br.address_line2 branch_address2,br.city branch_city,br.state branch_state,br.pincode branch_pincode,br.gstin branch_gstin FROM sales s LEFT JOIN customers c ON c.id=s.customer_id LEFT JOIN businesses b ON b.id=s.business_id LEFT JOIN branches br ON br.id=s.branch_id WHERE s.id=? AND s.business_id=? LIMIT 1",'ii',[$saleId,$businessId]);
     if(!$saleRows) die('Sale not found.'); $s=$saleRows[0];
-    $items=allRows($conn,"SELECT si.*,p.product_code,p.hsn_code product_hsn,p.metal_id
+    $items=allRows($conn,"SELECT si.*,p.product_code,p.hsn_code product_hsn,p.metal_id,
+               COALESCE(p.dynamic_stock,0) AS dynamic_stock,
+               COALESCE(p.net_weight,0) AS product_net_weight
         FROM sale_items si
         LEFT JOIN products p ON p.id=si.product_id
         WHERE si.sale_id=? AND si.business_id=?
@@ -205,6 +207,14 @@ try{
     $pays=allRows($conn,"SELECT sp.*,pm.method_name FROM sale_payments sp LEFT JOIN payment_methods pm ON pm.id=sp.payment_method_id WHERE sp.sale_id=? AND sp.business_id=? ORDER BY sp.id",'ii',[$saleId,$businessId]);
     $claims=allRows($conn,"SELECT sc.*,cg.group_name,cg.group_no,cm.ticket_no FROM sales_chit_claims sc LEFT JOIN chit_groups cg ON cg.id=sc.chit_group_id LEFT JOIN chit_members cm ON cm.id=sc.chit_member_id WHERE sc.sale_id=? AND sc.business_id=? AND sc.status='Posted'",'ii',[$saleId,$businessId]);
     $ex=allRows($conn,"SELECT * FROM sale_exchange_items WHERE sale_id=? AND business_id=? ORDER BY id",'ii',[$saleId,$businessId]);
+    $exchangePayouts=[];
+    if(tableExists($conn,'sale_exchange_payouts')){
+        $exchangePayouts=allRows($conn,"SELECT sep.*,pm.method_name
+            FROM sale_exchange_payouts sep
+            LEFT JOIN payment_methods pm ON pm.id=sep.payment_method_id AND pm.business_id=sep.business_id
+            WHERE sep.sale_id=? AND sep.business_id=?
+            ORDER BY sep.id",'ii',[$saleId,$businessId]);
+    }
     $settings=allRows($conn,"SELECT * FROM invoice_settings WHERE business_id=? AND (branch_id=? OR branch_id IS NULL) AND document_type='Invoice' AND is_active=1 ORDER BY (branch_id=?) DESC,is_default DESC,id DESC LIMIT 1",'iii',[$businessId,(int)$s['branch_id'],(int)$s['branch_id']]);
     $set=$settings[0]??[];
 }catch(Throwable $e){ die('Unable to build invoice: '.htmlspecialchars($e->getMessage())); }
@@ -390,9 +400,10 @@ foreach($items as $n=>$i){
     if($pdf->GetY()>238){$pdf->AddPage();$pdf->SetY(14);$drawHead();}
     $gross=(float)($i['gross_weight']??0);
     $stone=(float)($i['stone_weight']??$i['less_weight']??0);
-    $net=(float)($i['net_weight']??max(0,$gross-$stone));
+    $isDynamic=((int)($i['dynamic_stock']??0)===1);
+    $net=$isDynamic ? null : (float)($i['net_weight']??$i['product_net_weight']??max(0,$gross-$stone));
     $rate=(float)($i['metal_rate']??$i['rate_per_gram']??0);
-    $metal=(float)($i['metal_value']??($gross>0?$gross*$rate:$net*$rate));
+    $metal=(float)($i['metal_value']??($gross>0?$gross*$rate:(($net!==null?$net:0)*$rate)));
     $making=(float)($i['making_charge']??0);
     $wastageAmount=(float)($i['wastage_amount']??0);
     $stoneAmount=(float)($i['stone_amount']??0);
@@ -409,13 +420,36 @@ foreach($items as $n=>$i){
         ?? max(0,$metal+$making+$wastageAmount+$stoneAmount+$other-$discount));
 
     $hsn=trim((string)($i['hsn_code']??$i['product_hsn']??'').' / '.(string)($i['purity']??''),' /');
-    $vals=[$n+1,$i['item_name']??'-',$hsn?:'-',number_format($gross,3),number_format($stone,3),number_format($net,3),number_format($making,2),number_format($other,2),number_format($taxable,2)];
+    $netDisplay=$isDynamic ? '-' : number_format((float)$net,3);
+    $description=(string)($i['item_name']??'-');
+    if($isDynamic) $description.=' (Dynamic Weight)';
+    $vals=[$n+1,$description,$hsn?:'-',number_format($gross,3),number_format($stone,3),$netDisplay,number_format($making,2),number_format($other,2),number_format($taxable,2)];
     foreach($vals as $c=>$v)$pdf->Cell($ws[$c],9,txt($v),1,0,$c===1?'L':($c<3?'C':'R'));
     $pdf->Ln();
 }
 $pdf->Ln(3);
 
 if($ex){$pdf->need(14+count($ex)*7);$pdf->SetFillColor(...$GS);$pdf->SetTextColor(...$P);$pdf->SetFont('Arial','B',8.5);$pdf->Cell($W,7,txt('EXCHANGE DETAILS'),1,1,'L',true);$pdf->SetTextColor(36);$pdf->SetFont('Arial','',8);foreach($ex as $x){$line=($x['item_name']??'Exchange Item').' | '.number_format((float)$x['eligible_weight'],3).' g = Rs. '.number_format((float)$x['exchange_value'],2);$pdf->MultiCell($W,6,txt($line),1,'L');}$pdf->Ln(2);}
+if($exchangePayouts){
+    $pdf->need(18+count($exchangePayouts)*7);
+    $pdf->SetFillColor(...$GS);$pdf->SetTextColor(...$P);$pdf->SetFont('Arial','B',8.5);
+    $pdf->Cell($W,7,txt('PAID TO CUSTOMER - EXCHANGE EXTRA VALUE'),1,1,'L',true);
+    $pdf->SetTextColor(75);$pdf->SetFont('Arial','',6.5);
+    $pdf->MultiCell($W,5,txt('Amount returned to the customer when old-gold / exchange value is higher than the bill value.'),1,'L');
+    $pdf->SetTextColor(36);$pdf->SetFont('Arial','',7.2);
+    foreach($exchangePayouts as $payout){
+        $method=trim((string)($payout['method_name']??''));
+        if($method==='') $method='Payment';
+        $reference=trim((string)($payout['reference_no']??''));
+        $dateValue=(string)($payout['payout_date']??'');
+        $dateText=$dateValue!=='' ? date('d-m-Y h:i A',strtotime($dateValue)) : '-';
+        $line=$dateText.' | '.$method;
+        if($reference!=='') $line.=' | Ref: '.$reference;
+        $line.=' | Rs. '.number_format((float)($payout['amount']??0),2);
+        $pdf->MultiCell($W,6,txt($line),1,'L');
+    }
+    $pdf->Ln(2);
+}
 if($claims){$pdf->need(14+count($claims)*7);$pdf->SetFillColor(...$GS);$pdf->SetTextColor(...$P);$pdf->SetFont('Arial','B',8.5);$pdf->Cell($W,7,txt('GOLD GRAM CLAIMS'),1,1,'L',true);$pdf->SetTextColor(36);$pdf->SetFont('Arial','',8);foreach($claims as $c){$line=($c['group_name']?:'Chit').' / Ticket '.($c['ticket_no']?:'-').' | '.number_format((float)$c['claim_grams'],6).' g x Rs. '.number_format((float)$c['rate_per_gram'],2).' = Rs. '.number_format((float)$c['claim_amount'],2);$pdf->MultiCell($W,6,txt($line),1,'L');}$pdf->Ln(2);}
 
 $notesW=112;
@@ -440,6 +474,10 @@ $summaryTaxableBeforeDiscount =
     (float)($s['taxable_amount'] ?? $s['subtotal'] ?? 0)
     + (float)($s['discount_amount'] ?? 0);
 
+$exchangePayoutTotal=0.0;
+foreach($exchangePayouts as $payoutRow){
+    $exchangePayoutTotal+=(float)($payoutRow['amount']??0);
+}
 $totals=[
     ['Taxable Amount',$summaryTaxableBeforeDiscount],
     ['CGST',(float)($s['cgst_amount']??0)],
@@ -450,9 +488,12 @@ $totals=[
     ['Gold Claim',-(float)($s['chit_claim_amount']??0)],
     ['Round Off',(float)($s['round_off']??0)],
     ['Grand Total',(float)($s['grand_total']??$s['net_payable_amount']??0)],
-    ['Paid Amount',(float)($s['paid_amount']??0)],
-    ['Balance',(float)($s['balance_amount']??0)]
+    ['Paid Amount',(float)($s['paid_amount']??0)]
 ];
+if($exchangePayoutTotal>0.005){
+    $totals[]=['Paid to Customer',$exchangePayoutTotal];
+}
+$totals[]=['Balance',(float)($s['balance_amount']??0)];
 $pdf->SetXY(124,$summaryY);
 foreach($totals as $r){
     $grand=$r[0]==='Grand Total';

@@ -76,6 +76,7 @@ if ($businessId <= 0 || $branchId <= 0) {
 $productId = (int)($_POST['product_id'] ?? 0);
 $mode = trim((string)($_POST['adjustment_mode'] ?? 'add'));
 $qty = round((float)($_POST['adjustment_qty'] ?? 0), 3);
+$postedWeight = round((float)($_POST['adjustment_weight'] ?? 0), 3);
 $reasonType = trim((string)($_POST['reason_type'] ?? 'Adjustment'));
 $remarks = trim((string)($_POST['remarks'] ?? ''));
 $movementDateInput = trim((string)($_POST['movement_date'] ?? ''));
@@ -88,8 +89,8 @@ if ($productId <= 0) {
     responseJson(false, 'Select a product.', [], 422);
 }
 
-if ($qty < 0) {
-    responseJson(false, 'Quantity cannot be negative.', [], 422);
+if ($qty < 0 || $postedWeight < 0) {
+    responseJson(false, 'Quantity and weight cannot be negative.', [], 422);
 }
 
 if ($mode !== 'set' && $qty <= 0) {
@@ -122,8 +123,11 @@ try {
      * products.net_weight = NET WEIGHT PER QUANTITY.
      * Total stock weight = quantity x products.net_weight.
      */
+    $hasDynamicStock = tableHasColumn($conn, 'products', 'dynamic_stock');
+    $dynamicSelect = $hasDynamicStock ? 'COALESCE(dynamic_stock,0) AS dynamic_stock' : '0 AS dynamic_stock';
+
     $productStmt = $conn->prepare(
-        'SELECT id, product_name, purchase_rate, track_stock, COALESCE(net_weight,0) AS unit_net_weight
+        'SELECT id, product_name, purchase_rate, track_stock, COALESCE(net_weight,0) AS unit_net_weight, ' . $dynamicSelect . '
          FROM products
          WHERE id=? AND business_id=? AND is_active=1
          LIMIT 1 FOR UPDATE'
@@ -150,9 +154,14 @@ try {
     }
 
     $unitNetWeight = round(max(0, (float)($product['unit_net_weight'] ?? 0)), 3);
+    $isDynamicStock = (int)($product['dynamic_stock'] ?? 0) === 1;
 
-    if ($unitNetWeight <= 0) {
+    if (!$isDynamicStock && $unitNetWeight <= 0) {
         throw new RuntimeException('Selected product does not have a valid net weight in the products table.');
+    }
+
+    if ($isDynamicStock && $postedWeight <= 0 && ($mode !== 'set' || $qty > 0)) {
+        throw new RuntimeException('Enter gross weight for this dynamic stock product.');
     }
 
     $ensureStmt = $conn->prepare(
@@ -197,12 +206,11 @@ try {
 
     $oldQty = round(max(0, (float)$old['quantity']), 3);
 
-    /*
-     * Recalculate current total weight from the current quantity and
-     * products.net_weight so stale values in product_stock do not affect
-     * this adjustment.
-     */
-    $oldTotalWeight = round($oldQty * $unitNetWeight, 3);
+    // Normal stock uses Qty x fixed master net weight.
+    // Dynamic stock stores the manually entered accumulated GROSS weight.
+    $oldTotalWeight = $isDynamicStock
+        ? round(max(0, (float)$old['gross_weight']), 3)
+        : round($oldQty * $unitNetWeight, 3);
     $oldAverageCost = round((float)$old['average_cost'], 2);
 
     $qtyIn = 0.0;
@@ -213,7 +221,7 @@ try {
     if ($mode === 'add') {
         $newQty = $oldQty + $qty;
         $qtyIn = $qty;
-        $weightIn = round($qty * $unitNetWeight, 3);
+        $weightIn = $isDynamicStock ? $postedWeight : round($qty * $unitNetWeight, 3);
         $movementType = 'Adjustment In';
         $modeLabel = 'Add Stock';
     } elseif ($mode === 'subtract') {
@@ -222,17 +230,22 @@ try {
                 'Only ' . number_format($oldQty, 3) . ' quantity is available.'
             );
         }
+        if ($isDynamicStock && $postedWeight > $oldTotalWeight) {
+            throw new RuntimeException(
+                'Only ' . number_format($oldTotalWeight, 3) . ' gross weight is available.'
+            );
+        }
 
         $newQty = $oldQty - $qty;
         $qtyOut = $qty;
-        $weightOut = round($qty * $unitNetWeight, 3);
+        $weightOut = $isDynamicStock ? $postedWeight : round($qty * $unitNetWeight, 3);
         $movementType = 'Adjustment Out';
         $modeLabel = 'Subtract Stock';
     } else {
         /* Set Exact Stock: posted quantity is the desired final quantity. */
         $newQty = $qty;
         $qtyDiff = round($newQty - $oldQty, 3);
-        $weightDiff = round($qtyDiff * $unitNetWeight, 3);
+        $weightDiff = $isDynamicStock ? round($postedWeight - $oldTotalWeight, 3) : round($qtyDiff * $unitNetWeight, 3);
 
         if ($qtyDiff >= 0) {
             $qtyIn = $qtyDiff;
@@ -247,17 +260,25 @@ try {
     }
 
     $newQty = round(max(0, $newQty), 3);
-    $newTotalWeight = round($newQty * $unitNetWeight, 3);
 
-    /*
-     * product_stock.net_weight remains TOTAL stock net weight for compatibility
-     * with billing/stock modules. The per-piece net weight always lives in
-     * products.net_weight.
-     *
-     * In this stock model Gross/Total Weight is also quantity x unit net weight.
-     */
-    $newGrossWeight = $newTotalWeight;
-    $newNetWeight = $newTotalWeight;
+    if ($isDynamicStock) {
+        if ($mode === 'add') {
+            $newTotalWeight = round($oldTotalWeight + $postedWeight, 3);
+        } elseif ($mode === 'subtract') {
+            $newTotalWeight = round(max(0, $oldTotalWeight - $postedWeight), 3);
+        } else {
+            // Set Exact Stock: posted gross weight is the desired final gross weight.
+            $newTotalWeight = round(max(0, $postedWeight), 3);
+        }
+
+        // Dynamic-stock weight belongs in product_stock.gross_weight only.
+        $newGrossWeight = $newTotalWeight;
+        $newNetWeight = round(max(0, (float)$old['net_weight']), 3);
+    } else {
+        $newTotalWeight = round($newQty * $unitNetWeight, 3);
+        $newGrossWeight = $newTotalWeight;
+        $newNetWeight = $newTotalWeight;
+    }
 
     $purchaseRate = round((float)($product['purchase_rate'] ?? 0), 2);
     $newAverageCost = $oldAverageCost > 0 ? $oldAverageCost : $purchaseRate;
@@ -297,6 +318,7 @@ try {
     $detailParts = [
         'Stock Adjustment',
         'Mode: ' . $modeLabel,
+        'Weight Mode: ' . ($isDynamicStock ? 'Dynamic Gross Weight' : 'Fixed Net Weight / Qty'),
         'Unit Net Weight: ' . number_format($unitNetWeight, 3, '.', ''),
         'Previous Qty: ' . number_format($oldQty, 3, '.', ''),
         'Change Qty: ' . number_format($changeQty, 3, '.', ''),
@@ -371,11 +393,13 @@ try {
         'product_id' => $productId,
         'movement_id' => $movementId,
         'unit_net_weight' => $unitNetWeight,
+        'dynamic_stock' => $isDynamicStock ? 1 : 0,
         'current_stock' => [
             'quantity' => $newQty,
             'gross_weight' => $newGrossWeight,
             'net_weight' => $newNetWeight,
             'unit_net_weight' => $unitNetWeight,
+        'dynamic_stock' => $isDynamicStock ? 1 : 0,
             'average_cost' => $newAverageCost,
             'stock_value' => $newStockValue
         ]

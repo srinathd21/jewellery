@@ -19,6 +19,13 @@ function e($v): string
 {
     return htmlspecialchars((string) ($v ?? ''), ENT_QUOTES, 'UTF-8');
 }
+
+function tableExists(mysqli $conn, string $table): bool
+{
+    $safe = $conn->real_escape_string($table);
+    $r = $conn->query("SHOW TABLES LIKE '{$safe}'");
+    return $r && $r->num_rows > 0;
+}
 function qAll(mysqli $conn, string $sql, string $types = '', array $params = []): array
 {
     $s = $conn->prepare($sql);
@@ -53,11 +60,24 @@ try {
     if (!$sales)
         die('Sale not found.');
     $sale = $sales[0];
-    $items = qAll($conn, "SELECT si.*,p.product_code,p.barcode FROM sale_items si LEFT JOIN products p ON p.id=si.product_id WHERE si.sale_id=? AND si.business_id=? ORDER BY si.sort_order,si.id", 'ii', [$saleId, $businessId]);
+    $items = qAll($conn, "SELECT si.*,p.product_code,p.barcode,COALESCE(p.dynamic_stock,0) AS dynamic_stock FROM sale_items si LEFT JOIN products p ON p.id=si.product_id AND p.business_id=si.business_id WHERE si.sale_id=? AND si.business_id=? ORDER BY si.sort_order,si.id", 'ii', [$saleId, $businessId]);
     $payments = qAll($conn, "SELECT sp.*,pm.method_name,pm.method_type FROM sale_payments sp LEFT JOIN payment_methods pm ON pm.id=sp.payment_method_id WHERE sp.sale_id=? AND sp.business_id=? ORDER BY sp.id", 'ii', [$saleId, $businessId]);
     $claims = qAll($conn, "SELECT sc.*,cg.group_no,cg.group_name,cm.ticket_no,p.product_name FROM sales_chit_claims sc LEFT JOIN chit_groups cg ON cg.id=sc.chit_group_id LEFT JOIN chit_members cm ON cm.id=sc.chit_member_id LEFT JOIN products p ON p.id=sc.product_id WHERE sc.sale_id=? AND sc.business_id=? ORDER BY sc.id", 'ii', [$saleId, $businessId]);
     $exchange = qAll($conn, "SELECT * FROM sale_exchange_items WHERE sale_id=? AND business_id=? ORDER BY id", 'ii', [$saleId, $businessId]);
     $methods = qAll($conn, "SELECT id,method_name,method_type FROM payment_methods WHERE business_id=? AND is_active=1 AND method_type<>'Credit' ORDER BY method_name", 'i', [$businessId]);
+    $exchangePayouts = [];
+    if (tableExists($conn, 'sale_exchange_payouts')) {
+        $exchangePayouts = qAll(
+            $conn,
+            "SELECT sep.*,pm.method_name,pm.method_type
+             FROM sale_exchange_payouts sep
+             LEFT JOIN payment_methods pm ON pm.id=sep.payment_method_id AND pm.business_id=sep.business_id
+             WHERE sep.sale_id=? AND sep.business_id=?
+             ORDER BY sep.id",
+            'ii',
+            [$saleId, $businessId]
+        );
+    }
 } catch (Throwable $x) {
     die('Unable to load sale: ' . e($x->getMessage()));
 }
@@ -417,12 +437,12 @@ function money($v)
                                 <tr>
                                     <td><strong><?= e($i['item_name']) ?></strong>
                                         <div class="small text-muted"><?= e($i['product_code'] ?? '') ?>
-                                            <?= e($i['hsn_code'] ?? '') ?></div>
+                                            <?= e($i['hsn_code'] ?? '') ?><?php if ((int) ($i['dynamic_stock'] ?? 0) === 1): ?> · Dynamic Weight<?php endif; ?></div>
                                     </td>
                                     <td><?= e($i['quantity']) ?></td>
                                     <td><?= e($i['gross_weight']) ?> g</td>
                                     <td><?= e($i['stone_weight']) ?> g</td>
-                                    <td><?= e($i['net_weight']) ?> g</td>
+                                    <td><?php if ((int) ($i['dynamic_stock'] ?? 0) === 1): ?><span class="text-muted">—</span><?php else: ?><?= e($i['net_weight']) ?> g<?php endif; ?></td>
                                     <td>₹<?= money($i['metal_rate']) ?></td>
                                     <td><?= e($i['wastage_percent']) ?>% / ₹<?= money($i['wastage_amount']) ?></td>
                                     <td>₹<?= money($i['making_charge']) ?></td>
@@ -464,6 +484,36 @@ function money($v)
                         </table>
                     </div>
                 </div><?php endif; ?>
+            <?php if (!empty($exchangePayouts)): ?>
+                <div class="page-card">
+                    <div class="head">
+                        <div>
+                            <div class="section">Paid to Customer - Exchange Extra Value</div>
+                            <div class="small text-muted">Amount returned to the customer when old-gold / exchange value is higher than the bill value.</div>
+                        </div>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table mb-0">
+                            <thead>
+                                <tr>
+                                    <th>Date</th>
+                                    <th>Paid Via</th>
+                                    <th>Reference</th>
+                                    <th class="text-end">Amount</th>
+                                </tr>
+                            </thead>
+                            <tbody><?php foreach ($exchangePayouts as $ep): ?>
+                                <tr>
+                                    <td><?= !empty($ep['payout_date']) ? e(date('d-m-Y h:i A', strtotime($ep['payout_date']))) : '-' ?></td>
+                                    <td><?= e($ep['method_name'] ?: ($ep['method_type'] ?? '-')) ?></td>
+                                    <td><?= e($ep['reference_no'] ?: '-') ?></td>
+                                    <td class="text-end"><strong>₹<?= money($ep['amount']) ?></strong></td>
+                                </tr><?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            <?php endif; ?>
             <?php if ($claims): ?>
                 <div class="page-card">
                     <div class="head">

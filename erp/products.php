@@ -1196,8 +1196,13 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
         const unitGrossWeight = Number(product.gross_weight || 0);
         const unitNetWeight = Number(product.net_weight || 0);
         const stock = number(stockQty, Number(product.decimal_places ?? 3)) + (product.unit_name ? ' ' + product.unit_name : '');
-        const stockGrossWeight = number(stockQty * unitGrossWeight, 3);
-        const stockNetWeight = number(unitNetWeight, 3);
+        // Always use the actual stock totals stored in product_stock.
+        // This is required for Dynamic Stock products where every piece can have a different gross weight.
+        const isDynamicStock = Number(product.dynamic_stock || 0) === 1;
+        const stockGrossWeight = number(product.stock_gross_weight || 0, 3);
+        // Dynamic stock uses the accumulated gross weight only.
+        // Normal stock shows the single-product master net weight.
+        const stockNetWeight = isDynamicStock ? '—' : number(product.net_weight || 0, 3);
         const created = product.created_at || '—';
         const updated = product.updated_at || '—';
 
@@ -1345,8 +1350,8 @@ $businessName = (string)($_SESSION['business_name'] ?? 'Jewellery ERP');
                 : '') +
             '<td data-label="Stock">' +
                 '<div><b>' + number(product.stock_qty, Number(product.decimal_places ?? 3)) + ' ' + escapeHtml(product.unit_name || '') + '</b></div>' +
-                '<div class="product-sub">Gross: ' + number(Number(product.stock_qty || 0) * Number(product.gross_weight || 0), 3) + '</div>' +
-                '<div class="product-sub">Net: ' + number(product.net_weight, 3) + '</div>' +
+                '<div class="product-sub">Gross: ' + number(product.stock_gross_weight || 0, 3) + '</div>' +
+                '<div class="product-sub">Net: ' + (Number(product.dynamic_stock || 0) === 1 ? '—' : number(product.net_weight || 0, 3)) + '</div>' +
             '</td>' +
             '<td data-label="Status"><span class="status-badge ' + (Number(product.is_active) === 1 ? 'status-active' : 'status-inactive') + '">' + (Number(product.is_active) === 1 ? 'Active' : 'Inactive') + '</span></td>' +
             '<td class="actions text-end" data-label="Actions"><div class="d-inline-flex gap-1">' + actions + '</div></td>' +

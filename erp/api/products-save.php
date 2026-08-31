@@ -152,6 +152,7 @@ if ($action === 'list') {
         $taxType = 'GST';
     }
     $hasTaxTypeColumn = tableHasColumn($conn, 'products', 'tax_type');
+    $hasDynamicStockColumn = tableHasColumn($conn, 'products', 'dynamic_stock');
     $allowedPerPage = [10, 25, 50, 100];
     $perPage = (int) ($_POST['per_page'] ?? 10);
     if (!in_array($perPage, $allowedPerPage, true))
@@ -212,7 +213,7 @@ if ($action === 'list') {
     $offset = ($page - 1) * $perPage;
 
     $taxTypeSelect = $taxTypeExpression;
-    $sql = 'SELECT p.id,p.product_code,p.barcode,p.product_name,p.product_type,' . $taxTypeSelect . ' AS tax_type,p.purity,p.gross_weight,p.net_weight,p.purchase_rate,p.sale_rate,p.image_path,p.is_active,p.track_stock,c.category_name,m.metal_name,u.unit_name,u.decimal_places,COALESCE((SELECT SUM(ps.quantity) FROM product_stock ps WHERE ps.product_id=p.id AND ps.business_id=p.business_id),0) AS stock_qty,COALESCE((SELECT SUM(ps.gross_weight) FROM product_stock ps WHERE ps.product_id=p.id AND ps.business_id=p.business_id),0) AS stock_gross_weight,COALESCE((SELECT SUM(ps.net_weight) FROM product_stock ps WHERE ps.product_id=p.id AND ps.business_id=p.business_id),0) AS stock_net_weight,COALESCE((SELECT SUM(ps.stock_value) FROM product_stock ps WHERE ps.product_id=p.id AND ps.business_id=p.business_id),0) AS stock_value,COALESCE((SELECT AVG(ps.average_cost) FROM product_stock ps WHERE ps.product_id=p.id AND ps.business_id=p.business_id),0) AS average_cost,
+    $sql = 'SELECT p.id,p.product_code,p.barcode,p.product_name,p.product_type,' . $taxTypeSelect . ' AS tax_type,p.purity,p.gross_weight,p.net_weight,p.purchase_rate,p.sale_rate,p.image_path,p.is_active,p.track_stock,' . ($hasDynamicStockColumn ? 'p.dynamic_stock' : '0') . ' AS dynamic_stock,c.category_name,m.metal_name,u.unit_name,u.decimal_places,COALESCE((SELECT SUM(ps.quantity) FROM product_stock ps WHERE ps.product_id=p.id AND ps.business_id=p.business_id),0) AS stock_qty,COALESCE((SELECT SUM(ps.gross_weight) FROM product_stock ps WHERE ps.product_id=p.id AND ps.business_id=p.business_id),0) AS stock_gross_weight,COALESCE((SELECT SUM(ps.net_weight) FROM product_stock ps WHERE ps.product_id=p.id AND ps.business_id=p.business_id),0) AS stock_net_weight,COALESCE((SELECT SUM(ps.stock_value) FROM product_stock ps WHERE ps.product_id=p.id AND ps.business_id=p.business_id),0) AS stock_value,COALESCE((SELECT AVG(ps.average_cost) FROM product_stock ps WHERE ps.product_id=p.id AND ps.business_id=p.business_id),0) AS average_cost,
 COALESCE((SELECT SUM(ps.stock_value) FROM product_stock ps WHERE ps.product_id=p.id AND ps.business_id=p.business_id),0) AS stock_value FROM products p LEFT JOIN product_categories c ON c.id=p.category_id AND c.business_id=p.business_id LEFT JOIN metals m ON m.id=p.metal_id AND m.business_id=p.business_id LEFT JOIN units u ON u.id=p.unit_id AND u.business_id=p.business_id' . $where . ' ORDER BY p.id DESC LIMIT ? OFFSET ?';
     $listParams = $params;
     $listTypes = $types . 'ii';
@@ -325,9 +326,19 @@ if ($action === 'save') {
         'tax_percent' => (float) ($_POST['tax_percent'] ?? 3),
         'minimum_stock_qty' => (float) ($_POST['minimum_stock_qty'] ?? 0),
         'track_stock' => isset($_POST['track_stock']) ? 1 : 0,
+        'dynamic_stock' => isset($_POST['dynamic_stock']) ? 1 : 0,
         'description' => trim((string) ($_POST['description'] ?? '')),
         'is_active' => isset($_POST['is_active']) ? 1 : 0
     ];
+
+    if (!tableHasColumn($conn, 'products', 'dynamic_stock')) {
+        respond(false, 'products.dynamic_stock column is missing. Run the dynamic stock migration SQL first.', [], 500);
+    }
+
+    // Dynamic stock is a stock-tracked product mode. It cannot be enabled when stock tracking is off.
+    if ($data['dynamic_stock'] === 1) {
+        $data['track_stock'] = 1;
+    }
 
     if ($data['tax_type'] === 'Non-GST') {
         $data['hsn_code'] = '';
@@ -411,8 +422,8 @@ if ($action === 'save') {
         if ($hasTaxTypeColumn) {
             $stmt = $conn->prepare(
                 'INSERT INTO products
-                (business_id,category_id,metal_id,unit_id,product_code,barcode,product_name,product_type,tax_type,hsn_code,purity,gross_weight,stone_weight,net_weight,wastage_percent,making_charge_type,making_charge,purchase_rate,sale_rate,tax_percent,minimum_stock_qty,track_stock,image_path,description,is_active)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
+                (business_id,category_id,metal_id,unit_id,product_code,barcode,product_name,product_type,tax_type,hsn_code,purity,gross_weight,stone_weight,net_weight,wastage_percent,making_charge_type,making_charge,purchase_rate,sale_rate,tax_percent,minimum_stock_qty,track_stock,dynamic_stock,image_path,description,is_active)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
             );
 
             if (!$stmt) {
@@ -420,7 +431,7 @@ if ($action === 'save') {
             }
 
             $stmt->bind_param(
-                'iiiissssssdddddsdddddissi',
+                'iiiissssssdddddsdddddiissi',
                 $businessId,
                 $data['category_id'],
                 $metal,
@@ -443,6 +454,7 @@ if ($action === 'save') {
                 $data['tax_percent'],
                 $data['minimum_stock_qty'],
                 $data['track_stock'],
+                $data['dynamic_stock'],
                 $image,
                 $desc,
                 $data['is_active']
@@ -450,8 +462,8 @@ if ($action === 'save') {
         } else {
             $stmt = $conn->prepare(
                 'INSERT INTO products
-                (business_id,category_id,metal_id,unit_id,product_code,barcode,product_name,product_type,hsn_code,purity,gross_weight,stone_weight,net_weight,wastage_percent,making_charge_type,making_charge,purchase_rate,sale_rate,tax_percent,minimum_stock_qty,track_stock,image_path,description,is_active)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
+                (business_id,category_id,metal_id,unit_id,product_code,barcode,product_name,product_type,hsn_code,purity,gross_weight,stone_weight,net_weight,wastage_percent,making_charge_type,making_charge,purchase_rate,sale_rate,tax_percent,minimum_stock_qty,track_stock,dynamic_stock,image_path,description,is_active)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
             );
 
             if (!$stmt) {
@@ -459,7 +471,7 @@ if ($action === 'save') {
             }
 
             $stmt->bind_param(
-                'iiiisssssdddddsdddddissi',
+                'iiiisssssdddddsdddddiissi',
                 $businessId,
                 $data['category_id'],
                 $metal,
@@ -481,6 +493,7 @@ if ($action === 'save') {
                 $data['tax_percent'],
                 $data['minimum_stock_qty'],
                 $data['track_stock'],
+                $data['dynamic_stock'],
                 $image,
                 $desc,
                 $data['is_active']
@@ -500,7 +513,7 @@ if ($action === 'save') {
                 category_id=?,metal_id=?,unit_id=?,product_code=?,barcode=?,product_name=?,
                 product_type=?,tax_type=?,hsn_code=?,purity=?,gross_weight=?,stone_weight=?,net_weight=?,
                 wastage_percent=?,making_charge_type=?,making_charge=?,purchase_rate=?,sale_rate=?,
-                tax_percent=?,minimum_stock_qty=?,track_stock=?,image_path=?,description=?,is_active=?
+                tax_percent=?,minimum_stock_qty=?,track_stock=?,dynamic_stock=?,image_path=?,description=?,is_active=?
                 WHERE id=? AND business_id=?'
             );
 
@@ -509,7 +522,7 @@ if ($action === 'save') {
             }
 
             $stmt->bind_param(
-                'iiissssssdddddsdddddissiii',
+                'iiissssssdddddsdddddiissiii',
                 $data['category_id'],
                 $metal,
                 $unit,
@@ -531,6 +544,7 @@ if ($action === 'save') {
                 $data['tax_percent'],
                 $data['minimum_stock_qty'],
                 $data['track_stock'],
+                $data['dynamic_stock'],
                 $image,
                 $desc,
                 $data['is_active'],
@@ -543,7 +557,7 @@ if ($action === 'save') {
                 category_id=?,metal_id=?,unit_id=?,product_code=?,barcode=?,product_name=?,
                 product_type=?,hsn_code=?,purity=?,gross_weight=?,stone_weight=?,net_weight=?,wastage_percent=?,
                 making_charge_type=?,making_charge=?,purchase_rate=?,sale_rate=?,tax_percent=?,
-                minimum_stock_qty=?,track_stock=?,image_path=?,description=?,is_active=?
+                minimum_stock_qty=?,track_stock=?,dynamic_stock=?,image_path=?,description=?,is_active=?
                 WHERE id=? AND business_id=?'
             );
 
@@ -552,7 +566,7 @@ if ($action === 'save') {
             }
 
             $stmt->bind_param(
-                'iiisssssdddddsdddddissiii',
+                'iiisssssdddddsdddddiissiii',
                 $data['category_id'],
                 $metal,
                 $unit,
@@ -573,6 +587,7 @@ if ($action === 'save') {
                 $data['tax_percent'],
                 $data['minimum_stock_qty'],
                 $data['track_stock'],
+                $data['dynamic_stock'],
                 $image,
                 $desc,
                 $data['is_active'],

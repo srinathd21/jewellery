@@ -26,6 +26,12 @@ function billingColumnExists(mysqli $conn, string $table, string $column): bool
     $result = $conn->query("SHOW COLUMNS FROM `{$safeTable}` LIKE '{$safeColumn}'");
     return $result && $result->num_rows > 0;
 }
+function billingTableExists(mysqli $conn, string $table): bool
+{
+    $safeTable = $conn->real_escape_string($table);
+    $result = $conn->query("SHOW TABLES LIKE '{$safeTable}'");
+    return $result && $result->num_rows > 0;
+}
 function billingPermission(mysqli $conn, string $action): bool
 {
     if (($_SESSION['user_type'] ?? '') === 'Platform Admin')
@@ -101,6 +107,8 @@ if ($stmt) {
 }
 $products = [];
 $productHasTaxType = billingColumnExists($conn, 'products', 'tax_type');
+$productHasDynamicStock = billingColumnExists($conn, 'products', 'dynamic_stock');
+$productDynamicSelect = $productHasDynamicStock ? 'COALESCE(p.dynamic_stock,0)' : '0';
 $productTaxSelect = $productHasTaxType
     ? "p.tax_type"
     : "CASE WHEN COALESCE(p.tax_percent,0)=0 THEN 'Non-GST' ELSE 'GST' END";
@@ -113,6 +121,7 @@ $productSql = "SELECT p.id,p.product_code,p.barcode,p.product_name,p.product_typ
                       p.hsn_code,p.metal_id,p.purity,p.gross_weight,p.stone_weight,
                       p.net_weight,p.wastage_percent,p.making_charge_type,p.making_charge,
                       p.purchase_rate,p.sale_rate,p.tax_percent,p.track_stock,
+                      {$productDynamicSelect} AS dynamic_stock,
                       COALESCE(ps.quantity,0) stock_qty,
                       COALESCE(ps.gross_weight,0) stock_gross_weight,
                       COALESCE(ps.net_weight,0) stock_net_weight,
@@ -137,7 +146,16 @@ $productSql = "SELECT p.id,p.product_code,p.barcode,p.product_name,p.product_typ
                     LIMIT 1
                )
                WHERE p.business_id=?
-                 AND p.is_active=1
+                 AND (
+                      p.is_active=1
+                      OR ({$editSaleId} > 0 AND EXISTS (
+                          SELECT 1
+                          FROM sale_items esi
+                          WHERE esi.sale_id={$editSaleId}
+                            AND esi.business_id=p.business_id
+                            AND esi.product_id=p.id
+                      ))
+                 )
                  {$productTaxCondition}
                ORDER BY p.product_name";
 $stmt = $conn->prepare($productSql);
@@ -149,6 +167,76 @@ if ($stmt) {
         $products[] = $x;
     $stmt->close();
 }
+
+/*
+ * Edit mode availability must include the quantity/weight already sold on
+ * this invoice. product_stock contains the remaining stock after the original
+ * sale, so add this invoice's own stock back only for display/validation on
+ * the edit form. The save API performs the real stock restore transaction.
+ */
+if ($editSaleId > 0 && $products) {
+    $editStockStmt = $conn->prepare(
+        "SELECT product_id,
+                COALESCE(SUM(quantity),0) AS sold_qty,
+                COALESCE(SUM(gross_weight),0) AS sold_gross,
+                COALESCE(SUM(net_weight),0) AS sold_net
+         FROM sale_items
+         WHERE sale_id=? AND business_id=?
+         GROUP BY product_id"
+    );
+    if ($editStockStmt) {
+        $editStockStmt->bind_param('ii', $editSaleId, $businessId);
+        $editStockStmt->execute();
+        $editStockResult = $editStockStmt->get_result();
+        $editStockByProduct = [];
+        while ($editStockRow = $editStockResult->fetch_assoc()) {
+            $editStockByProduct[(int)$editStockRow['product_id']] = $editStockRow;
+        }
+        $editStockStmt->close();
+
+        foreach ($products as &$editProductRow) {
+            $editProductId = (int)($editProductRow['id'] ?? 0);
+            if (!isset($editStockByProduct[$editProductId])) {
+                continue;
+            }
+            $soldStock = $editStockByProduct[$editProductId];
+            $editProductRow['stock_qty'] =
+                (float)($editProductRow['stock_qty'] ?? 0) + (float)($soldStock['sold_qty'] ?? 0);
+            $editProductRow['stock_gross_weight'] =
+                (float)($editProductRow['stock_gross_weight'] ?? 0) + (float)($soldStock['sold_gross'] ?? 0);
+            $editProductRow['stock_net_weight'] =
+                (float)($editProductRow['stock_net_weight'] ?? 0) + (float)($soldStock['sold_net'] ?? 0);
+        }
+        unset($editProductRow);
+    }
+}
+/*
+ * Payment methods used by Billing and exchange-balance payout.
+ * Ensure the two basic customer-payout methods exist for the current business,
+ * then load the normal active payment-method list without changing split-payment logic.
+ */
+if (billingColumnExists($conn, 'payment_methods', 'method_code') &&
+    billingColumnExists($conn, 'payment_methods', 'method_type') &&
+    billingColumnExists($conn, 'payment_methods', 'is_active')) {
+    foreach ([['CASH', 'Cash', 'Cash'], ['UPI', 'UPI', 'UPI']] as $defaultMethod) {
+        $checkMethod = $conn->prepare('SELECT id FROM payment_methods WHERE business_id=? AND (method_code=? OR method_type=?) LIMIT 1');
+        if ($checkMethod) {
+            $checkMethod->bind_param('iss', $businessId, $defaultMethod[0], $defaultMethod[2]);
+            $checkMethod->execute();
+            $exists = $checkMethod->get_result()->fetch_assoc();
+            $checkMethod->close();
+            if (!$exists) {
+                $insertMethod = $conn->prepare('INSERT INTO payment_methods(business_id,method_code,method_name,method_type,is_active) VALUES(?,?,?,?,1)');
+                if ($insertMethod) {
+                    $insertMethod->bind_param('isss', $businessId, $defaultMethod[0], $defaultMethod[1], $defaultMethod[2]);
+                    $insertMethod->execute();
+                    $insertMethod->close();
+                }
+            }
+        }
+    }
+}
+
 $paymentMethods = [];
 $stmt = $conn->prepare('SELECT id,method_name,method_type FROM payment_methods WHERE business_id=? AND is_active=1 ORDER BY method_name');
 if ($stmt) {
@@ -159,6 +247,12 @@ if ($stmt) {
         $paymentMethods[] = $x;
     $stmt->close();
 }
+
+$payoutPaymentMethods = array_values(array_filter($paymentMethods, function ($method) {
+    $type = strtolower(trim((string)($method['method_type'] ?? '')));
+    $name = strtolower(trim((string)($method['method_name'] ?? '')));
+    return in_array($type, ['cash', 'upi'], true) || $name === 'cash' || strpos($name, 'upi') !== false;
+}));
 
 $exchangeMetals = [];
 $metalSql = "SELECT m.id,m.metal_name,
@@ -327,32 +421,129 @@ if ($editSaleId > 0) {
         }
     }
 
-    $editExchange = [];
-    if (billingColumnExists($conn, 'sale_exchange_items', 'sale_id')) {
-        $s = $conn->prepare("SELECT sei.*,
-                (SELECT m.id
-                 FROM metals m
-                 WHERE m.business_id=sei.business_id
-                 ORDER BY
-                    (LOWER(sei.item_name) LIKE CONCAT('%',LOWER(m.metal_name),'%')) DESC,
-                    ABS(COALESCE((SELECT mr.rate_per_gram
-                                  FROM metal_rates mr
-                                  WHERE mr.business_id=sei.business_id
-                                    AND mr.metal_id=m.id
-                                    AND mr.is_current=1
-                                    AND (mr.branch_id=sei.branch_id OR mr.branch_id IS NULL)
-                                  ORDER BY (mr.branch_id=sei.branch_id) DESC,mr.effective_from DESC,mr.id DESC
-                                  LIMIT 1),0)-sei.rate_per_gram) ASC,
-                    m.id ASC
-                 LIMIT 1) AS metal_id
-            FROM sale_exchange_items sei
-            WHERE sei.sale_id=? AND sei.business_id=? ORDER BY sei.id");
+    $editExchangePayout = null;
+    if (billingTableExists($conn, 'sale_exchange_payouts')) {
+        $s = $conn->prepare("SELECT * FROM sale_exchange_payouts WHERE sale_id=? AND business_id=? ORDER BY id DESC LIMIT 1");
         if ($s) {
             $s->bind_param('ii', $editSaleId, $businessId);
             $s->execute();
-            $r = $s->get_result();
-            while ($x = $r->fetch_assoc()) $editExchange[] = $x;
+            $editExchangePayout = $s->get_result()->fetch_assoc() ?: null;
             $s->close();
+        }
+    }
+
+    $editExchange = [];
+
+    /*
+     * Edit Bill: load the exact old-gold rows using SIMPLE queries only.
+     * Do not calculate metal_id inside SQL. Some MariaDB versions can fail to
+     * prepare the previous correlated ORDER BY subquery, which silently left
+     * the edit screen with an empty exchange section.
+     */
+    if (billingTableExists($conn, 'sale_exchange_items') && billingColumnExists($conn, 'sale_exchange_items', 'sale_id')) {
+        $s = $conn->prepare(
+            "SELECT id,item_name,gross_weight,wastage_percent,eligible_weight,rate_per_gram,exchange_value
+             FROM sale_exchange_items
+             WHERE sale_id=? AND business_id=? AND branch_id=?
+             ORDER BY id"
+        );
+        if ($s) {
+            $s->bind_param('iii', $editSaleId, $businessId, $branchId);
+            if ($s->execute()) {
+                $r = $s->get_result();
+                while ($x = $r->fetch_assoc()) {
+                    $editExchange[] = $x;
+                }
+            }
+            $s->close();
+        }
+    }
+
+    /*
+     * Fallback for older bills where only the inventory-side exchange row is
+     * available. Load all statuses because the item may already be Processed,
+     * Sold or Returned but the original invoice still needs its edit values.
+     */
+    if (!$editExchange && billingTableExists($conn, 'exchange_items_stock') && billingColumnExists($conn, 'exchange_items_stock', 'sale_id')) {
+        $s = $conn->prepare(
+            "SELECT 0 AS id,item_name,gross_weight,wastage_percent,
+                    net_weight AS eligible_weight,rate_per_gram,
+                    stock_value AS exchange_value
+             FROM exchange_items_stock
+             WHERE sale_id=? AND business_id=? AND branch_id=?
+             ORDER BY id"
+        );
+        if ($s) {
+            $s->bind_param('iii', $editSaleId, $businessId, $branchId);
+            if ($s->execute()) {
+                $r = $s->get_result();
+                while ($x = $r->fetch_assoc()) {
+                    $editExchange[] = $x;
+                }
+            }
+            $s->close();
+        }
+    }
+
+    /*
+     * Resolve Metal Type in PHP. sale_exchange_items does not store metal_id,
+     * so first match the metal name in the old-item name. If that is not
+     * possible, choose the current metal whose rate is nearest the saved rate.
+     */
+    if ($editExchange) {
+        foreach ($editExchange as &$editExchangeRow) {
+            $resolvedMetalId = 0;
+            $itemNameLower = strtolower(trim((string)($editExchangeRow['item_name'] ?? '')));
+            $savedRate = (float)($editExchangeRow['rate_per_gram'] ?? 0);
+
+            foreach ($exchangeMetals as $metalRow) {
+                $metalNameLower = strtolower(trim((string)($metalRow['metal_name'] ?? '')));
+                if ($metalNameLower !== '' && $itemNameLower !== '' && strpos($itemNameLower, $metalNameLower) !== false) {
+                    $resolvedMetalId = (int)$metalRow['id'];
+                    break;
+                }
+            }
+
+            if ($resolvedMetalId <= 0 && $exchangeMetals) {
+                $bestDiff = null;
+                foreach ($exchangeMetals as $metalRow) {
+                    $metalRate = (float)($metalRow['current_rate'] ?? 0);
+                    if ($metalRate <= 0 || $savedRate <= 0) {
+                        continue;
+                    }
+                    $diff = abs($metalRate - $savedRate);
+                    if ($bestDiff === null || $diff < $bestDiff) {
+                        $bestDiff = $diff;
+                        $resolvedMetalId = (int)$metalRow['id'];
+                    }
+                }
+            }
+
+            if ($resolvedMetalId <= 0 && count($exchangeMetals) === 1) {
+                $resolvedMetalId = (int)$exchangeMetals[0]['id'];
+            }
+
+            $editExchangeRow['metal_id'] = $resolvedMetalId;
+        }
+        unset($editExchangeRow);
+    }
+
+    /*
+     * For older invoices the payout ledger row may not exist even though the
+     * exchange was larger than the bill. Preserve/display the returned amount
+     * by deriving it from the stored sale values. Method/reference stay blank
+     * if no historical payout row exists because those cannot be reconstructed.
+     */
+    if (!$editExchangePayout) {
+        $storedExchangeAmount = (float)($saleEdit['exchange_amount'] ?? 0);
+        $storedGrossBillAmount = (float)($saleEdit['grand_total'] ?? 0);
+        $derivedPayoutAmount = round(max(0, $storedExchangeAmount - $storedGrossBillAmount), 2);
+        if ($derivedPayoutAmount > 0.005) {
+            $editExchangePayout = [
+                'payment_method_id' => 0,
+                'amount' => $derivedPayoutAmount,
+                'reference_no' => ''
+            ];
         }
     }
 
@@ -374,6 +565,7 @@ if ($editSaleId > 0) {
         'overall_discount' => max(0, (float)($saleEdit['discount_amount'] ?? 0) - $editItemDiscountTotal),
         'payments' => $editPayments,
         'exchange_items' => $editExchange,
+        'exchange_payout' => $editExchangePayout,
         'claims' => $editClaims
     ];
 }
@@ -1276,6 +1468,28 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                             <div id="exchangeItems"></div>
                             <div class="text-end"><strong>Exchange Total: ₹<span id="exchangeTotal">0.00</span></strong>
                             </div>
+                            <div id="exchangePayoutPanel" class="border-top mt-2 pt-2 d-none">
+                                <div class="row g-2 align-items-end">
+                                    <div class="col-md-4">
+                                        <label class="field-label">Balance Payable to Customer</label>
+                                        <input type="number" step="0.01" min="0" name="exchange_payout_amount" id="exchangePayoutAmount" class="form-control" value="0.00" readonly>
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="field-label">Pay Customer Via *</label>
+                                        <select name="exchange_payout_payment_method_id" id="exchangePayoutMethod" class="form-select">
+                                            <option value="">Select Cash / UPI method</option>
+                                            <?php foreach ($payoutPaymentMethods as $pm): ?>
+                                                <option value="<?= (int)$pm['id'] ?>"><?= e($pm['method_name']) ?></option>
+                                            <?php endforeach; ?>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="field-label">Payout Reference</label>
+                                        <input name="exchange_payout_reference" id="exchangePayoutReference" class="form-control" placeholder="Cash / UPI / Txn reference">
+                                    </div>
+                                </div>
+                                <div class="small text-muted mt-1">Shown only when old-gold/exchange value is higher than the invoice value.</div>
+                            </div>
                         </div>
                     </div>
                     <div class="bill-card">
@@ -1335,6 +1549,7 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                             </div>
                             <div class="summary-row"><span>Exchange Value</span><strong class="text-success">- ₹<span
                                         id="sumExchange">0.00</span></strong></div>
+                            <div class="summary-row d-none" id="sumExchangePayoutRow"><span>Balance Payable to Customer</span><strong class="text-danger">₹<span id="sumExchangePayout">0.00</span></strong></div>
                             <div class="summary-row"><span>Gold Gram Claim</span><strong class="text-success">- ₹<span
                                         id="sumChitClaim">0.00</span></strong></div>
                             <div class="summary-row"><span>Grand Total</span><strong class="summary-total">₹<span
@@ -1676,14 +1891,38 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                     row.querySelector('.gst').value = nonGstModeActive ? 0 : (gstEnabled ? (product.tax_percent || 0) : 0);
                     row.querySelector('.making').value = product.making_charge || 0;
 
+                    const isDynamicStock = Number(product.dynamic_stock || 0) === 1;
+                    const dynamicWrap = row.querySelector('.dynamic-weight-wrap');
+                    const dynamicInput = row.querySelector('.dynamic-gross');
+                    if (dynamicWrap && dynamicInput) {
+                        dynamicWrap.classList.toggle('d-none', !isDynamicStock);
+
+                        // IMPORTANT: disabled controls are ignored by native form validation
+                        // and FormData. A hidden number input with value=0 and min=0.001 is
+                        // otherwise invalid and Chrome reports: "not focusable" on submit.
+                        dynamicInput.disabled = !isDynamicStock;
+                        dynamicInput.required = isDynamicStock;
+
+                        if (isDynamicStock) {
+                            dynamicInput.min = '0.001';
+                            dynamicInput.max = String(Math.max(0, Number(product.stock_gross_weight || 0)));
+                            if (!(Number(dynamicInput.value) > 0)) dynamicInput.value = '';
+                        } else {
+                            dynamicInput.removeAttribute('max');
+                            dynamicInput.value = '';
+                        }
+                    }
+
                     const rate = product.live_metal_rate || product.sale_rate || 0;
                     const effectiveDate = product.live_rate_effective_from || 'Product rate';
 
                     row.querySelector('.stock-info').innerHTML =
                         '<div class="product-detail-strip">' +
                         '<span class="product-detail-pill detail-stock"><i class="fa-solid fa-boxes-stacked"></i>Stock: <b>' + Number(product.stock_qty || 0).toFixed(3) + '</b></span>' +
-                        '<span class="product-detail-pill detail-gross">Gross: <b>' + Number(product.gross_weight || 0).toFixed(3) + ' g</b></span>' +
-                        '<span class="product-detail-pill detail-net">Net: <b>' + Number(product.net_weight || 0).toFixed(3) + ' g</b></span>' +
+                        '<span class="product-detail-pill detail-gross">' + (Number(product.dynamic_stock || 0) === 1 ? 'Stock Gross' : 'Gross') + ': <b>' + Number(Number(product.dynamic_stock || 0) === 1 ? (product.stock_gross_weight || 0) : (product.gross_weight || 0)).toFixed(3) + ' g</b></span>' +
+                        (Number(product.dynamic_stock || 0) === 1
+                            ? '<span class="product-detail-pill detail-date">Dynamic Weight</span>'
+                            : '<span class="product-detail-pill detail-net">Net: <b>' + Number(product.net_weight || 0).toFixed(3) + ' g</b></span>') +
                         '<span class="product-detail-pill detail-stock">Type: <b>' + esc(product.product_type || 'Gold') + '</b></span>' +
                         '<span class="product-detail-pill detail-stock">Tax: <b>' + esc(product.tax_type || (nonGstModeActive ? 'Non-GST' : 'GST')) + '</b></span>' +
                         '</div>';
@@ -1696,6 +1935,10 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                         <td>
                             <select name="product_id[]" class="form-select product-select">${productOptions()}</select>
                             <small class="text-muted stock-info"></small>
+                            <div class="dynamic-weight-wrap d-none mt-1">
+                                <label class="field-label mb-1">Sale Gross Weight (g) *</label>
+                                <input name="dynamic_gross_weight[]" type="number" min="0.001" step="0.001" value="" class="form-control dynamic-gross" placeholder="Enter actual gross weight" disabled>
+                            </div>
                         </td>
                         <td><input name="quantity[]" type="number" min="0.001" step="0.001" value="${qty}" class="form-control qty"></td>
                         <td><input name="metal_rate[]" type="number" min="0" step="0.01" value="0" class="form-control rate"></td>
@@ -1769,6 +2012,10 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                         row.querySelector('.stone').value = Number(existing.stone_amount || 0).toFixed(2);
                         row.querySelector('.other').value = Number(existing.other_charge || 0).toFixed(2);
                         row.querySelector('.discount').value = Number(existing.discount_amount || 0).toFixed(2);
+                        if (Number(product.dynamic_stock || 0) === 1) {
+                            const dynamicInput = row.querySelector('.dynamic-gross');
+                            if (dynamicInput) dynamicInput.value = Number(existing.gross_weight || 0).toFixed(3);
+                        }
                     });
                     if (!items.querySelector('.item-row')) addItem();
 
@@ -1789,6 +2036,13 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                         exchange_value: Number(x.exchange_value || 0)
                     }));
                     renderExchangeItems();
+                    const existingPayout = editData.exchange_payout || null;
+                    if (existingPayout) {
+                        const payoutMethod = document.getElementById('exchangePayoutMethod');
+                        const payoutReference = document.getElementById('exchangePayoutReference');
+                        if (payoutMethod) payoutMethod.value = String(existingPayout.payment_method_id || '');
+                        if (payoutReference) payoutReference.value = String(existingPayout.reference_no || '');
+                    }
 
                     appliedClaims = (editData.claims || []).map(x => ({
                         chit_member_id: Number(x.chit_member_id || 0),
@@ -1861,7 +2115,11 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                             return;
                         }
 
-                        const grossWeight = (Number(product.gross_weight) || 0) * qty;
+                        const isDynamicStock = Number(product.dynamic_stock || 0) === 1;
+                        const dynamicGrossInput = row.querySelector('.dynamic-gross');
+                        const grossWeight = isDynamicStock
+                            ? Math.max(0, Number(dynamicGrossInput?.value || 0) || 0)
+                            : (Number(product.gross_weight) || 0) * qty;
 
                         /*
                          * Jewellery calculation:
@@ -1896,10 +2154,19 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                     taxable = Math.max(0, taxable - overall);
 
                     const beforeAdjustments = taxable + cgst + sgst + round;
-                    const exchangeValue = Math.min(exchangeTotalValue(), Math.max(0, beforeAdjustments));
-                    const afterExchange = Math.max(0, beforeAdjustments - exchangeValue);
+                    const fullExchangeValue = Math.max(0, exchangeTotalValue());
+                    const exchangeValue = Math.min(fullExchangeValue, Math.max(0, beforeAdjustments));
+                    const exchangePayout = Math.max(0, fullExchangeValue - Math.max(0, beforeAdjustments));
+                    const afterExchange = Math.max(0, beforeAdjustments - fullExchangeValue);
                     const appliedClaim = Math.min(claimTotal(), afterExchange);
                     const grand = Math.max(0, afterExchange - appliedClaim);
+
+                    const payoutPanel = document.getElementById('exchangePayoutPanel');
+                    const payoutAmountInput = document.getElementById('exchangePayoutAmount');
+                    const payoutSummaryRow = document.getElementById('sumExchangePayoutRow');
+                    if (payoutPanel) payoutPanel.classList.toggle('d-none', exchangePayout <= 0.005);
+                    if (payoutSummaryRow) payoutSummaryRow.classList.toggle('d-none', exchangePayout <= 0.005);
+                    if (payoutAmountInput) payoutAmountInput.value = money(exchangePayout);
 
                     let split = 0;
                     let received = 0;
@@ -1922,7 +2189,8 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                     document.getElementById('sumTaxable').textContent = money(taxable);
                     document.getElementById('sumCgst').textContent = money(cgst);
                     document.getElementById('sumSgst').textContent = money(sgst);
-                    document.getElementById('sumExchange').textContent = money(exchangeValue);
+                    document.getElementById('sumExchange').textContent = money(fullExchangeValue);
+                    document.getElementById('sumExchangePayout').textContent = money(exchangePayout);
                     document.getElementById('sumChitClaim').textContent = money(appliedClaim);
                     document.getElementById('sumGrand').textContent = money(grand);
                     document.getElementById('sumBalance').textContent = money(Math.max(0, grand - paid));
@@ -2400,7 +2668,20 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                     if (!event.target.matches('.product-select')) return;
                     const row = event.target.closest('tr');
                     const product = products.find(x => String(x.id) === event.target.value);
-                    if (product) fillProduct(row, product); else calc();
+                    if (product) {
+                        fillProduct(row, product);
+                    } else {
+                        const dynamicWrap = row.querySelector('.dynamic-weight-wrap');
+                        const dynamicInput = row.querySelector('.dynamic-gross');
+                        if (dynamicWrap) dynamicWrap.classList.add('d-none');
+                        if (dynamicInput) {
+                            dynamicInput.required = false;
+                            dynamicInput.disabled = true;
+                            dynamicInput.removeAttribute('max');
+                            dynamicInput.value = '';
+                        }
+                        calc();
+                    }
                 });
 
                 document.addEventListener('input', event => {
@@ -2420,6 +2701,35 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                     if (editMode && String(billTypeSelect?.value || '').toLowerCase() === 'estimate') {
                         toast('error', 'A posted sale cannot be converted to an Estimate from Edit Bill.');
                         return;
+                    }
+
+                    let itemValidationError = '';
+                    items.querySelectorAll('.item-row').forEach(row => {
+                        if (itemValidationError) return;
+                        const selectedProduct = products.find(x => String(x.id) === String(row.querySelector('.product-select')?.value || ''));
+                        if (!selectedProduct || Number(selectedProduct.dynamic_stock || 0) !== 1) return;
+                        const gross = Number(row.querySelector('.dynamic-gross')?.value || 0);
+                        if (!(gross > 0)) {
+                            itemValidationError = 'Enter the actual gross weight for dynamic stock product ' + selectedProduct.product_name + '.';
+                        }
+                    });
+                    if (itemValidationError) {
+                        toast('error', itemValidationError);
+                        return;
+                    }
+
+                    const payoutAmount = Number(document.getElementById('exchangePayoutAmount')?.value || 0);
+                    const payoutMethod = document.getElementById('exchangePayoutMethod');
+                    if (payoutAmount > 0.005) {
+                        if (String(billTypeSelect?.value || '').toLowerCase() === 'estimate') {
+                            toast('error', 'Exchange value cannot exceed the bill total for an Estimate.');
+                            return;
+                        }
+                        if (!payoutMethod || !(Number(payoutMethod.value) > 0)) {
+                            toast('error', 'Select Cash / UPI payment method for the balance payable to customer.');
+                            payoutMethod?.focus();
+                            return;
+                        }
                     }
 
                     const button = document.getElementById('saveBtn');

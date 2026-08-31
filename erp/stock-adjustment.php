@@ -123,6 +123,7 @@ $prodHasPurity = hasColumn($conn, 'products', 'purity');
 $prodHasUnitId = hasColumn($conn, 'products', 'unit_id');
 $prodHasCurrentStockQty = hasColumn($conn, 'products', 'current_stock_qty');
 $prodHasNetWeight = hasColumn($conn, 'products', 'net_weight');
+$prodHasDynamicStock = hasColumn($conn, 'products', 'dynamic_stock');
 $prodHasIsActive = hasColumn($conn, 'products', 'is_active');
 $prodHasUpdatedAt = hasColumn($conn, 'products', 'updated_at');
 $prodHasTaxType = hasColumn($conn, 'products', 'tax_type');
@@ -331,6 +332,12 @@ if ($prodHasNetWeight) {
     $productSql .= ", net_weight";
 }
 
+if ($prodHasDynamicStock) {
+    $productSql .= ", dynamic_stock";
+} else {
+    $productSql .= ", 0 AS dynamic_stock";
+}
+
 if ($prodHasTaxType) {
     $productSql .= ", tax_type";
 } elseif ($prodHasTaxPercent) {
@@ -445,15 +452,18 @@ foreach ($products as &$productRow) {
     ];
 
     $productRow['_stock_quantity'] = (float)$stock['quantity'];
+    $productRow['_dynamic_stock'] = (int)($productRow['dynamic_stock'] ?? 0) === 1 ? 1 : 0;
 
-    // Product master net_weight is NET WEIGHT PER QUANTITY.
+    // Normal stock: products.net_weight is the fixed weight per quantity.
+    // Dynamic stock: every piece may have a different weight, so use the
+    // accumulated product_stock.gross_weight entered during stock movements.
     $productRow['_stock_net_weight'] = $prodHasNetWeight
         ? (float)($productRow['net_weight'] ?? 0)
         : 0.0;
 
-    // Total/Gross stock weight = Quantity x Net Weight per Qty.
-    $productRow['_stock_gross_weight'] =
-        (float)$productRow['_stock_quantity'] * (float)$productRow['_stock_net_weight'];
+    $productRow['_stock_gross_weight'] = $productRow['_dynamic_stock']
+        ? (float)($stock['gross_weight'] ?? 0)
+        : ((float)$productRow['_stock_quantity'] * (float)$productRow['_stock_net_weight']);
 }
 unset($productRow);
 
@@ -493,8 +503,11 @@ if ($selectedProductId > 0) {
     $selectedNetWeightSelect = $prodHasNetWeight
         ? "COALESCE(p.net_weight,0) AS net_weight"
         : "0 AS net_weight";
+    $selectedDynamicStockSelect = $prodHasDynamicStock
+        ? "COALESCE(p.dynamic_stock,0) AS dynamic_stock"
+        : "0 AS dynamic_stock";
 
-    $stmt = $conn->prepare("SELECT p.id,p.product_name,p.product_code,p.barcode,p.purity,{$selectedTaxSelect},COALESCE(u.unit_name,'pcs') AS unit,COALESCE(ps.quantity,0) AS quantity,{$selectedNetWeightSelect} FROM products p LEFT JOIN units u ON u.id=p.unit_id LEFT JOIN product_stock ps ON ps.product_id=p.id AND ps.business_id=p.business_id AND ps.branch_id=? WHERE p.id=? AND p.business_id=? AND p.is_active=1 {$selectedTaxWhere} LIMIT 1");
+    $stmt = $conn->prepare("SELECT p.id,p.product_name,p.product_code,p.barcode,p.purity,{$selectedTaxSelect},COALESCE(u.unit_name,'pcs') AS unit,COALESCE(ps.quantity,0) AS quantity,COALESCE(ps.gross_weight,0) AS stock_gross_weight,{$selectedNetWeightSelect},{$selectedDynamicStockSelect} FROM products p LEFT JOIN units u ON u.id=p.unit_id LEFT JOIN product_stock ps ON ps.product_id=p.id AND ps.business_id=p.business_id AND ps.branch_id=? WHERE p.id=? AND p.business_id=? AND p.is_active=1 {$selectedTaxWhere} LIMIT 1");
     if ($stmt) {
         $stmt->bind_param('iii', $branchId, $selectedProductId, $businessId);
         $stmt->execute();
@@ -502,9 +515,10 @@ if ($selectedProductId > 0) {
         $stmt->close();
 
         if ($selectedProduct) {
-            $selectedProduct['gross_weight'] =
-                (float)($selectedProduct['quantity'] ?? 0) *
-                (float)($selectedProduct['net_weight'] ?? 0);
+            $selectedProduct['dynamic_stock'] = (int)($selectedProduct['dynamic_stock'] ?? 0) === 1 ? 1 : 0;
+            $selectedProduct['gross_weight'] = $selectedProduct['dynamic_stock']
+                ? (float)($selectedProduct['stock_gross_weight'] ?? 0)
+                : ((float)($selectedProduct['quantity'] ?? 0) * (float)($selectedProduct['net_weight'] ?? 0));
         }
     }
 }
@@ -951,7 +965,8 @@ unset($adjustmentRow);
                             <form id="adjustmentForm"
                                 data-current-qty="<?php echo h((string) ($selectedProduct['quantity'] ?? 0)); ?>"
                                 data-current-weight="<?php echo h((string) ($selectedProduct['gross_weight'] ?? 0)); ?>"
-                                data-unit-net-weight="<?php echo h((string) ($selectedProduct['net_weight'] ?? 0)); ?>"><input
+                                data-unit-net-weight="<?php echo h((string) ($selectedProduct['net_weight'] ?? 0)); ?>"
+                                data-dynamic-stock="<?php echo (int)($selectedProduct['dynamic_stock'] ?? 0); ?>"><input
                                     type="hidden" name="csrf_token" value="<?php echo h($csrfToken); ?>"><input
                                     type="hidden" name="action" value="save">
                                 <div class="row g-3">
@@ -964,6 +979,7 @@ unset($adjustmentRow);
                                                     data-stock-qty="<?php echo h(number_format((float)($product['_stock_quantity'] ?? 0), 3, '.', '')); ?>"
                                                     data-stock-net="<?php echo h(number_format((float)($product['_stock_net_weight'] ?? 0), 3, '.', '')); ?>"
                                                     data-stock-gross="<?php echo h(number_format((float)($product['_stock_gross_weight'] ?? 0), 3, '.', '')); ?>"
+                                                    data-dynamic-stock="<?php echo (int)($product['_dynamic_stock'] ?? 0); ?>"
                                                     <?php echo $selectedProductId === (int) $product['id'] ? 'selected' : ''; ?>>
                                                     <?php
                                                     $label = $product['product_name']
@@ -984,10 +1000,11 @@ unset($adjustmentRow);
                                     <div class="col-md-4"><label class="form-label">Quantity *</label><input type="number"
                                             step="0.001" min="0" name="adjustment_qty" id="adjustment_qty"
                                             class="form-control" placeholder="0.000"></div>
-                                    <div class="col-md-4"><label class="form-label">Net Weight / Qty *</label><input type="number"
+                                    <div class="col-md-4"><label class="form-label" id="weightFieldLabel">Net Weight / Qty *</label><input type="number"
                                             step="0.001" min="0" id="unit_net_weight"
                                             class="form-control" placeholder="0.000" readonly>
                                         <input type="hidden" name="adjustment_weight" id="adjustment_weight" value="0">
+                                        <div class="muted mt-1 d-none" id="dynamicWeightHelp">Dynamic stock: enter the total gross weight for the quantity being adjusted.</div>
                                     </div>
                                     <div class="col-md-4"><label class="form-label">Reason Type *</label><select
                                             name="reason_type" class="form-select" required>
@@ -1043,8 +1060,8 @@ unset($adjustmentRow);
                                 </div>
                                 <div class="stock-detail">
                                     <div class="detail"><span class="muted">Current Quantity</span><b id="selectedCurrentQty"><?php echo number_format((float)($selectedProduct['quantity'] ?? 0), 3); ?></b></div>
-                                    <div class="detail"><span class="muted">Net Weight / Qty</span><b id="selectedCurrentNet"><?php echo number_format((float)($selectedProduct['net_weight'] ?? 0), 3); ?></b></div>
-                                    <div class="detail"><span class="muted">Total Weight (Qty x Net)</span><b id="selectedCurrentGross"><?php echo number_format((float)($selectedProduct['gross_weight'] ?? 0), 3); ?></b></div>
+                                    <div class="detail"><span class="muted" id="selectedWeightLabel">Net Weight / Qty</span><b id="selectedCurrentNet"><?php echo number_format((float)($selectedProduct['net_weight'] ?? 0), 3); ?></b></div>
+                                    <div class="detail"><span class="muted" id="selectedTotalWeightLabel">Total Weight (Qty x Net)</span><b id="selectedCurrentGross"><?php echo number_format((float)($selectedProduct['gross_weight'] ?? 0), 3); ?></b></div>
                                     <div class="detail"><span class="muted">Product</span><b id="selectedProductShort"><?php echo h($selectedProduct['product_name'] ?? '-'); ?></b></div>
                                 </div>
                             </div>
@@ -1162,6 +1179,8 @@ unset($adjustmentRow);
             const mode = document.getElementById('adjustment_mode');
             const qtyInput = document.getElementById('adjustment_qty');
             const unitNetInput = document.getElementById('unit_net_weight');
+            const weightFieldLabel = document.getElementById('weightFieldLabel');
+            const dynamicWeightHelp = document.getElementById('dynamicWeightHelp');
             const weightInput = document.getElementById('adjustment_weight'); // hidden total weight sent to API
             const saveButton = document.getElementById('saveButton');
 
@@ -1182,14 +1201,24 @@ unset($adjustmentRow);
                 return Number.isFinite(value) ? value : 0;
             }
 
+            function isDynamicStock() {
+                return String(form?.dataset.dynamicStock || '0') === '1';
+            }
+
             function unitNetWeight() {
                 return numberValue(unitNetInput);
             }
 
             function syncAdjustmentWeight() {
                 const qty = numberValue(qtyInput);
-                const unitNet = unitNetWeight();
-                const totalWeight = Math.max(0, qty * unitNet);
+                let totalWeight;
+
+                if (isDynamicStock()) {
+                    // For dynamic stock the visible weight field itself is the total GROSS weight.
+                    totalWeight = Math.max(0, numberValue(unitNetInput));
+                } else {
+                    totalWeight = Math.max(0, qty * unitNetWeight());
+                }
 
                 if (weightInput) {
                     weightInput.value = totalWeight.toFixed(3);
@@ -1311,7 +1340,8 @@ unset($adjustmentRow);
 
                 const qty = productOptionNumber(option, 'stockQty');
                 const net = productOptionNumber(option, 'stockNet');
-                const gross = qty * net;
+                const dynamic = String(option.dataset.dynamicStock || '0') === '1';
+                const gross = dynamic ? productOptionNumber(option, 'stockGross') : (qty * net);
                 const label = (option.textContent || '').trim();
 
                 const nameEl = document.getElementById('selectedProductName');
@@ -1319,12 +1349,16 @@ unset($adjustmentRow);
                 const qtyEl = document.getElementById('selectedCurrentQty');
                 const netEl = document.getElementById('selectedCurrentNet');
                 const grossEl = document.getElementById('selectedCurrentGross');
+                const weightLabelEl = document.getElementById('selectedWeightLabel');
+                const totalWeightLabelEl = document.getElementById('selectedTotalWeightLabel');
 
                 if (nameEl) nameEl.textContent = label;
                 if (shortEl) shortEl.textContent = label;
                 if (qtyEl) qtyEl.textContent = qty.toFixed(3);
-                if (netEl) netEl.textContent = net.toFixed(3);
+                if (netEl) netEl.textContent = dynamic ? gross.toFixed(3) : net.toFixed(3);
                 if (grossEl) grossEl.textContent = gross.toFixed(3);
+                if (weightLabelEl) weightLabelEl.textContent = dynamic ? 'Current Gross Weight' : 'Net Weight / Qty';
+                if (totalWeightLabelEl) totalWeightLabelEl.textContent = dynamic ? 'Stored Gross Weight' : 'Total Weight (Qty x Net)';
 
                 wrapper?.classList.remove('d-none');
                 empty?.classList.add('d-none');
@@ -1338,10 +1372,13 @@ unset($adjustmentRow);
                 if (!option || !option.value || option.value === '0') {
                     form.dataset.currentQty = '0';
                     form.dataset.currentWeight = '0';
+                    form.dataset.dynamicStock = '0';
 
                     if (fillInputs) {
                         qtyInput.value = '';
-                        if (unitNetInput) unitNetInput.value = '';
+                        if (unitNetInput) { unitNetInput.value = ''; unitNetInput.readOnly = true; }
+                        if (weightFieldLabel) weightFieldLabel.textContent = 'Net Weight / Qty *';
+                        dynamicWeightHelp?.classList.add('d-none');
                         weightInput.value = '0';
                     }
 
@@ -1352,14 +1389,21 @@ unset($adjustmentRow);
 
                 const qty = productOptionNumber(option, 'stockQty');
                 const net = productOptionNumber(option, 'stockNet');
-                const totalWeight = qty * net;
+                const dynamic = String(option.dataset.dynamicStock || '0') === '1';
+                const totalWeight = dynamic ? productOptionNumber(option, 'stockGross') : (qty * net);
 
                 form.dataset.currentQty = String(qty);
                 form.dataset.currentWeight = String(totalWeight);
                 form.dataset.unitNetWeight = String(net);
+                form.dataset.dynamicStock = dynamic ? '1' : '0';
+
+                if (weightFieldLabel) weightFieldLabel.textContent = dynamic ? 'Gross Weight *' : 'Net Weight / Qty *';
+                dynamicWeightHelp?.classList.toggle('d-none', !dynamic);
 
                 if (unitNetInput) {
-                    unitNetInput.value = net.toFixed(3);
+                    unitNetInput.readOnly = !dynamic;
+                    unitNetInput.value = dynamic ? (mode && mode.value === 'set' ? totalWeight.toFixed(3) : '') : net.toFixed(3);
+                    unitNetInput.placeholder = dynamic ? 'Enter total gross weight' : '0.000';
                 }
 
                 if (fillInputs) {
@@ -1437,11 +1481,16 @@ unset($adjustmentRow);
                 const option = selectedProductOption();
                 if (option && option.value && option.value !== '0') {
                     const currentQty = productOptionNumber(option, 'stockQty');
+                    const dynamic = String(option.dataset.dynamicStock || '0') === '1';
                     qtyInput.value = mode.value === 'set' ? currentQty.toFixed(3) : '0.000';
+                    if (dynamic && unitNetInput) {
+                        unitNetInput.value = mode.value === 'set' ? productOptionNumber(option, 'stockGross').toFixed(3) : '';
+                    }
                 }
                 updateInputLimits();
             });
             qtyInput?.addEventListener('input', updatePreview);
+            unitNetInput?.addEventListener('input', () => { if (isDynamicStock()) updatePreview(); });
             updateInputLimits();
 
             if (form) {

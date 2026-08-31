@@ -248,6 +248,75 @@ function ensureCustomerPaymentLedgerTables(mysqli $c): void
     }
 }
 
+function ensureSaleExchangePayoutTable(mysqli $c): void
+{
+    if (tableExists($c, 'sale_exchange_payouts')) {
+        return;
+    }
+    $sql = "CREATE TABLE `sale_exchange_payouts` (
+        `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        `business_id` INT NOT NULL,
+        `branch_id` INT NOT NULL,
+        `sale_id` INT NOT NULL,
+        `customer_id` INT NOT NULL,
+        `payment_method_id` INT NOT NULL,
+        `amount` DECIMAL(18,2) NOT NULL DEFAULT 0.00,
+        `reference_no` VARCHAR(255) NULL,
+        `payout_date` DATETIME NOT NULL,
+        `created_by` INT NULL,
+        `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (`id`),
+        KEY `idx_exchange_payout_sale` (`business_id`,`sale_id`),
+        KEY `idx_exchange_payout_customer` (`business_id`,`customer_id`,`payout_date`),
+        KEY `idx_exchange_payout_method` (`payment_method_id`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci";
+    if (!$c->query($sql)) {
+        throw new RuntimeException('Unable to create sale_exchange_payouts table: ' . $c->error);
+    }
+}
+
+function billingValidateExchangePayoutMethod(mysqli $c, int $businessId, int $methodId): array
+{
+    if ($methodId <= 0) {
+        throw new RuntimeException('Select Cash / UPI payment method for the balance payable to customer.');
+    }
+    $hasMethodType = columnExists($c, 'payment_methods', 'method_type');
+    $sql = $hasMethodType
+        ? 'SELECT id,method_name,method_type FROM payment_methods WHERE id=? AND business_id=? AND is_active=1 LIMIT 1'
+        : "SELECT id,method_name,'' AS method_type FROM payment_methods WHERE id=? AND business_id=? AND is_active=1 LIMIT 1";
+    $stmt = prepareOrFail($c, $sql, 'Unable to validate exchange payout method');
+    $stmt->bind_param('ii', $methodId, $businessId);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    if (!$row) {
+        throw new RuntimeException('Selected exchange payout method is invalid or inactive.');
+    }
+    $name = strtolower(trim((string)($row['method_name'] ?? '')));
+    $type = strtolower(trim((string)($row['method_type'] ?? '')));
+    $isCashOrUpi = in_array($type, ['cash', 'upi'], true) || $name === 'cash' || strpos($name, 'upi') !== false;
+    if (!$isCashOrUpi) {
+        throw new RuntimeException('Exchange balance payout must use Cash or UPI.');
+    }
+    return $row;
+}
+
+function billingSaveExchangePayout(mysqli $c, int $businessId, int $branchId, int $saleId, int $customerId, int $methodId, float $amount, string $reference, string $invoiceDate, string $invoiceTime, int $userId): void
+{
+    if ($amount <= 0.005) {
+        return;
+    }
+    ensureSaleExchangePayoutTable($c);
+    billingValidateExchangePayoutMethod($c, $businessId, $methodId);
+    $dt = $invoiceDate . ' ' . substr($invoiceTime, 0, 5) . ':00';
+    $stmt = prepareOrFail($c, 'INSERT INTO sale_exchange_payouts(business_id,branch_id,sale_id,customer_id,payment_method_id,amount,reference_no,payout_date,created_by) VALUES(?,?,?,?,?,?,?,?,?)', 'Unable to save exchange balance payout');
+    $stmt->bind_param('iiiiidssi', $businessId, $branchId, $saleId, $customerId, $methodId, $amount, $reference, $dt, $userId);
+    if (!$stmt->execute()) {
+        throw new RuntimeException('Unable to save exchange balance payout: ' . $stmt->error);
+    }
+    $stmt->close();
+}
+
 function permission(mysqli $c, string $action): bool
 {
     if (($_SESSION['user_type'] ?? '') === 'Platform Admin')
@@ -835,6 +904,9 @@ if ($action === 'update') {
     $stones = $_POST['stone_amount'] ?? [];
     $others = $_POST['other_charge'] ?? [];
     $discounts = $_POST['item_discount'] ?? [];
+    $dynamicGrossWeights = $_POST['dynamic_gross_weight'] ?? [];
+    $exchangePayoutMethodId = (int)($_POST['exchange_payout_payment_method_id'] ?? 0);
+    $exchangePayoutReference = trim((string)($_POST['exchange_payout_reference'] ?? ''));
     $claims = json_decode((string) ($_POST['chit_claims_json'] ?? '[]'), true);
     if (!is_array($claims))
         $claims = [];
@@ -883,7 +955,7 @@ if ($action === 'update') {
             throw new RuntimeException('Selected customer is invalid.');
 
         $oldItems = [];
-        $os = prepareOrFail($conn, 'SELECT si.*,p.track_stock FROM sale_items si LEFT JOIN products p ON p.id=si.product_id AND p.business_id=si.business_id WHERE si.sale_id=? AND si.business_id=? ORDER BY si.id FOR UPDATE', 'Unable to load existing invoice items');
+        $os = prepareOrFail($conn, 'SELECT si.*,p.track_stock,' . (columnExists($conn, 'products', 'dynamic_stock') ? 'COALESCE(p.dynamic_stock,0)' : '0') . ' AS dynamic_stock FROM sale_items si LEFT JOIN products p ON p.id=si.product_id AND p.business_id=si.business_id WHERE si.sale_id=? AND si.business_id=? ORDER BY si.id FOR UPDATE', 'Unable to load existing invoice items');
         $os->bind_param('ii', $saleId, $businessId);
         $os->execute();
         $or = $os->get_result();
@@ -924,14 +996,17 @@ if ($action === 'update') {
             $q = (float) $old['quantity'];
             $g = (float) $old['gross_weight'];
             $n = (float) $old['net_weight'];
-            $restore->bind_param('iiiddd', $businessId, $branchId, $pid, $q, $g, $n);
+            $isDynamicOld = (int)($old['dynamic_stock'] ?? 0) === 1;
+            $restoreNet = $isDynamicOld ? 0.0 : $n;
+            $restore->bind_param('iiiddd', $businessId, $branchId, $pid, $q, $g, $restoreNet);
             if (!$restore->execute())
                 throw new RuntimeException('Unable to restore old stock: ' . $restore->error);
             billingReactivateRestoredProduct($conn, $businessId, $pid);
             $rate = (float) $old['metal_rate'];
             $value = (float) $old['line_total'];
             $remarks = 'Invoice edit reverse ' . $oldSale['invoice_no'];
-            $moveIn->bind_param('iiisiddddsi', $businessId, $branchId, $pid, $reverseDate, $saleId, $q, $n, $rate, $value, $remarks, $userId);
+            $restoreMovementWeight = $isDynamicOld ? $g : $n;
+            $moveIn->bind_param('iiisiddddsi', $businessId, $branchId, $pid, $reverseDate, $saleId, $q, $restoreMovementWeight, $rate, $value, $remarks, $userId);
             if (!$moveIn->execute())
                 throw new RuntimeException('Unable to log stock reversal: ' . $moveIn->error);
         }
@@ -949,6 +1024,13 @@ if ($action === 'update') {
             if (!$cc->execute())
                 throw new RuntimeException($cc->error);
             $cc->close();
+        }
+        if (tableExists($conn, 'sale_exchange_payouts')) {
+            $de = prepareOrFail($conn, 'DELETE FROM sale_exchange_payouts WHERE sale_id=? AND business_id=?', 'Unable to reverse exchange balance payout');
+            $de->bind_param('ii', $saleId, $businessId);
+            if (!$de->execute())
+                throw new RuntimeException($de->error);
+            $de->close();
         }
         if (tableExists($conn, 'sale_exchange_items')) {
             $de = prepareOrFail($conn, 'DELETE FROM sale_exchange_items WHERE sale_id=? AND business_id=?', 'Unable to reverse sale exchange');
@@ -978,6 +1060,9 @@ if ($action === 'update') {
         $requested = [];
         $available = [];
         $tracked = [];
+        $requestedDynamicGross = [];
+        $availableDynamicGross = [];
+        $dynamicTracked = [];
         $ps = prepareOrFail($conn, 'SELECT p.*,COALESCE(ps.quantity,0) stock_qty,COALESCE(ps.gross_weight,0) stock_gross,COALESCE(ps.net_weight,0) stock_net,COALESCE(mr.rate_per_gram,p.sale_rate,0) live_metal_rate FROM products p LEFT JOIN product_stock ps ON ps.product_id=p.id AND ps.business_id=p.business_id AND ps.branch_id=? LEFT JOIN metal_rates mr ON mr.id=(SELECT mr2.id FROM metal_rates mr2 WHERE mr2.business_id=p.business_id AND mr2.metal_id=p.metal_id AND mr2.is_current=1 AND (mr2.branch_id=? OR mr2.branch_id IS NULL) ORDER BY (mr2.branch_id=?) DESC,mr2.effective_from DESC,mr2.id DESC LIMIT 1) WHERE p.id=? AND p.business_id=? AND p.is_active=1 LIMIT 1 FOR UPDATE', 'Unable to prepare product lookup');
         foreach ($productIds as $i => $raw) {
             $pid = (int) $raw;
@@ -1008,9 +1093,19 @@ if ($action === 'update') {
             $other = max(0, (float) ($others[$i] ?? 0));
             $disc = max(0, (float) ($discounts[$i] ?? 0));
             $taxPct = $editNonGst ? 0.0 : max(0, min(100, (float) ($taxPercents[$i] ?? $p['tax_percent'] ?? 0)));
-            $gross = (float) $p['gross_weight'] * $q;
+            $isDynamicStock = (int)($p['dynamic_stock'] ?? 0) === 1;
+            $postedDynamicGross = round(max(0, (float)($dynamicGrossWeights[$i] ?? 0)), 3);
+            if ($isDynamicStock && $postedDynamicGross <= 0) {
+                throw new RuntimeException('Enter the actual gross weight for dynamic stock product ' . $p['product_name'] . '.');
+            }
+            $gross = $isDynamicStock ? $postedDynamicGross : (float) $p['gross_weight'] * $q;
             $stoneWeight = (float) $p['stone_weight'] * $q;
             $net = (float) $p['net_weight'] * $q;
+            if ($isDynamicStock) {
+                $requestedDynamicGross[$pid] = ($requestedDynamicGross[$pid] ?? 0) + $gross;
+                $availableDynamicGross[$pid] = (float)$p['stock_gross'];
+                $dynamicTracked[$pid] = (int)$p['track_stock'] === 1;
+            }
             $metal = $gross > 0 ? $gross * $rate : $q * $rate;
             $making = $gross > 0 ? $gross * $mk : $q * $mk;
             $base = $metal + $making;
@@ -1019,7 +1114,7 @@ if ($action === 'update') {
             $rowTaxable = max(0, $rowSub - $disc);
             $tax = $rowTaxable * $taxPct / 100;
             $line = $rowTaxable + $tax;
-            $items[] = ['p' => $p, 'qty' => $q, 'gross' => $gross, 'stone_weight' => $stoneWeight, 'net' => $net, 'rate' => $rate, 'w' => $w, 'wamt' => $wamt, 'making' => $making, 'stone' => $stone, 'other' => $other, 'disc' => $disc, 'tax_percent' => $taxPct, 'tax' => $tax, 'line' => $line];
+            $items[] = ['p' => $p, 'qty' => $q, 'gross' => $gross, 'stone_weight' => $stoneWeight, 'net' => $net, 'stock_gross_out' => $gross, 'stock_net_out' => $isDynamicStock ? 0.0 : $net, 'movement_weight' => $isDynamicStock ? $gross : $net, 'is_dynamic_stock' => $isDynamicStock, 'rate' => $rate, 'w' => $w, 'wamt' => $wamt, 'making' => $making, 'stone' => $stone, 'other' => $other, 'disc' => $disc, 'tax_percent' => $taxPct, 'tax' => $tax, 'line' => $line];
             $subtotal += $rowSub;
             $itemDiscount += $disc;
             $taxable += $rowTaxable;
@@ -1037,6 +1132,15 @@ if ($action === 'update') {
                         break;
                     }
                 throw new RuntimeException($name . ' has only ' . number_format((float) ($available[$pid] ?? 0), 3) . ' stock available.');
+            }
+        }
+        foreach ($requestedDynamicGross as $pid => $grossRequested) {
+            if (!empty($dynamicTracked[$pid]) && ($availableDynamicGross[$pid] ?? 0) + 0.0001 < $grossRequested) {
+                $name = 'Product';
+                foreach ($items as $it) {
+                    if ((int)$it['p']['id'] === (int)$pid) { $name = (string)$it['p']['product_name']; break; }
+                }
+                throw new RuntimeException($name . ' has only ' . number_format((float)($availableDynamicGross[$pid] ?? 0), 3) . ' g gross stock available.');
             }
         }
         $taxable = max(0, $taxable - $overall);
@@ -1074,9 +1178,11 @@ if ($action === 'update') {
             $exchangeTotal += $value;
             $validatedExchange[] = ['name' => $name, 'gross' => $gross, 'waste' => $waste, 'eligible' => $eligible, 'rate' => $rate, 'value' => $value];
         }
-        if ($exchangeTotal > $grossGrand + 0.001)
-            throw new RuntimeException('Exchange value cannot exceed bill total.');
+        $exchangePayoutAmount = round(max(0, $exchangeTotal - $grossGrand), 2);
         $afterExchange = max(0, $grossGrand - $exchangeTotal);
+        if ($exchangePayoutAmount > 0.005) {
+            billingValidateExchangePayoutMethod($conn, $businessId, $exchangePayoutMethodId);
+        }
         $claimTotal = 0.0;
         $validatedClaims = [];
         if ($claims) {
@@ -1133,12 +1239,12 @@ if ($action === 'update') {
             if (!$is->execute())
                 throw new RuntimeException($is->error);
             if ((int) $p['track_stock'] === 1) {
-                $sd->bind_param('dddiiid', $it['qty'], $it['gross'], $it['net'], $businessId, $branchId, $p['id'], $it['qty']);
+                $sd->bind_param('dddiiid', $it['qty'], $it['stock_gross_out'], $it['stock_net_out'], $businessId, $branchId, $p['id'], $it['qty']);
                 if (!$sd->execute() || $sd->affected_rows < 1)
                     throw new RuntimeException('Unable to deduct stock for ' . $p['product_name']);
                 $value = $it['line'];
                 $remarks = 'Edited invoice ' . $oldSale['invoice_no'];
-                $mo->bind_param('iiisiddddsi', $businessId, $branchId, $p['id'], $movementDate, $saleId, $it['qty'], $it['net'], $it['rate'], $value, $remarks, $userId);
+                $mo->bind_param('iiisiddddsi', $businessId, $branchId, $p['id'], $movementDate, $saleId, $it['qty'], $it['movement_weight'], $it['rate'], $value, $remarks, $userId);
                 if (!$mo->execute())
                     throw new RuntimeException($mo->error);
                 billingDeactivateProductIfOutOfStock($conn, $businessId, (int) $p['id']);
@@ -1161,6 +1267,7 @@ if ($action === 'update') {
             $es->close();
             $xs->close();
         }
+        billingSaveExchangePayout($conn, $businessId, $branchId, $saleId, $customerId, $exchangePayoutMethodId, $exchangePayoutAmount, $exchangePayoutReference, $invoiceDate, $invoiceTime, $userId);
         billingSaveSalePayments($conn, $businessId, $branchId, $saleId, $invoiceDate, $invoiceTime, $userId, $payments);
         billingSaveCustomerReceipt($conn, $businessId, $branchId, $customerId, $saleId, (string) $oldSale['invoice_no'], $invoiceDate, $invoiceTime, $paid, $payments, $notes, $userId);
         if ($validatedClaims) {
@@ -1185,9 +1292,9 @@ if ($action === 'update') {
         if (!$u->execute())
             throw new RuntimeException($u->error);
         $u->close();
-        billingAuditLog($conn, $businessId, $branchId, $userId, 'billing.sales', 'Update', 'sales', $saleId, 'Fully reversed and reposted bill ' . $oldSale['invoice_no'], ['invoice_no' => $oldSale['invoice_no'], 'customer_id' => (int) $oldSale['customer_id'], 'bill_type' => $oldSale['bill_type'], 'tax_type' => $oldSale['tax_type'], 'grand_total' => (float) $oldSale['grand_total'], 'paid_amount' => (float) $oldSale['paid_amount'], 'balance_amount' => (float) $oldSale['balance_amount']], ['invoice_no' => $oldSale['invoice_no'], 'customer_id' => $customerId, 'bill_type' => $billType, 'tax_type' => $taxType, 'grand_total' => round($grossGrand, 2), 'exchange_amount' => round($exchangeTotal, 2), 'chit_claim_amount' => round($claimTotal, 2), 'net_payable_amount' => round($netPayable, 2), 'received_amount' => round($paid, 2), 'credit_amount' => round($creditAmount, 2), 'balance_amount' => round($balance, 2), 'payment_status' => $paymentStatus]);
+        billingAuditLog($conn, $businessId, $branchId, $userId, 'billing.sales', 'Update', 'sales', $saleId, 'Fully reversed and reposted bill ' . $oldSale['invoice_no'], ['invoice_no' => $oldSale['invoice_no'], 'customer_id' => (int) $oldSale['customer_id'], 'bill_type' => $oldSale['bill_type'], 'tax_type' => $oldSale['tax_type'], 'grand_total' => (float) $oldSale['grand_total'], 'paid_amount' => (float) $oldSale['paid_amount'], 'balance_amount' => (float) $oldSale['balance_amount']], ['invoice_no' => $oldSale['invoice_no'], 'customer_id' => $customerId, 'bill_type' => $billType, 'tax_type' => $taxType, 'grand_total' => round($grossGrand, 2), 'exchange_amount' => round($exchangeTotal, 2), 'exchange_payout_amount' => round($exchangePayoutAmount, 2), 'chit_claim_amount' => round($claimTotal, 2), 'net_payable_amount' => round($netPayable, 2), 'received_amount' => round($paid, 2), 'credit_amount' => round($creditAmount, 2), 'balance_amount' => round($balance, 2), 'payment_status' => $paymentStatus]);
         $conn->commit();
-        respond(true, 'Bill ' . $oldSale['invoice_no'] . ' updated successfully with full reverse calculation.', ['document_type' => $editNonGst ? 'Non GST Invoice' : 'Invoice', 'sale_id' => $saleId, 'invoice_no' => $oldSale['invoice_no'], 'net_payable_amount' => $netPayable, 'received_amount' => $paid, 'credit_amount' => round($creditAmount, 2), 'balance_amount' => $balance, 'payment_status' => $paymentStatus]);
+        respond(true, 'Bill ' . $oldSale['invoice_no'] . ' updated successfully with full reverse calculation.', ['document_type' => $editNonGst ? 'Non GST Invoice' : 'Invoice', 'sale_id' => $saleId, 'invoice_no' => $oldSale['invoice_no'], 'net_payable_amount' => $netPayable, 'exchange_payout_amount' => $exchangePayoutAmount, 'received_amount' => $paid, 'credit_amount' => round($creditAmount, 2), 'balance_amount' => $balance, 'payment_status' => $paymentStatus]);
     } catch (Throwable $e) {
         $conn->rollback();
         respond(false, $e->getMessage(), [], 422);
@@ -1229,6 +1336,9 @@ $makings = $_POST['making_charge'] ?? [];
 $stones = $_POST['stone_amount'] ?? [];
 $others = $_POST['other_charge'] ?? [];
 $discounts = $_POST['item_discount'] ?? [];
+$dynamicGrossWeights = $_POST['dynamic_gross_weight'] ?? [];
+$exchangePayoutMethodId = (int)($_POST['exchange_payout_payment_method_id'] ?? 0);
+$exchangePayoutReference = trim((string)($_POST['exchange_payout_reference'] ?? ''));
 if (!is_array($productIds) || count($productIds) < 1)
     respond(false, 'Add at least one product.', [], 422);
 $overall = max(0, (float) ($_POST['overall_discount'] ?? 0));
@@ -1254,6 +1364,9 @@ try {
     $requestedQtyByProduct = [];
     $availableQtyByProduct = [];
     $trackedProduct = [];
+    $requestedDynamicGrossByProduct = [];
+    $availableDynamicGrossByProduct = [];
+    $dynamicTrackedProduct = [];
     $productStmt = prepareOrFail($conn, 'SELECT p.*,COALESCE(ps.quantity,0) stock_qty,COALESCE(ps.gross_weight,0) stock_gross,COALESCE(ps.net_weight,0) stock_net,COALESCE(mr.rate_per_gram,p.sale_rate,0) live_metal_rate,mr.id live_metal_rate_id,mr.effective_from live_rate_effective_from FROM products p LEFT JOIN product_stock ps ON ps.product_id=p.id AND ps.business_id=p.business_id AND ps.branch_id=? LEFT JOIN metal_rates mr ON mr.id=(SELECT mr2.id FROM metal_rates mr2 WHERE mr2.business_id=p.business_id AND mr2.metal_id=p.metal_id AND mr2.is_current=1 AND (mr2.branch_id=? OR mr2.branch_id IS NULL) ORDER BY (mr2.branch_id=?) DESC,mr2.effective_from DESC,mr2.id DESC LIMIT 1) WHERE p.id=? AND p.business_id=? AND p.is_active=1 LIMIT 1 FOR UPDATE', 'Unable to prepare product lookup');
     foreach ($productIds as $i => $pidRaw) {
         $pid = (int) $pidRaw;
@@ -1292,9 +1405,19 @@ try {
         $taxPercent = $nonGstModeActive
             ? 0.0
             : max(0, min(100, (float) ($taxPercents[$i] ?? $p['tax_percent'] ?? 0)));
-        $gross = (float) $p['gross_weight'] * $qty;
+        $isDynamicStock = (int)($p['dynamic_stock'] ?? 0) === 1;
+        $postedDynamicGross = round(max(0, (float)($dynamicGrossWeights[$i] ?? 0)), 3);
+        if ($isDynamicStock && $postedDynamicGross <= 0) {
+            throw new RuntimeException('Enter the actual gross weight for dynamic stock product ' . $p['product_name'] . '.');
+        }
+        $gross = $isDynamicStock ? $postedDynamicGross : (float) $p['gross_weight'] * $qty;
         $stoneWeight = (float) $p['stone_weight'] * $qty;
         $net = (float) $p['net_weight'] * $qty;
+        if ($isDynamicStock) {
+            $requestedDynamicGrossByProduct[$pid] = ($requestedDynamicGrossByProduct[$pid] ?? 0) + $gross;
+            $availableDynamicGrossByProduct[$pid] = (float)$p['stock_gross'];
+            $dynamicTrackedProduct[$pid] = (int)$p['track_stock'] === 1;
+        }
 
         /*
          * Jewellery billing rule:
@@ -1313,7 +1436,7 @@ try {
         $rowTaxable = max(0, $rowSub - $disc);
         $tax = $rowTaxable * $taxPercent / 100;
         $line = $rowTaxable + $tax;
-        $items[] = ['p' => $p, 'qty' => $qty, 'gross' => $gross, 'stone_weight' => $stoneWeight, 'net' => $net, 'rate' => $rate, 'w' => $w, 'wamt' => $wastageAmount, 'making' => $makingAmount, 'stone' => $stone, 'other' => $other, 'disc' => $disc, 'tax_percent' => $taxPercent, 'tax' => $tax, 'line' => $line];
+        $items[] = ['p' => $p, 'qty' => $qty, 'gross' => $gross, 'stone_weight' => $stoneWeight, 'net' => $net, 'stock_gross_out' => $gross, 'stock_net_out' => $isDynamicStock ? 0.0 : $net, 'movement_weight' => $isDynamicStock ? $gross : $net, 'is_dynamic_stock' => $isDynamicStock, 'rate' => $rate, 'w' => $w, 'wamt' => $wastageAmount, 'making' => $makingAmount, 'stone' => $stone, 'other' => $other, 'disc' => $disc, 'tax_percent' => $taxPercent, 'tax' => $tax, 'line' => $line];
         $subtotal += $rowSub;
         $itemDiscount += $disc;
         $taxable += $rowTaxable;
@@ -1341,6 +1464,15 @@ try {
                 throw new RuntimeException(
                     $name . ' has only ' . number_format((float) ($availableQtyByProduct[$pid] ?? 0), 3) . ' stock available.'
                 );
+            }
+        }
+        foreach ($requestedDynamicGrossByProduct as $pid => $grossRequested) {
+            if (!empty($dynamicTrackedProduct[$pid]) && ($availableDynamicGrossByProduct[$pid] ?? 0) + 0.0001 < $grossRequested) {
+                $name = 'Product';
+                foreach ($items as $it) {
+                    if ((int)$it['p']['id'] === (int)$pid) { $name = (string)$it['p']['product_name']; break; }
+                }
+                throw new RuntimeException($name . ' has only ' . number_format((float)($availableDynamicGrossByProduct[$pid] ?? 0), 3) . ' g gross stock available.');
             }
         }
     }
@@ -1391,8 +1523,13 @@ try {
         $exchangeTotal += $value;
         $validatedExchange[] = ['name' => $name, 'metal_id' => $metalId, 'metal_name' => (string) $metalRow['metal_name'], 'gross' => $gross, 'waste' => $waste, 'eligible' => $eligible, 'rate' => $rate, 'value' => $value];
     }
-    if ($exchangeTotal > $grand + 0.001)
-        throw new RuntimeException('Exchange value cannot exceed bill total.');
+    $exchangePayoutAmount = round(max(0, $exchangeTotal - $grand), 2);
+    if ($documentType === 'Estimate' && $exchangePayoutAmount > 0.005) {
+        throw new RuntimeException('Exchange value cannot exceed bill total for an Estimate.');
+    }
+    if ($documentType !== 'Estimate' && $exchangePayoutAmount > 0.005) {
+        billingValidateExchangePayoutMethod($conn, $businessId, $exchangePayoutMethodId);
+    }
     $grand = max(0, $grand - $exchangeTotal);
     $claimTotal = 0.0;
     $validatedClaims = [];
@@ -1713,14 +1850,14 @@ try {
         $itemStmt->bind_param('iiiissdddddddddddddddi', $businessId, $branchId, $saleId, $p['id'], $p['product_name'], $p['hsn_code'], $it['qty'], $it['gross'], $it['stone_weight'], $it['net'], $it['rate'], $it['w'], $it['wamt'], $it['making'], $it['stone'], $it['other'], $it['disc'], $it['tax_percent'], $it['tax'], $it['line'], $cost, $sort);
         $itemStmt->execute();
         if ((int) $p['track_stock'] === 1) {
-            $stockUp->bind_param('dddiiid', $it['qty'], $it['gross'], $it['net'], $businessId, $branchId, $p['id'], $it['qty']);
+            $stockUp->bind_param('dddiiid', $it['qty'], $it['stock_gross_out'], $it['stock_net_out'], $businessId, $branchId, $p['id'], $it['qty']);
             $stockUp->execute();
             if ($stockUp->affected_rows < 1)
                 throw new RuntimeException('Unable to reduce stock for ' . $p['product_name']);
             $movementDate = $invoiceDate . ' ' . $invoiceTime . ':00';
             $value = $it['line'];
             $remarks = 'Sale ' . $number['document_no'];
-            $move->bind_param('iiisiddddsi', $businessId, $branchId, $p['id'], $movementDate, $saleId, $it['qty'], $it['net'], $it['rate'], $value, $remarks, $userId);
+            $move->bind_param('iiisiddddsi', $businessId, $branchId, $p['id'], $movementDate, $saleId, $it['qty'], $it['movement_weight'], $it['rate'], $value, $remarks, $userId);
             if (!$move->execute()) {
                 throw new RuntimeException('Unable to log stock movement for ' . $p['product_name'] . ': ' . $move->error);
             }
@@ -1747,6 +1884,7 @@ try {
         $exSale->close();
         $exStock->close();
     }
+    billingSaveExchangePayout($conn, $businessId, $branchId, $saleId, $customerId, $exchangePayoutMethodId, $exchangePayoutAmount, $exchangePayoutReference, $invoiceDate, $invoiceTime, $userId);
     if ($payments) {
         $pm = prepareOrFail(
             $conn,
@@ -1872,6 +2010,7 @@ try {
             'round_off' => round($round, 2),
             'grand_total' => round($storedGrandTotal, 2),
             'exchange_amount' => round($exchangeTotal, 2),
+            'exchange_payout_amount' => round($exchangePayoutAmount, 2),
             'chit_claim_amount' => round($claimTotal, 2),
             'net_payable_amount' => round($netPayable, 2),
             'received_amount' => round($paid, 2),
@@ -1891,6 +2030,7 @@ try {
         'sale_id' => $saleId,
         'invoice_no' => $number['document_no'],
         'net_payable_amount' => $netPayable,
+        'exchange_payout_amount' => $exchangePayoutAmount,
         'received_amount' => $paid,
         'credit_amount' => round($creditAmount, 2),
         'balance_amount' => $balance,

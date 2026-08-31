@@ -407,7 +407,7 @@ $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
                         <div class="col-md-8"><label class="field-label">Description</label><textarea
                                 class="form-control" rows="5" name="description"></textarea>
                             <div class="row g-3 mt-1">
-                                <div class="col-md-6">
+                                <div class="col-md-4">
                                     <div class="form-check">
                                         <input class="form-check-input" type="checkbox" name="track_stock" value="1"
                                             id="track_stock" checked>
@@ -421,7 +421,21 @@ $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
                                     </div>
                                 </div>
 
-                                <div class="col-md-6">
+                                <div class="col-md-4">
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="checkbox" name="dynamic_stock" value="1"
+                                            id="dynamic_stock">
+                                        <label class="form-check-label fw-semibold" for="dynamic_stock">
+                                            Dynamic stock weight
+                                        </label>
+                                    </div>
+                                    <div class="small text-muted ms-4 mt-1">
+                                        Use this when each piece of the same product can have a different weight. Quantity
+                                        is counted by pieces and total stock weight is the sum of all individual piece weights.
+                                    </div>
+                                </div>
+
+                                <div class="col-md-4">
                                     <div class="form-check">
                                         <input class="form-check-input" type="checkbox" name="is_active" value="1"
                                             id="is_active" checked>
@@ -484,6 +498,8 @@ $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
             const metalSelect = document.getElementById('metalSelect');
             const puritySelect = document.getElementById('puritySelect');
             const purityHelp = document.getElementById('purityHelp');
+            const trackStockCheckbox = document.getElementById('track_stock');
+            const dynamicStockCheckbox = document.getElementById('dynamic_stock');
             const metalPurities = <?= json_encode($metalPurities, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
 
             function loadPuritiesForMetal() {
@@ -527,6 +543,29 @@ $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
                 markDirty();
             });
             loadPuritiesForMetal();
+
+            function syncDynamicStockOption() {
+                if (!trackStockCheckbox || !dynamicStockCheckbox) return;
+
+                if (dynamicStockCheckbox.checked) {
+                    trackStockCheckbox.checked = true;
+                }
+
+                dynamicStockCheckbox.disabled = !trackStockCheckbox.checked;
+                if (!trackStockCheckbox.checked) {
+                    dynamicStockCheckbox.checked = false;
+                }
+            }
+
+            trackStockCheckbox?.addEventListener('change', () => {
+                syncDynamicStockOption();
+                markDirty();
+            });
+            dynamicStockCheckbox?.addEventListener('change', () => {
+                syncDynamicStockOption();
+                markDirty();
+            });
+            syncDynamicStockOption();
 
             let savedGstTaxPercent = taxPercentInput ? (taxPercentInput.value || '3') : '3';
             let savedHsnCode = hsnCodeInput ? hsnCodeInput.value : '';

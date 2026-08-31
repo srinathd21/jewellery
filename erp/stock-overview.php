@@ -155,7 +155,7 @@ COALESCE(SUM(CASE WHEN COALESCE(ps.quantity,0)>0 THEN 1 ELSE 0 END),0) in_stock,
 COALESCE(SUM(CASE WHEN COALESCE(ps.quantity,0)>0 AND p.minimum_stock_qty>0 AND COALESCE(ps.quantity,0)<=p.minimum_stock_qty THEN 1 ELSE 0 END),0) low_stock,
 COALESCE(SUM(CASE WHEN COALESCE(ps.quantity,0)<=0 THEN 1 ELSE 0 END),0) out_stock,
 COALESCE(SUM(ps.quantity),0) total_qty,
-COALESCE(SUM(COALESCE(ps.quantity,0) * COALESCE(p.gross_weight,0)),0) total_weight' . $join . $where;
+COALESCE(SUM(COALESCE(ps.gross_weight,0)),0) total_weight' . $join . $where;
 $stmt = $conn->prepare($summarySql);
 if (!$stmt)
     die('Unable to prepare stock summary query.');
@@ -168,8 +168,11 @@ $stmt->close();
 $listSql = 'SELECT p.id,p.product_code,p.product_name,p.barcode,p.purity,p.minimum_stock_qty,p.sale_rate,p.image_path,p.is_active,
 COALESCE(p.tax_type, CASE WHEN COALESCE(p.tax_percent,0)>0 THEN \'GST\' ELSE \'Non-GST\' END) tax_type,c.category_name,m.metal_name,COALESCE(u.unit_name,\'Piece\') unit_name,
 COALESCE(ps.quantity,0) closing_qty,
+COALESCE(ps.gross_weight,0) stock_gross_weight,
+COALESCE(ps.net_weight,0) stock_net_weight,
 COALESCE(p.gross_weight,0) single_gross_weight,
 COALESCE(p.net_weight,0) single_net_weight,
+COALESCE(p.dynamic_stock,0) dynamic_stock,
 COALESCE(ps.average_cost,0) average_cost,
 COALESCE(ps.stock_value,0) stock_value,
 ps.updated_at stock_updated_at,
@@ -627,11 +630,22 @@ $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
                                     $qty = (float) $p['closing_qty'];
                                     $min = (float) $p['minimum_stock_qty'];
 
-                                    // Final weight rule:
-                                    // Gross stock weight = stock quantity/pieces x single-product gross weight
-                                    // Net weight = single-product net weight only
-                                    $grossWeight = $qty * (float) ($p['single_gross_weight'] ?? 0);
-                                    $netWeight = (float) ($p['single_net_weight'] ?? 0);
+                                    // Weight rule:
+                                    // Dynamic stock: Gross/Net values come from the accumulated branch stock record.
+                                    // Normal stock: Gross is the branch total, but Net Wt. must show the
+                                    // single-product master net weight (products.net_weight), not a quantity total.
+                                    $isDynamicStock = (int) ($p['dynamic_stock'] ?? 0) === 1;
+                                    $storedGrossWeight = (float) ($p['stock_gross_weight'] ?? 0);
+                                    $storedNetWeight = (float) ($p['stock_net_weight'] ?? 0);
+                                    if ($isDynamicStock) {
+                                        $grossWeight = $storedGrossWeight;
+                                        $netWeight = $storedNetWeight;
+                                    } else {
+                                        $grossWeight = $storedGrossWeight > 0
+                                            ? $storedGrossWeight
+                                            : $qty * (float) ($p['single_gross_weight'] ?? 0);
+                                        $netWeight = (float) ($p['single_net_weight'] ?? 0);
+                                    }
 
                                     $status = 'In Stock';
                                     $cls = 'in-stock';
