@@ -241,7 +241,7 @@ body{background:var(--page-bg);color:var(--text-color);font-family:<?php echo js
 .stat-card{background:var(--card-bg);border:1px solid var(--border-color);border-radius:var(--radius);padding:12px 14px;display:flex;align-items:center;gap:12px;min-height:82px}
 .stat-icon{width:42px;height:42px;display:grid;place-items:center;border-radius:10px;background:var(--primary-soft);color:var(--primary-dark);font-size:16px}
 .stat-label{font-size:10px;color:var(--muted-color)}.stat-value{font-size:20px;font-weight:800;margin-top:4px}
-.mini-stat-grid{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px;margin-bottom:10px}
+.mini-stat-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:8px;margin-bottom:10px}
 .mini-stat{background:var(--card-bg);border:1px solid var(--border-color);border-radius:var(--radius);padding:10px 12px}
 .mini-stat-label{font-size:9px;color:var(--muted-color)}.mini-stat-value{font-size:13px;font-weight:800;margin-top:4px}
 .panel{background:var(--card-bg);border:1px solid var(--border-color);border-radius:var(--radius);overflow:hidden;margin-bottom:10px}
@@ -289,6 +289,7 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
         <div class="mini-stat"><div class="mini-stat-label">Total GST</div><div class="mini-stat-value" id="totalGst">₹0.00</div></div>
         <div class="mini-stat"><div class="mini-stat-label">CGST</div><div class="mini-stat-value" id="cgst">₹0.00</div></div>
         <div class="mini-stat"><div class="mini-stat-label">SGST / IGST</div><div class="mini-stat-value" id="sgstIgst">₹0.00</div></div>
+        <div class="mini-stat"><div class="mini-stat-label">Advance Booking Collected</div><div class="mini-stat-value amount-positive" id="advanceBookingCollected">₹0.00</div></div>
     </div>
 
     <div class="panel filters-panel">
@@ -323,7 +324,7 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
                 <thead><tr>
                     <th>#</th><th>Bill No</th><th>Date</th><th>Customer</th><th>Mobile</th><th>Bill Type</th><th>Method</th>
                     <th>Subtotal</th><th>Discount</th><th>Taxable</th><th>CGST</th><th>SGST</th><th>IGST</th><th>Round Off</th>
-                    <th>Grand Total</th><th>Paid</th><th>Balance</th><th>Status</th><th class="text-end action-column">Action</th>
+                    <th>Grand Total</th><th>Advance Booking Collected</th><th>Paid</th><th>Balance</th><th>Status</th><th class="text-end action-column">Action</th>
                 </tr></thead>
                 <tbody id="salesTableBody"></tbody>
             </table>
@@ -436,8 +437,9 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
             sum.cgst_amount+=Number(row.cgst_amount||0);
             sum.sgst_amount+=Number(row.sgst_amount||0);
             sum.igst_amount+=Number(row.igst_amount||0);
+            sum.advance_booking_collected+=Number(row.advance_booking_collected||row.advance_booking_amount||row.advance_collected_amount||0);
             return sum;
-        },{total_bills:0,grand_total:0,paid_amount:0,balance_amount:0,subtotal:0,discount_amount:0,taxable_amount:0,cgst_amount:0,sgst_amount:0,igst_amount:0});
+        },{total_bills:0,grand_total:0,paid_amount:0,balance_amount:0,subtotal:0,discount_amount:0,taxable_amount:0,cgst_amount:0,sgst_amount:0,igst_amount:0,advance_booking_collected:0});
 
         document.getElementById('totalBills').textContent=Number(s.total_bills||0);
         document.getElementById('grandTotal').textContent='₹'+money(s.grand_total);
@@ -449,6 +451,7 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
         document.getElementById('totalGst').textContent='₹'+money(Number(s.cgst_amount||0)+Number(s.sgst_amount||0)+Number(s.igst_amount||0));
         document.getElementById('cgst').textContent='₹'+money(s.cgst_amount);
         document.getElementById('sgstIgst').textContent='₹'+money(Number(s.sgst_amount||0)+Number(s.igst_amount||0));
+        document.getElementById('advanceBookingCollected').textContent='₹'+money(s.advance_booking_collected);
         document.getElementById('periodLabel').textContent='Period: '+result.period.from_display+' to '+result.period.to_display;
 
         loading.classList.add('d-none');
@@ -479,6 +482,7 @@ body.dark-mode,body[data-theme="dark"],html.dark-mode body,html[data-theme="dark
             <td>₹${money(row.igst_amount)}</td>
             <td>₹${money(row.round_off)}</td>
             <td><strong>₹${money(row.grand_total)}</strong></td>
+            <td class="amount-positive">₹${money(row.advance_booking_collected||row.advance_booking_amount||row.advance_collected_amount||0)}</td>
             <td class="amount-positive">₹${money(row.paid_amount)}</td>
             <td class="amount-negative">₹${money(row.balance_amount)}</td>
             <td><span class="status-badge ${statusClass(row.payment_status)}">${escapeHtml(row.payment_status||'Unpaid')}</span></td>

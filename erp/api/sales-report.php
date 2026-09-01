@@ -49,6 +49,14 @@ function tableExistsReport(mysqli $conn, $table)
     return $r && $r->num_rows > 0;
 }
 
+function columnExistsReport(mysqli $conn, $table, $column)
+{
+    $safeTable = $conn->real_escape_string((string)$table);
+    $safeColumn = $conn->real_escape_string((string)$column);
+    $r = $conn->query("SHOW COLUMNS FROM `{$safeTable}` LIKE '{$safeColumn}'");
+    return $r && $r->num_rows > 0;
+}
+
 function bindDynamicReport(mysqli_stmt $stmt, $types, array &$params)
 {
     if ($types === '') {
@@ -245,6 +253,25 @@ if (tableExistsReport($conn, 'sale_payments') && tableExistsReport($conn, 'payme
     ),'') AS method_name";
 }
 
+/*
+ * Advance Booking Collected / Applied amount for each sale.
+ * The source of truth is advance_booking_usage.used_amount because one sale can
+ * use one or more advance bookings. Fall back to sales.advance_booking_amount
+ * only for older installations that stored the applied value directly in sales.
+ */
+$advanceBookingSelect = "0 AS advance_booking_collected";
+if (tableExistsReport($conn, 'advance_booking_usage')) {
+    $advanceBookingSelect = "COALESCE((
+        SELECT SUM(abu.used_amount)
+        FROM advance_booking_usage abu
+        WHERE abu.sale_id=s.id
+          AND abu.business_id=s.business_id
+          AND abu.branch_id=s.branch_id
+    ),0) AS advance_booking_collected";
+} elseif (columnExistsReport($conn, 'sales', 'advance_booking_amount')) {
+    $advanceBookingSelect = "COALESCE(s.advance_booking_amount,0) AS advance_booking_collected";
+}
+
 $listSql = "SELECT
         s.id,
         s.invoice_no AS bill_no,
@@ -267,6 +294,7 @@ $listSql = "SELECT
         s.payment_status,
         s.workflow_status,
         s.cancelled_at,
+        {$advanceBookingSelect},
         {$methodSelect}
     FROM sales s
     {$where}
@@ -315,6 +343,13 @@ $stmt->close();
 if (!$summary) {
     $summary = array();
 }
+
+$advanceBookingCollectedTotal = 0.0;
+foreach ($rows as $reportRow) {
+    $advanceBookingCollectedTotal += (float)($reportRow['advance_booking_collected'] ?? 0);
+}
+$summary['advance_booking_collected'] = round($advanceBookingCollectedTotal, 2);
+$summary['advance_booking_amount'] = round($advanceBookingCollectedTotal, 2);
 
 out(true, 'Sales report loaded.', array(
     'rows' => $rows,
