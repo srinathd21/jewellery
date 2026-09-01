@@ -215,6 +215,30 @@ try{
             WHERE sep.sale_id=? AND sep.business_id=?
             ORDER BY sep.id",'ii',[$saleId,$businessId]);
     }
+
+    /* Advance booking values actually applied to this invoice. */
+    $advanceBookingUsage=[];
+    if(tableExists($conn,'advance_booking_usage') && tableExists($conn,'advance_bookings')){
+        $advanceBookingUsage=allRows($conn,"SELECT abu.id,abu.advance_booking_id,abu.used_amount,abu.used_grams,
+                   abu.used_rate_per_gram,abu.usage_date,abu.invoice_no,
+                   ab.booking_no,ab.booking_date,ab.product_name,ab.purity,
+                   ab.advance_amount,ab.booked_grams,ab.status,
+                   m.metal_name
+            FROM advance_booking_usage abu
+            INNER JOIN advance_bookings ab
+                ON ab.id=abu.advance_booking_id
+               AND ab.business_id=abu.business_id
+               AND ab.branch_id=abu.branch_id
+            LEFT JOIN metals m
+                ON m.id=ab.metal_id
+               AND m.business_id=ab.business_id
+            WHERE abu.sale_id=?
+              AND abu.business_id=?
+              AND abu.branch_id=?
+              AND COALESCE(abu.used_amount,0)>0
+            ORDER BY abu.usage_date,abu.id",'iii',[$saleId,$businessId,(int)$s['branch_id']]);
+    }
+
     $settings=allRows($conn,"SELECT * FROM invoice_settings WHERE business_id=? AND (branch_id=? OR branch_id IS NULL) AND document_type='Invoice' AND is_active=1 ORDER BY (branch_id=?) DESC,is_default DESC,id DESC LIMIT 1",'iii',[$businessId,(int)$s['branch_id'],(int)$s['branch_id']]);
     $set=$settings[0]??[];
 }catch(Throwable $e){ die('Unable to build invoice: '.htmlspecialchars($e->getMessage())); }
@@ -452,6 +476,32 @@ if($exchangePayouts){
 }
 if($claims){$pdf->need(14+count($claims)*7);$pdf->SetFillColor(...$GS);$pdf->SetTextColor(...$P);$pdf->SetFont('Arial','B',8.5);$pdf->Cell($W,7,txt('GOLD GRAM CLAIMS'),1,1,'L',true);$pdf->SetTextColor(36);$pdf->SetFont('Arial','',8);foreach($claims as $c){$line=($c['group_name']?:'Chit').' / Ticket '.($c['ticket_no']?:'-').' | '.number_format((float)$c['claim_grams'],6).' g x Rs. '.number_format((float)$c['rate_per_gram'],2).' = Rs. '.number_format((float)$c['claim_amount'],2);$pdf->MultiCell($W,6,txt($line),1,'L');}$pdf->Ln(2);}
 
+/* Show Advance Booking details only when an advance amount was actually applied. */
+if($advanceBookingUsage){
+    $pdf->need(18+count($advanceBookingUsage)*12);
+    $pdf->SetFillColor(...$GS);$pdf->SetTextColor(...$P);$pdf->SetFont('Arial','B',8.5);
+    $pdf->Cell($W,7,txt('ADVANCE BOOKING APPLIED'),1,1,'L',true);
+    $pdf->SetTextColor(36);$pdf->SetFont('Arial','',7.2);
+    foreach($advanceBookingUsage as $abu){
+        $bookingNo=trim((string)($abu['booking_no']??''));
+        $productName=trim((string)($abu['product_name']??''));
+        $metal=trim((string)($abu['metal_name']??''));
+        $purity=trim((string)($abu['purity']??''));
+        $usedAmount=(float)($abu['used_amount']??0);
+        $usedGrams=(float)($abu['used_grams']??0);
+        $usedRate=(float)($abu['used_rate_per_gram']??0);
+        $usageDate=trim((string)($abu['usage_date']??''));
+        $dateText=$usageDate!=='' ? date('d-m-Y',strtotime($usageDate)) : '-';
+        $metalPurity=trim($metal.($purity!=='' ? ' '.$purity : ''));
+        $line1='Booking: '.($bookingNo!==''?$bookingNo:'-').' | Product: '.($productName!==''?$productName:'-');
+        if($metalPurity!=='') $line1.=' | '.$metalPurity;
+        $line2='Applied: Rs. '.number_format($usedAmount,2).' | Grams: '.number_format($usedGrams,6).' g | Locked Rate: Rs. '.number_format($usedRate,2).'/g | Used On: '.$dateText;
+        $pdf->MultiCell($W,5.2,txt($line1),1,'L');
+        $pdf->MultiCell($W,5.2,txt($line2),1,'L');
+    }
+    $pdf->Ln(2);
+}
+
 $notesW=112;
 $terms=trim((string)($set['terms_conditions']??''));
 if($terms===''){
@@ -478,6 +528,10 @@ $exchangePayoutTotal=0.0;
 foreach($exchangePayouts as $payoutRow){
     $exchangePayoutTotal+=(float)($payoutRow['amount']??0);
 }
+$advanceBookingAppliedTotal=0.0;
+foreach($advanceBookingUsage as $advanceRow){
+    $advanceBookingAppliedTotal+=(float)($advanceRow['used_amount']??0);
+}
 $totals=[
     ['Taxable Amount',$summaryTaxableBeforeDiscount],
     ['CGST',(float)($s['cgst_amount']??0)],
@@ -485,11 +539,14 @@ $totals=[
     ['IGST',(float)($s['igst_amount']??0)],
     ['Discount',-(float)($s['discount_amount']??0)],
     ['Exchange',-(float)($s['exchange_amount']??0)],
-    ['Gold Claim',-(float)($s['chit_claim_amount']??0)],
-    ['Round Off',(float)($s['round_off']??0)],
-    ['Grand Total',(float)($s['grand_total']??$s['net_payable_amount']??0)],
-    ['Paid Amount',(float)($s['paid_amount']??0)]
+    ['Gold Claim',-(float)($s['chit_claim_amount']??0)]
 ];
+if($advanceBookingAppliedTotal>0.005){
+    $totals[]=['Advance Booking',-$advanceBookingAppliedTotal];
+}
+$totals[]=['Round Off',(float)($s['round_off']??0)];
+$totals[]=['Grand Total',(float)($s['grand_total']??$s['net_payable_amount']??0)];
+$totals[]=['Paid Amount',(float)($s['paid_amount']??0)];
 if($exchangePayoutTotal>0.005){
     $totals[]=['Paid to Customer',$exchangePayoutTotal];
 }

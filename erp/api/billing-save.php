@@ -771,7 +771,140 @@ function billingSaveCustomerReceipt(mysqli $c, int $businessId, int $branchId, i
     }
 }
 
+function billingRestoreAdvanceBookingUsageForSale(mysqli $c, int $businessId, int $branchId, int $saleId): void
+{
+    if ($saleId <= 0 || !tableExists($c, 'advance_booking_usage') || !tableExists($c, 'advance_bookings')) return;
+    $stmt = prepareOrFail($c, 'SELECT advance_booking_id,COALESCE(SUM(used_amount),0) used_amount,COALESCE(SUM(used_grams),0) used_grams FROM advance_booking_usage WHERE business_id=? AND branch_id=? AND sale_id=? GROUP BY advance_booking_id FOR UPDATE', 'Unable to load previous advance booking usage');
+    $stmt->bind_param('iii', $businessId, $branchId, $saleId);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    $rows = [];
+    while ($row = $result->fetch_assoc()) $rows[] = $row;
+    $stmt->close();
+    foreach ($rows as $usage) {
+        $bookingId = (int)$usage['advance_booking_id'];
+        $usedAmount = round((float)$usage['used_amount'], 2);
+        $usedGrams = round((float)$usage['used_grams'], 6);
+        $q = prepareOrFail($c, 'SELECT used_amount,used_grams,balance_amount,balance_grams FROM advance_bookings WHERE id=? AND business_id=? AND branch_id=? LIMIT 1 FOR UPDATE', 'Unable to restore advance booking');
+        $q->bind_param('iii', $bookingId, $businessId, $branchId);
+        $q->execute();
+        $booking = $q->get_result()->fetch_assoc();
+        $q->close();
+        if (!$booking) continue;
+        $newUsedAmount = max(0, round((float)$booking['used_amount'] - $usedAmount, 2));
+        $newUsedGrams = max(0, round((float)$booking['used_grams'] - $usedGrams, 6));
+        $newBalanceAmount = max(0, round((float)$booking['balance_amount'] + $usedAmount, 2));
+        $newBalanceGrams = max(0, round((float)$booking['balance_grams'] + $usedGrams, 6));
+        $status = ($newUsedAmount > 0.005 || $newUsedGrams > 0.0000005) ? 'Partially Used' : 'Active';
+        $u = prepareOrFail($c, 'UPDATE advance_bookings SET used_amount=?,used_grams=?,balance_amount=?,balance_grams=?,status=?,updated_at=NOW() WHERE id=? AND business_id=? AND branch_id=?', 'Unable to restore advance booking balance');
+        $u->bind_param('ddddsiii', $newUsedAmount, $newUsedGrams, $newBalanceAmount, $newBalanceGrams, $status, $bookingId, $businessId, $branchId);
+        if (!$u->execute()) throw new RuntimeException('Unable to restore advance booking balance: ' . $u->error);
+        $u->close();
+    }
+    $del = prepareOrFail($c, 'DELETE FROM advance_booking_usage WHERE business_id=? AND branch_id=? AND sale_id=?', 'Unable to reverse previous advance booking usage');
+    $del->bind_param('iii', $businessId, $branchId, $saleId);
+    if (!$del->execute()) throw new RuntimeException('Unable to reverse previous advance booking usage: ' . $del->error);
+    $del->close();
+}
+
+function billingPrepareAdvanceBookingAllocations(mysqli $c, int $businessId, int $branchId, int $customerId, array $bookingIds, float $availableAmount): array
+{
+    $bookingIds = array_values(array_unique(array_filter(array_map('intval', $bookingIds), function ($id) { return $id > 0; })));
+    if (!$bookingIds || $availableAmount <= 0.005) return ['total' => 0.0, 'allocations' => []];
+    if (!tableExists($c, 'advance_bookings') || !tableExists($c, 'advance_booking_usage')) throw new RuntimeException('Advance booking tables are not available.');
+    $remaining = round(max(0, $availableAmount), 2);
+    $allocations = [];
+    $total = 0.0;
+    $stmt = prepareOrFail($c, "SELECT id,booking_no,product_name,booking_rate_per_gram,balance_amount,balance_grams,status FROM advance_bookings WHERE id=? AND business_id=? AND branch_id=? AND customer_id=? LIMIT 1 FOR UPDATE", 'Unable to validate advance booking');
+    foreach ($bookingIds as $bookingId) {
+        if ($remaining <= 0.005) break;
+        $stmt->bind_param('iiii', $bookingId, $businessId, $branchId, $customerId);
+        $stmt->execute();
+        $booking = $stmt->get_result()->fetch_assoc();
+        if (!$booking) { $stmt->close(); throw new RuntimeException('A selected advance booking is invalid for this customer.'); }
+        if (!in_array((string)$booking['status'], ['Active', 'Partially Used'], true)) { $stmt->close(); throw new RuntimeException('Advance booking ' . $booking['booking_no'] . ' is no longer available.'); }
+        $balanceAmount = max(0, round((float)$booking['balance_amount'], 2));
+        $balanceGrams = max(0, round((float)$booking['balance_grams'], 6));
+        $rate = max(0, (float)$booking['booking_rate_per_gram']);
+        if ($balanceAmount <= 0.005 || $balanceGrams <= 0.0000005 || $rate <= 0) continue;
+        $useAmount = min($balanceAmount, $remaining);
+        $useGrams = min($balanceGrams, round($useAmount / $rate, 6));
+        $useAmount = min($useAmount, round($useGrams * $rate, 2));
+        if ($useAmount <= 0.005 || $useGrams <= 0.0000005) continue;
+        $allocations[] = ['id'=>$bookingId,'booking_no'=>(string)$booking['booking_no'],'rate'=>$rate,'amount'=>$useAmount,'grams'=>$useGrams];
+        $total += $useAmount;
+        $remaining = max(0, round($remaining - $useAmount, 2));
+    }
+    $stmt->close();
+    return ['total' => round($total, 2), 'allocations' => $allocations];
+}
+
+function billingSaveAdvanceBookingUsage(mysqli $c, int $businessId, int $branchId, int $saleId, string $invoiceNo, array $allocations, int $userId, string $usageDate): void
+{
+    if (!$allocations) return;
+    $insert = prepareOrFail($c, 'INSERT INTO advance_booking_usage(business_id,branch_id,advance_booking_id,sale_id,invoice_no,used_amount,used_grams,used_rate_per_gram,usage_date,created_by) VALUES(?,?,?,?,?,?,?,?,?,?)', 'Unable to save advance booking usage');
+    foreach ($allocations as $allocation) {
+        $bookingId = (int)$allocation['id'];
+        $amount = round((float)$allocation['amount'], 2);
+        $grams = round((float)$allocation['grams'], 6);
+        $rate = round((float)$allocation['rate'], 2);
+        $q = prepareOrFail($c, 'SELECT used_amount,used_grams,balance_amount,balance_grams FROM advance_bookings WHERE id=? AND business_id=? AND branch_id=? LIMIT 1 FOR UPDATE', 'Unable to update advance booking');
+        $q->bind_param('iii', $bookingId, $businessId, $branchId);
+        $q->execute();
+        $booking = $q->get_result()->fetch_assoc();
+        $q->close();
+        if (!$booking) throw new RuntimeException('Advance booking was not found while applying it.');
+        $newUsedAmount = round((float)$booking['used_amount'] + $amount, 2);
+        $newUsedGrams = round((float)$booking['used_grams'] + $grams, 6);
+        $newBalanceAmount = max(0, round((float)$booking['balance_amount'] - $amount, 2));
+        $newBalanceGrams = max(0, round((float)$booking['balance_grams'] - $grams, 6));
+        $status = ($newBalanceAmount <= 0.005 || $newBalanceGrams <= 0.0000005) ? 'Completed' : 'Partially Used';
+        $u = prepareOrFail($c, 'UPDATE advance_bookings SET used_amount=?,used_grams=?,balance_amount=?,balance_grams=?,status=?,updated_at=NOW() WHERE id=? AND business_id=? AND branch_id=?', 'Unable to apply advance booking');
+        $u->bind_param('ddddsiii', $newUsedAmount, $newUsedGrams, $newBalanceAmount, $newBalanceGrams, $status, $bookingId, $businessId, $branchId);
+        if (!$u->execute()) throw new RuntimeException('Unable to apply advance booking: ' . $u->error);
+        $u->close();
+        $insert->bind_param('iiiisdddsi', $businessId, $branchId, $bookingId, $saleId, $invoiceNo, $amount, $grams, $rate, $usageDate, $userId);
+        if (!$insert->execute()) throw new RuntimeException('Unable to save advance booking usage: ' . $insert->error);
+    }
+    $insert->close();
+}
+
 $action = (string) ($_POST['action'] ?? 'save');
+if ($action === 'list_customer_advance_bookings') {
+    $customerId = max(0, (int)($_POST['customer_id'] ?? 0));
+    $editSaleIdForList = max(0, (int)($_POST['edit_sale_id'] ?? 0));
+    if ($customerId <= 0) respond(true, 'No customer selected.', ['bookings' => []]);
+    if (!tableExists($conn, 'advance_bookings')) respond(true, 'Advance booking table is not available.', ['bookings' => []]);
+    $usageJoin = '';
+    $usageSelectAmount = '0';
+    $usageSelectGrams = '0';
+    $types = 'iiii';
+    $params = [$editSaleIdForList, $editSaleIdForList, $businessId, $branchId];
+    if (tableExists($conn, 'advance_booking_usage')) {
+        $usageJoin = " LEFT JOIN (SELECT advance_booking_id,SUM(used_amount) edit_used_amount,SUM(used_grams) edit_used_grams FROM advance_booking_usage WHERE business_id=? AND branch_id=? AND sale_id=? GROUP BY advance_booking_id) abu ON abu.advance_booking_id=ab.id ";
+        $usageSelectAmount = 'COALESCE(abu.edit_used_amount,0)';
+        $usageSelectGrams = 'COALESCE(abu.edit_used_grams,0)';
+        $types = 'iiiiii';
+        $params = [$businessId, $branchId, $editSaleIdForList, $editSaleIdForList, $businessId, $branchId];
+    }
+    $sql = "SELECT ab.id,ab.booking_no,ab.booking_date,ab.product_name,ab.purity,ab.booking_rate_per_gram,ab.status,m.metal_name, (ab.balance_amount+{$usageSelectAmount}) balance_amount, (ab.balance_grams+{$usageSelectGrams}) balance_grams FROM advance_bookings ab LEFT JOIN metals m ON m.id=ab.metal_id AND m.business_id=ab.business_id {$usageJoin} WHERE (?=0 OR ab.id IN (SELECT advance_booking_id FROM advance_booking_usage WHERE sale_id=? AND business_id=ab.business_id AND branch_id=ab.branch_id)) AND ab.business_id=? AND ab.branch_id=? AND ab.customer_id=?";
+    // Rebuild the query with simple bind order to remain PHP 7.2/MariaDB friendly.
+    if (tableExists($conn, 'advance_booking_usage')) {
+        $sql = "SELECT ab.id,ab.booking_no,ab.booking_date,ab.product_name,ab.purity,ab.booking_rate_per_gram,ab.status,m.metal_name,(ab.balance_amount+COALESCE(abu.edit_used_amount,0)) balance_amount,(ab.balance_grams+COALESCE(abu.edit_used_grams,0)) balance_grams FROM advance_bookings ab LEFT JOIN metals m ON m.id=ab.metal_id AND m.business_id=ab.business_id LEFT JOIN (SELECT advance_booking_id,SUM(used_amount) edit_used_amount,SUM(used_grams) edit_used_grams FROM advance_booking_usage WHERE business_id=? AND branch_id=? AND sale_id=? GROUP BY advance_booking_id) abu ON abu.advance_booking_id=ab.id WHERE ab.business_id=? AND ab.branch_id=? AND ab.customer_id=? AND ((ab.status IN('Active','Partially Used') AND ab.balance_amount>0.005) OR abu.advance_booking_id IS NOT NULL) ORDER BY ab.booking_date DESC,ab.id DESC";
+        $stmt = prepareOrFail($conn, $sql, 'Unable to load customer advance bookings');
+        $stmt->bind_param('iiiiii', $businessId, $branchId, $editSaleIdForList, $businessId, $branchId, $customerId);
+    } else {
+        $sql = "SELECT ab.id,ab.booking_no,ab.booking_date,ab.product_name,ab.purity,ab.booking_rate_per_gram,ab.status,m.metal_name,ab.balance_amount,ab.balance_grams FROM advance_bookings ab LEFT JOIN metals m ON m.id=ab.metal_id AND m.business_id=ab.business_id WHERE ab.business_id=? AND ab.branch_id=? AND ab.customer_id=? AND ab.status IN('Active','Partially Used') AND ab.balance_amount>0.005 ORDER BY ab.booking_date DESC,ab.id DESC";
+        $stmt = prepareOrFail($conn, $sql, 'Unable to load customer advance bookings');
+        $stmt->bind_param('iii', $businessId, $branchId, $customerId);
+    }
+    $stmt->execute();
+    $rows = [];
+    $r = $stmt->get_result();
+    while ($x = $r->fetch_assoc()) $rows[] = $x;
+    $stmt->close();
+    respond(true, count($rows) ? 'Advance bookings loaded.' : 'No available advance bookings.', ['bookings' => $rows]);
+}
 if ($action === 'preview_number') {
     $documentType = (string) ($_POST['document_type'] ?? 'Invoice');
     if (!in_array($documentType, ['Invoice', 'Estimate', 'Non GST Invoice'], true)) {
@@ -910,6 +1043,9 @@ if ($action === 'update') {
     $claims = json_decode((string) ($_POST['chit_claims_json'] ?? '[]'), true);
     if (!is_array($claims))
         $claims = [];
+    $advanceBookingIds = json_decode((string) ($_POST['advance_booking_ids_json'] ?? '[]'), true);
+    if (!is_array($advanceBookingIds))
+        $advanceBookingIds = [];
     $exchangeItemsInput = json_decode((string) ($_POST['exchange_items_json'] ?? '[]'), true);
     if (!is_array($exchangeItemsInput))
         $exchangeItemsInput = [];
@@ -941,6 +1077,7 @@ if ($action === 'update') {
             throw new RuntimeException('Invoice was not found.');
         if ((string) $oldSale['workflow_status'] === 'Cancelled')
             throw new RuntimeException('Cancelled invoices cannot be edited.');
+        billingRestoreAdvanceBookingUsageForSale($conn, $businessId, $branchId, $saleId);
         $editNonGst = strtolower(trim((string) ($oldSale['tax_type'] ?? 'GST'))) === 'non-gst';
         $taxType = $editNonGst ? 'Non-GST' : 'GST';
         if (strtolower($submittedBillType) === 'estimate')
@@ -1219,7 +1356,11 @@ if ($action === 'update') {
         }
         if ($claimTotal > $afterExchange + 0.001)
             throw new RuntimeException('Chit claim cannot exceed the bill total after exchange.');
-        $netPayable = max(0, $afterExchange - $claimTotal);
+        $afterClaim = max(0, $afterExchange - $claimTotal);
+        $advanceBookingPrepared = billingPrepareAdvanceBookingAllocations($conn, $businessId, $branchId, $customerId, $advanceBookingIds, $afterClaim);
+        $advanceBookingTotal = (float)$advanceBookingPrepared['total'];
+        $advanceBookingAllocations = $advanceBookingPrepared['allocations'];
+        $netPayable = max(0, $afterClaim - $advanceBookingTotal);
         $payResult = billingValidatePaymentRows($conn, $businessId, $payMethods, $payAmounts, $payRefs, $netPayable);
         $payments = $payResult['payments'];
         $paid = (float) $payResult['received_amount'];
@@ -1285,6 +1426,8 @@ if ($action === 'update') {
             }
             $ci->close();
         }
+        billingSaveAdvanceBookingUsage($conn, $businessId, $branchId, $saleId, (string)$oldSale['invoice_no'], $advanceBookingAllocations, $userId, $movementDate);
+
         $u = prepareOrFail($conn, 'UPDATE sales SET invoice_date=?,invoice_time=?,customer_id=?,customer_name=?,customer_mobile=?,bill_type=?,tax_type=?,subtotal=?,discount_amount=?,taxable_amount=?,cgst_amount=?,sgst_amount=?,igst_amount=?,round_off=?,grand_total=?,exchange_amount=?,chit_claim_amount=?,net_payable_amount=?,paid_amount=?,balance_amount=?,payment_status=?,notes=? WHERE id=? AND business_id=? AND branch_id=?', 'Unable to update invoice');
         $params = [$invoiceDate, $invoiceTime, $customerId, (string) $customer['customer_name'], (string) $customer['mobile'], $billType, $taxType, $subtotal, $discountTotal, $taxable, $cgst, $sgst, $igst, $round, $grossGrand, $exchangeTotal, $claimTotal, $netPayable, $paid, $balance, $paymentStatus, $notes, $saleId, $businessId, $branchId];
         $types = 'ssissss' . str_repeat('d', 13) . 'ssiii';
@@ -1292,7 +1435,7 @@ if ($action === 'update') {
         if (!$u->execute())
             throw new RuntimeException($u->error);
         $u->close();
-        billingAuditLog($conn, $businessId, $branchId, $userId, 'billing.sales', 'Update', 'sales', $saleId, 'Fully reversed and reposted bill ' . $oldSale['invoice_no'], ['invoice_no' => $oldSale['invoice_no'], 'customer_id' => (int) $oldSale['customer_id'], 'bill_type' => $oldSale['bill_type'], 'tax_type' => $oldSale['tax_type'], 'grand_total' => (float) $oldSale['grand_total'], 'paid_amount' => (float) $oldSale['paid_amount'], 'balance_amount' => (float) $oldSale['balance_amount']], ['invoice_no' => $oldSale['invoice_no'], 'customer_id' => $customerId, 'bill_type' => $billType, 'tax_type' => $taxType, 'grand_total' => round($grossGrand, 2), 'exchange_amount' => round($exchangeTotal, 2), 'exchange_payout_amount' => round($exchangePayoutAmount, 2), 'chit_claim_amount' => round($claimTotal, 2), 'net_payable_amount' => round($netPayable, 2), 'received_amount' => round($paid, 2), 'credit_amount' => round($creditAmount, 2), 'balance_amount' => round($balance, 2), 'payment_status' => $paymentStatus]);
+        billingAuditLog($conn, $businessId, $branchId, $userId, 'billing.sales', 'Update', 'sales', $saleId, 'Fully reversed and reposted bill ' . $oldSale['invoice_no'], ['invoice_no' => $oldSale['invoice_no'], 'customer_id' => (int) $oldSale['customer_id'], 'bill_type' => $oldSale['bill_type'], 'tax_type' => $oldSale['tax_type'], 'grand_total' => (float) $oldSale['grand_total'], 'paid_amount' => (float) $oldSale['paid_amount'], 'balance_amount' => (float) $oldSale['balance_amount']], ['invoice_no' => $oldSale['invoice_no'], 'customer_id' => $customerId, 'bill_type' => $billType, 'tax_type' => $taxType, 'grand_total' => round($grossGrand, 2), 'exchange_amount' => round($exchangeTotal, 2), 'exchange_payout_amount' => round($exchangePayoutAmount, 2), 'chit_claim_amount' => round($claimTotal, 2), 'advance_booking_amount' => round($advanceBookingTotal, 2), 'net_payable_amount' => round($netPayable, 2), 'received_amount' => round($paid, 2), 'credit_amount' => round($creditAmount, 2), 'balance_amount' => round($balance, 2), 'payment_status' => $paymentStatus]);
         $conn->commit();
         respond(true, 'Bill ' . $oldSale['invoice_no'] . ' updated successfully with full reverse calculation.', ['document_type' => $editNonGst ? 'Non GST Invoice' : 'Invoice', 'sale_id' => $saleId, 'invoice_no' => $oldSale['invoice_no'], 'net_payable_amount' => $netPayable, 'exchange_payout_amount' => $exchangePayoutAmount, 'received_amount' => $paid, 'credit_amount' => round($creditAmount, 2), 'balance_amount' => $balance, 'payment_status' => $paymentStatus]);
     } catch (Throwable $e) {
@@ -1345,6 +1488,9 @@ $overall = max(0, (float) ($_POST['overall_discount'] ?? 0));
 $round = (float) ($_POST['round_off'] ?? 0);
 $notes = trim((string) ($_POST['notes'] ?? ''));
 $claims = json_decode((string) ($_POST['chit_claims_json'] ?? '[]'), true);
+$advanceBookingIds = json_decode((string) ($_POST['advance_booking_ids_json'] ?? '[]'), true);
+if (!is_array($advanceBookingIds))
+    $advanceBookingIds = [];
 $exchangeItemsInput = json_decode((string) ($_POST['exchange_items_json'] ?? '[]'), true);
 if (!is_array($exchangeItemsInput))
     $exchangeItemsInput = [];
@@ -1590,7 +1736,13 @@ try {
     }
     if ($claimTotal > $grand + 0.001)
         throw new RuntimeException('Chit claim cannot exceed the bill total.');
-    $netPayable = max(0, $grand - $claimTotal);
+    $afterClaim = max(0, $grand - $claimTotal);
+    if ($documentType === 'Estimate' && $advanceBookingIds)
+        throw new RuntimeException('Advance booking can be used only on a final invoice, not an Estimate.');
+    $advanceBookingPrepared = billingPrepareAdvanceBookingAllocations($conn, $businessId, $branchId, $customerId, $advanceBookingIds, $afterClaim);
+    $advanceBookingTotal = (float)$advanceBookingPrepared['total'];
+    $advanceBookingAllocations = $advanceBookingPrepared['allocations'];
+    $netPayable = max(0, $afterClaim - $advanceBookingTotal);
     $payments = [];
     $receivedAmount = 0.0;
     $creditAmount = 0.0;
@@ -1840,6 +1992,8 @@ try {
         throw new RuntimeException('Unable to create bill: ' . $sale->error);
     $saleId = (int) $sale->insert_id;
     $sale->close();
+    $advanceUsageDate = $invoiceDate . ' ' . substr($invoiceTime, 0, 5) . ':00';
+    billingSaveAdvanceBookingUsage($conn, $businessId, $branchId, $saleId, $invoiceNo, $advanceBookingAllocations, $userId, $advanceUsageDate);
     $itemStmt = prepareOrFail($conn, 'INSERT INTO sale_items(business_id,branch_id,sale_id,product_id,item_name,hsn_code,quantity,gross_weight,stone_weight,net_weight,metal_rate,wastage_percent,wastage_amount,making_charge,stone_amount,other_charge,discount_amount,tax_percent,tax_amount,line_total,cost_amount,sort_order) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', 'Unable to prepare sale item insert');
     $stockUp = prepareOrFail($conn, 'UPDATE product_stock SET quantity=quantity-?,gross_weight=GREATEST(0,gross_weight-?),net_weight=GREATEST(0,net_weight-?) WHERE business_id=? AND branch_id=? AND product_id=? AND quantity+0.0001>=?', 'Unable to prepare product stock update');
     $move = prepareOrFail($conn, "INSERT INTO stock_movements(business_id,branch_id,product_id,movement_date,movement_type,reference_table,reference_id,quantity_in,quantity_out,weight_in,weight_out,rate,value_amount,remarks,created_by) VALUES(?,?,?,?,'Sale','sales',?,0,?,0,?,?,?,?,?)", 'Unable to prepare stock movement insert');
@@ -2012,6 +2166,7 @@ try {
             'exchange_amount' => round($exchangeTotal, 2),
             'exchange_payout_amount' => round($exchangePayoutAmount, 2),
             'chit_claim_amount' => round($claimTotal, 2),
+            'advance_booking_amount' => round($advanceBookingTotal, 2),
             'net_payable_amount' => round($netPayable, 2),
             'received_amount' => round($paid, 2),
             'credit_amount' => round($creditAmount, 2),

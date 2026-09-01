@@ -547,6 +547,18 @@ if ($editSaleId > 0) {
         }
     }
 
+    $editAdvanceBookingIds = [];
+    if (billingTableExists($conn, 'advance_booking_usage')) {
+        $s = $conn->prepare("SELECT DISTINCT advance_booking_id FROM advance_booking_usage WHERE sale_id=? AND business_id=? AND branch_id=? ORDER BY id");
+        if ($s) {
+            $s->bind_param('iii', $editSaleId, $businessId, $branchId);
+            $s->execute();
+            $r = $s->get_result();
+            while ($x = $r->fetch_assoc()) $editAdvanceBookingIds[] = (int)$x['advance_booking_id'];
+            $s->close();
+        }
+    }
+
     $editClaims = [];
     if (billingColumnExists($conn, 'sales_chit_claims', 'sale_id')) {
         $s = $conn->prepare("SELECT * FROM sales_chit_claims WHERE sale_id=? AND business_id=? AND status='Posted' ORDER BY id");
@@ -566,6 +578,7 @@ if ($editSaleId > 0) {
         'payments' => $editPayments,
         'exchange_items' => $editExchange,
         'exchange_payout' => $editExchangePayout,
+        'advance_booking_ids' => $editAdvanceBookingIds,
         'claims' => $editClaims
     ];
 }
@@ -1055,6 +1068,71 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
             min-width: 180px;
         }
 
+        .advance-booking-panel {
+            border-top: 1px solid var(--line);
+            padding: 10px;
+            background: color-mix(in srgb, var(--primary) 3%, var(--card-bg));
+        }
+
+        .advance-booking-panel.d-none {
+            display: none !important;
+        }
+
+        .advance-booking-panel-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            margin-bottom: 7px;
+        }
+
+        .advance-booking-list {
+            display: grid;
+            gap: 6px;
+        }
+
+        .advance-booking-row {
+            display: grid;
+            grid-template-columns: 1.05fr 1.35fr .75fr .75fr .75fr auto;
+            gap: 8px;
+            align-items: center;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            padding: 8px;
+            background: var(--card-bg);
+            font-size: 9px;
+        }
+
+        .advance-booking-row .ab-label {
+            color: var(--muted);
+            font-size: 8px;
+            display: block;
+            margin-bottom: 1px;
+        }
+
+        .advance-booking-row .ab-value {
+            font-weight: 700;
+            color: var(--text);
+        }
+
+        .advance-booking-row.is-used {
+            border-color: color-mix(in srgb, #168449 45%, var(--line));
+            background: color-mix(in srgb, #168449 5%, var(--card-bg));
+        }
+
+        .advance-booking-row .use-advance-booking {
+            min-width: 72px;
+        }
+
+        @media(max-width: 900px) {
+            .advance-booking-row {
+                grid-template-columns: 1fr 1fr;
+            }
+            .advance-booking-row .use-advance-booking {
+                width: 100%;
+            }
+        }
+
         .select2-container {
             width: 100% !important
         }
@@ -1340,7 +1418,8 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                 name="document_mode" id="documentMode"
                 value="<?= $pageNonGstModeActive ? 'Non GST Invoice' : 'Invoice' ?>"><input type="hidden"
                 name="chit_claims_json" id="chitClaimsJson" value="[]"><input type="hidden" name="exchange_items_json"
-                id="exchangeItemsJson" value="[]">
+                id="exchangeItemsJson" value="[]"><input type="hidden" name="advance_booking_ids_json"
+                id="advanceBookingIdsJson" value="[]">
             <div class="bill-card">
                 <div class="bill-head top-bill-head">
                     <div class="bill-title"><?= $editSaleId > 0 ? 'Edit Bill' : 'Create Bill' ?></div>
@@ -1457,6 +1536,16 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                                 <tbody id="itemsBody"></tbody>
                             </table>
                         </div>
+                        <div id="advanceBookingPanel" class="advance-booking-panel d-none">
+                            <div class="advance-booking-panel-head">
+                                <div>
+                                    <div class="section-title">Customer Advance Booking</div>
+                                    <div class="small text-muted">Available advance booking balances for the selected customer.</div>
+                                </div>
+                                <div class="small"><strong>Applied: ₹<span id="advanceBookingAppliedTotal">0.00</span></strong></div>
+                            </div>
+                            <div id="advanceBookingList" class="advance-booking-list"></div>
+                        </div>
                     </div>
                     <div class="bill-card">
                         <div class="bill-head">
@@ -1552,6 +1641,8 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                             <div class="summary-row d-none" id="sumExchangePayoutRow"><span>Balance Payable to Customer</span><strong class="text-danger">₹<span id="sumExchangePayout">0.00</span></strong></div>
                             <div class="summary-row"><span>Gold Gram Claim</span><strong class="text-success">- ₹<span
                                         id="sumChitClaim">0.00</span></strong></div>
+                            <div class="summary-row"><span>Advance Booking</span><strong class="text-success">- ₹<span
+                                        id="sumAdvanceBooking">0.00</span></strong></div>
                             <div class="summary-row"><span>Grand Total</span><strong class="summary-total">₹<span
                                         id="sumGrand">0.00</span></strong></div>
                             <div class="summary-row"><span>Balance</span><strong>₹<span
@@ -1797,6 +1888,8 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                 let customerChits = [];
                 let appliedClaims = [];
                 let exchangeItems = [];
+                let customerAdvanceBookings = [];
+                let appliedAdvanceBookingIds = [];
                 let select2Ready = false;
                 let claimModal = null;
                 let gstEnabled = !nonGstModeActive;
@@ -2052,7 +2145,9 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                         rate_per_gram: Number(x.rate_per_gram || 0),
                         claim_amount: Number(x.claim_amount || 0)
                     }));
+                    appliedAdvanceBookingIds = (editData.advance_booking_ids || []).map(Number).filter(id => id > 0);
                     calc();
+                    loadCustomerAdvanceBookings({ preserveApplied: true });
                     loadCustomerChits({ preserveClaims: true });
                     refreshDocumentNumber();
                     return true;
@@ -2089,6 +2184,20 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                 function claimTotal() { return appliedClaims.reduce((sum, x) => sum + Number(x.claim_amount || 0), 0) }
                 function exchangeTotalValue() { return exchangeItems.reduce((sum, x) => sum + Number(x.exchange_value || 0), 0) }
                 function selectedBillProductOptions(selected = '') { return [...items.querySelectorAll('.item-row')].map((row, index) => { const p = products.find(x => String(x.id) === row.querySelector('.product-select').value); return p ? `<option value="${Number(p.id)}" ${String(p.id) === String(selected) ? 'selected' : ''}>${esc(p.product_name)} · ${Number(p.net_weight || 0).toFixed(3)}g</option>` : '' }).join('') }
+                function selectedAdvanceBookingTotal(limit = Number.POSITIVE_INFINITY) {
+                    let remaining = Math.max(0, Number(limit));
+                    let total = 0;
+                    appliedAdvanceBookingIds.forEach(id => {
+                        if (remaining <= 0.005) return;
+                        const booking = customerAdvanceBookings.find(x => Number(x.id) === Number(id));
+                        if (!booking) return;
+                        const available = Math.max(0, Number(booking.balance_amount || 0));
+                        const use = Math.min(available, remaining);
+                        total += use;
+                        remaining -= use;
+                    });
+                    return Math.max(0, total);
+                }
 
                 function calc() {
                     let subtotal = 0;
@@ -2159,7 +2268,10 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                     const exchangePayout = Math.max(0, fullExchangeValue - Math.max(0, beforeAdjustments));
                     const afterExchange = Math.max(0, beforeAdjustments - fullExchangeValue);
                     const appliedClaim = Math.min(claimTotal(), afterExchange);
-                    const grand = Math.max(0, afterExchange - appliedClaim);
+                    const afterClaim = Math.max(0, afterExchange - appliedClaim);
+                    const isEstimateBill = !nonGstModeActive && String(billTypeSelect?.value || '').toLowerCase() === 'estimate';
+                    const appliedAdvanceBooking = isEstimateBill ? 0 : selectedAdvanceBookingTotal(afterClaim);
+                    const grand = Math.max(0, afterClaim - appliedAdvanceBooking);
 
                     const payoutPanel = document.getElementById('exchangePayoutPanel');
                     const payoutAmountInput = document.getElementById('exchangePayoutAmount');
@@ -2192,6 +2304,8 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                     document.getElementById('sumExchange').textContent = money(fullExchangeValue);
                     document.getElementById('sumExchangePayout').textContent = money(exchangePayout);
                     document.getElementById('sumChitClaim').textContent = money(appliedClaim);
+                    document.getElementById('sumAdvanceBooking').textContent = money(appliedAdvanceBooking);
+                    document.getElementById('advanceBookingAppliedTotal').textContent = money(appliedAdvanceBooking);
                     document.getElementById('sumGrand').textContent = money(grand);
                     document.getElementById('sumBalance').textContent = money(Math.max(0, grand - paid));
 
@@ -2200,6 +2314,86 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
                     document.getElementById('sumBalance').textContent = money(Math.max(0, grand - Math.min(received, grand)));
                     document.getElementById('chitClaimsJson').value = JSON.stringify(appliedClaims);
                     document.getElementById('exchangeItemsJson').value = JSON.stringify(exchangeItems);
+                    document.getElementById('advanceBookingIdsJson').value = JSON.stringify(appliedAdvanceBookingIds);
+                    renderAdvanceBookingUseState();
+                }
+
+                function renderAdvanceBookingUseState() {
+                    document.querySelectorAll('#advanceBookingList .advance-booking-row').forEach(row => {
+                        const id = Number(row.dataset.bookingId || 0);
+                        const used = appliedAdvanceBookingIds.includes(id);
+                        row.classList.toggle('is-used', used);
+                        const button = row.querySelector('.use-advance-booking');
+                        if (button) {
+                            button.textContent = used ? 'Remove' : 'Use';
+                            button.classList.toggle('btn-outline-danger', used);
+                            button.classList.toggle('btn-theme', !used);
+                        }
+                    });
+                }
+
+                function renderCustomerAdvanceBookings() {
+                    const panel = document.getElementById('advanceBookingPanel');
+                    const list = document.getElementById('advanceBookingList');
+                    if (!panel || !list) return;
+                    if (!customerAdvanceBookings.length) {
+                        list.innerHTML = '';
+                        panel.classList.add('d-none');
+                        return;
+                    }
+                    panel.classList.remove('d-none');
+                    list.innerHTML = customerAdvanceBookings.map(booking => `
+                        <div class="advance-booking-row" data-booking-id="${Number(booking.id)}">
+                            <div><span class="ab-label">Booking No</span><span class="ab-value">${esc(booking.booking_no || '')}</span></div>
+                            <div><span class="ab-label">Product</span><span class="ab-value">${esc(booking.product_name || 'Manual Requirement')}</span></div>
+                            <div><span class="ab-label">Locked Rate</span><span class="ab-value">₹${money(booking.booking_rate_per_gram)}</span></div>
+                            <div><span class="ab-label">Balance Grams</span><span class="ab-value">${Number(booking.balance_grams || 0).toFixed(6)} g</span></div>
+                            <div><span class="ab-label">Balance Advance</span><span class="ab-value text-success">₹${money(booking.balance_amount)}</span></div>
+                            <button type="button" class="btn-theme use-advance-booking">Use</button>
+                        </div>`).join('');
+                    renderAdvanceBookingUseState();
+                }
+
+                async function loadCustomerAdvanceBookings(options = {}) {
+                    const preserveApplied = !!(options && options.preserveApplied);
+                    if (!preserveApplied) appliedAdvanceBookingIds = [];
+                    customerAdvanceBookings = [];
+                    renderCustomerAdvanceBookings();
+                    calc();
+                    const customerId = Number(customer.value || 0);
+                    if (!customerId) return;
+                    try {
+                        const fd = new FormData();
+                        fd.append('action', 'list_customer_advance_bookings');
+                        fd.append('csrf_token', csrfToken);
+                        fd.append('customer_id', String(customerId));
+                        if (editMode) fd.append('edit_sale_id', String(Number(editData?.sale?.id || 0)));
+                        const res = await fetch('api/billing-save.php', {
+                            method: 'POST', body: fd, credentials: 'same-origin',
+                            headers: { 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json' }
+                        });
+                        const raw = await res.text();
+                        let data;
+                        try { data = JSON.parse(raw); } catch (_) { throw new Error('Advance booking API returned an invalid response.'); }
+                        if (!res.ok || !data.success) throw new Error(data.message || 'Unable to load advance bookings.');
+                        customerAdvanceBookings = (data.bookings || []).map(x => ({
+                            ...x,
+                            id: Number(x.id || 0),
+                            balance_amount: Math.max(0, Number(x.balance_amount || 0)),
+                            balance_grams: Math.max(0, Number(x.balance_grams || 0)),
+                            booking_rate_per_gram: Math.max(0, Number(x.booking_rate_per_gram || 0))
+                        }));
+                        const availableIds = new Set(customerAdvanceBookings.map(x => Number(x.id)));
+                        appliedAdvanceBookingIds = appliedAdvanceBookingIds.filter(id => availableIds.has(Number(id)));
+                        renderCustomerAdvanceBookings();
+                        calc();
+                    } catch (error) {
+                        customerAdvanceBookings = [];
+                        appliedAdvanceBookingIds = [];
+                        renderCustomerAdvanceBookings();
+                        calc();
+                        toast('error', error.message);
+                    }
                 }
 
                 async function loadCustomerChits(options = {}) {
@@ -2334,7 +2528,28 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
 
                 function updateModalClaimTotal() { let grams = 0, total = 0; document.querySelectorAll('#claimTableBody tr[data-member]').forEach(row => { const p = products.find(x => String(x.id) === row.querySelector('.claim-product').value); const g = Number(row.querySelector('.claim-grams').value) || 0; const rate = Number(p?.live_metal_rate || p?.sale_rate || 0); const value = g * rate; row.querySelector('.claim-rate').textContent = '₹' + money(rate); row.querySelector('.claim-value').textContent = '₹' + money(value); grams += g; total += value }); document.getElementById('modalClaimGrams').textContent = grams.toFixed(6); document.getElementById('modalClaimTotal').textContent = money(total) }
 
-                customer.addEventListener('change', loadCustomerChits);
+                customer.addEventListener('change', () => {
+                    loadCustomerAdvanceBookings();
+                    loadCustomerChits();
+                });
+
+                document.getElementById('advanceBookingList').addEventListener('click', event => {
+                    const button = event.target.closest('.use-advance-booking');
+                    if (!button) return;
+                    const row = button.closest('.advance-booking-row');
+                    const id = Number(row?.dataset.bookingId || 0);
+                    if (!(id > 0)) return;
+                    if (!nonGstModeActive && String(billTypeSelect?.value || '').toLowerCase() === 'estimate') {
+                        toast('error', 'Advance booking can be used only on a final invoice, not an Estimate.');
+                        return;
+                    }
+                    if (appliedAdvanceBookingIds.includes(id)) {
+                        appliedAdvanceBookingIds = appliedAdvanceBookingIds.filter(x => Number(x) !== id);
+                    } else {
+                        appliedAdvanceBookingIds.push(id);
+                    }
+                    calc();
+                });
 
                 bindDocumentModeControls();
 
@@ -2500,6 +2715,7 @@ $defaultBillNo = $editData ? (string)$editData['sale']['invoice_no'] : previewNe
 
                 if (billTypeSelect) {
                     billTypeSelect.addEventListener('change', () => {
+                        calc();
                     });
                 }
 

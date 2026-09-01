@@ -78,6 +78,33 @@ try {
             [$saleId, $businessId]
         );
     }
+
+    /* Advance booking amount used against this invoice. */
+    $advanceBookingUsage = [];
+    if (tableExists($conn, 'advance_booking_usage') && tableExists($conn, 'advance_bookings')) {
+        $advanceBookingUsage = qAll(
+            $conn,
+            "SELECT abu.id,abu.advance_booking_id,abu.used_amount,abu.used_grams,
+                    abu.used_rate_per_gram,abu.usage_date,abu.invoice_no,
+                    ab.booking_no,ab.booking_date,ab.product_name,ab.purity,
+                    ab.advance_amount,ab.booked_grams,ab.status,
+                    m.metal_name
+             FROM advance_booking_usage abu
+             INNER JOIN advance_bookings ab
+                ON ab.id=abu.advance_booking_id
+               AND ab.business_id=abu.business_id
+               AND ab.branch_id=abu.branch_id
+             LEFT JOIN metals m
+                ON m.id=ab.metal_id
+               AND m.business_id=ab.business_id
+             WHERE abu.sale_id=?
+               AND abu.business_id=?
+               AND abu.branch_id=?
+             ORDER BY abu.usage_date,abu.id",
+            'iii',
+            [$saleId, $businessId, (int)$sale['branch_id']]
+        );
+    }
 } catch (Throwable $x) {
     die('Unable to load sale: ' . e($x->getMessage()));
 }
@@ -95,6 +122,12 @@ if ($t) {
 function money($v)
 {
     return number_format((float) $v, 2);
+}
+$advanceBookingUsedTotal = 0.0;
+$advanceBookingUsedGrams = 0.0;
+foreach ($advanceBookingUsage as $abuRow) {
+    $advanceBookingUsedTotal += (float)($abuRow['used_amount'] ?? 0);
+    $advanceBookingUsedGrams += (float)($abuRow['used_grams'] ?? 0);
 }
 ?>
 <!doctype html>
@@ -409,6 +442,11 @@ function money($v)
                             <div class="lbl">Gold Claim</div>
                             <div class="val">₹<?= money($sale['chit_claim_amount']) ?></div>
                         </div>
+                        <div class="box">
+                            <div class="lbl">Advance Booking Used</div>
+                            <div class="val">₹<?= money($advanceBookingUsedTotal) ?></div>
+                            <div class="small text-muted"><?= number_format($advanceBookingUsedGrams, 6) ?> g</div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -514,6 +552,58 @@ function money($v)
                     </div>
                 </div>
             <?php endif; ?>
+            <?php if (!empty($advanceBookingUsage)): ?>
+                <div class="page-card">
+                    <div class="head">
+                        <div>
+                            <div class="section">Advance Booking Details</div>
+                            <div class="small text-muted">Advance amount applied to this invoice.</div>
+                        </div>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table mb-0">
+                            <thead>
+                                <tr>
+                                    <th>Booking No</th>
+                                    <th>Booking Date</th>
+                                    <th>Product</th>
+                                    <th>Metal / Purity</th>
+                                    <th>Booked Rate / g</th>
+                                    <th>Original Advance</th>
+                                    <th>Booked Grams</th>
+                                    <th>Used Grams</th>
+                                    <th>Used Date</th>
+                                    <th class="text-end">Advance Used</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($advanceBookingUsage as $abu): ?>
+                                    <tr>
+                                        <td><strong><?= e($abu['booking_no'] ?: '-') ?></strong></td>
+                                        <td><?= !empty($abu['booking_date']) ? e(date('d-m-Y', strtotime($abu['booking_date']))) : '-' ?></td>
+                                        <td><?= e($abu['product_name'] ?: '-') ?></td>
+                                        <td><?= e(trim(($abu['metal_name'] ?: '') . (!empty($abu['purity']) ? ' / ' . $abu['purity'] : '')) ?: '-') ?></td>
+                                        <td>₹<?= money($abu['used_rate_per_gram']) ?></td>
+                                        <td>₹<?= money($abu['advance_amount']) ?></td>
+                                        <td><?= number_format((float)$abu['booked_grams'], 6) ?> g</td>
+                                        <td><strong><?= number_format((float)$abu['used_grams'], 6) ?> g</strong></td>
+                                        <td><?= !empty($abu['usage_date']) ? e(date('d-m-Y h:i A', strtotime($abu['usage_date']))) : '-' ?></td>
+                                        <td class="text-end"><strong>₹<?= money($abu['used_amount']) ?></strong></td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                            <tfoot>
+                                <tr>
+                                    <th colspan="7" class="text-end">Total Used</th>
+                                    <th><?= number_format($advanceBookingUsedGrams, 6) ?> g</th>
+                                    <th></th>
+                                    <th class="text-end">₹<?= money($advanceBookingUsedTotal) ?></th>
+                                </tr>
+                            </tfoot>
+                        </table>
+                    </div>
+                </div>
+            <?php endif; ?>
             <?php if ($claims): ?>
                 <div class="page-card">
                     <div class="head">
@@ -584,6 +674,8 @@ function money($v)
                                 ₹<?= money($sale['exchange_amount']) ?></strong></div>
                         <div class="sumrow"><span>Gold Claim Deduction</span><strong>-
                                 ₹<?= money($sale['chit_claim_amount']) ?></strong></div>
+                        <div class="sumrow"><span>Advance Booking Deduction</span><strong>-
+                                ₹<?= money($advanceBookingUsedTotal) ?></strong></div>
                         <div class="sumrow"><span>Net
                                 Payable</span><strong>₹<?= money($sale['net_payable_amount']) ?></strong></div>
                         <div class="sumrow"><span>Paid</span><strong>₹<?= money($sale['paid_amount']) ?></strong></div>
