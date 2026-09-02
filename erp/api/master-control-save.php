@@ -61,7 +61,7 @@ $action = (string) ($_POST['action'] ?? '');
 try {
     if ($action === 'save_number') {
         $key = (string) ($_POST['document_key'] ?? '');
-        if (!in_array($key, ['invoice', 'non_gst_invoice', 'estimate', 'purchase', 'pawn', 'chit'], true)) {
+        if (!in_array($key, ['invoice', 'non_gst_invoice', 'estimate', 'purchase', 'pawn', 'pawn_interest_receipt', 'pawn_payment_receipt', 'pawn_release', 'chit'], true)) {
             throw new RuntimeException('Invalid document type.');
         }
 
@@ -100,6 +100,9 @@ try {
                 'estimate' => 'Estimate Number',
                 'purchase' => 'Purchase Number',
                 'pawn' => 'Pawn Number',
+                'pawn_interest_receipt' => 'Pawn Interest Receipt Number',
+                'pawn_payment_receipt' => 'Pawn Payment Receipt Number',
+                'pawn_release' => 'Pawn Release Number',
                 'chit' => 'Chit Number'
             ];
             $settingName = $settingLabels[$key];

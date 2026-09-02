@@ -38,7 +38,7 @@ if ($stmt) {
             $theme[$k] = $x[$k];
 }
 $settings = [];
-$stmt = $conn->prepare('SELECT * FROM document_number_settings WHERE business_id=? AND (branch_id=? OR branch_id IS NULL) ORDER BY FIELD(document_key,"invoice","non_gst_invoice","estimate","purchase","pawn","chit"),(branch_id=?) DESC,id DESC');
+$stmt = $conn->prepare('SELECT * FROM document_number_settings WHERE business_id=? AND (branch_id=? OR branch_id IS NULL) ORDER BY FIELD(document_key,"invoice","non_gst_invoice","estimate","purchase","pawn","pawn_interest_receipt","pawn_payment_receipt","pawn_release","chit"),(branch_id=?) DESC,id DESC');
 if ($stmt) {
     $stmt->bind_param('iii', $businessId, $branchId, $branchId);
     $stmt->execute();
@@ -87,6 +87,33 @@ $defaults = [
     ],
     'pawn' => [
         'prefix' => 'PN',
+        'center_format' => '{YYYY}{MM}',
+        'suffix' => '',
+        'divider' => '',
+        'sequence_digits' => 4,
+        'sequence_start' => 1,
+        'reset_frequency' => 'Monthly'
+    ],
+    'pawn_interest_receipt' => [
+        'prefix' => 'PIR',
+        'center_format' => '{YYYY}{MM}',
+        'suffix' => '',
+        'divider' => '',
+        'sequence_digits' => 4,
+        'sequence_start' => 1,
+        'reset_frequency' => 'Monthly'
+    ],
+    'pawn_payment_receipt' => [
+        'prefix' => 'PPR',
+        'center_format' => '{YYYY}{MM}',
+        'suffix' => '',
+        'divider' => '',
+        'sequence_digits' => 4,
+        'sequence_start' => 1,
+        'reset_frequency' => 'Monthly'
+    ],
+    'pawn_release' => [
+        'prefix' => 'PRL',
         'center_format' => '{YYYY}{MM}',
         'suffix' => '',
         'divider' => '',
@@ -653,7 +680,11 @@ $businessName = (string) ($_SESSION['business_name'] ?? 'Jewellery ERP');
                                                         ? 'fa-cart-shopping'
                                                         : ($key === 'pawn'
                                                             ? 'fa-hand-holding-dollar'
-                                                            : 'fa-people-group')))) ?> me-2"></i><?=
+                                                            : ($key === 'pawn_interest_receipt'
+                                                                ? 'fa-receipt'
+                                                                : (($key === 'pawn_payment_receipt' || $key === 'pawn_release')
+                                                                    ? 'fa-receipt'
+                                                                : 'fa-people-group')))))) ?> me-2"></i><?=
                                         e($key === 'non_gst_invoice' ? 'Non-GST Invoice' : ucwords(str_replace('_', ' ', $key)))
                                     ?> Number</h6>
                                 <div class="row g-2">

@@ -263,7 +263,12 @@ require __DIR__ . '/_common.php';
                         <div class="small text-muted">Manage pawn status, customer interest cycle, bank pledge state and
                             re-registration.</div>
                     </div>
-                    <div class="d-flex gap-2"><a href="pawn-entry.php" class="btn-theme"><i class="fa-solid fa-plus"></i> New Pawn</a></div>
+                    <div class="d-flex gap-2">
+                        <button type="button" id="calculateLevelsBtn" class="btn-soft" title="Check unpaid overdue Level 1 interest and move eligible pawns to Level 2">
+                            <i class="fa-solid fa-calculator"></i> Calculate L1 → L2
+                        </button>
+                        <a href="pawn-entry.php" class="btn-theme"><i class="fa-solid fa-plus"></i> New Pawn</a>
+                    </div>
                 </div>
             </div>
             <div class="stat-grid">
@@ -384,6 +389,100 @@ require __DIR__ . '/_common.php';
                 }
                 if (!response.ok || !json.success) throw new Error(json.message || 'Request failed.');
                 return json;
+            }
+
+            async function interestReq(data) {
+                const f = new FormData();
+                Object.entries(data).forEach(([k, v]) => f.append(k, v == null ? '' : v));
+                f.append('csrf_token', csrf);
+                const response = await fetch('api/pawn-interest.php', {
+                    method: 'POST',
+                    body: f,
+                    credentials: 'same-origin',
+                    headers: { 'Accept': 'application/json' }
+                });
+                const raw = await response.text();
+                let json;
+                try {
+                    json = JSON.parse(raw);
+                } catch (e) {
+                    const clean = raw.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+                    throw new Error(clean.slice(0, 300) || 'Invalid response from Pawn Interest API.');
+                }
+                if (!response.ok || !json.success) throw new Error(json.message || 'Interest calculation failed.');
+                return json;
+            }
+
+            function todayYmd() {
+                const d = new Date();
+                const y = d.getFullYear();
+                const m = String(d.getMonth() + 1).padStart(2, '0');
+                const day = String(d.getDate()).padStart(2, '0');
+                return y + '-' + m + '-' + day;
+            }
+
+            function canCalculateL1ToL2(r, asOf) {
+                const status = String(r.status || '');
+                const currentLevel = Number(r.current_rate_level || 1);
+                const nextLevel = Number(r.next_rate_level || 0);
+                const nextRate = Number(r.next_interest_percent || 0);
+                const graceUntil = String(r.grace_until || r.next_interest_due_date || '');
+                return (status === 'Active' || status === 'Partially Paid')
+                    && currentLevel === 1
+                    && nextLevel === 2
+                    && nextRate > 0
+                    && graceUntil !== ''
+                    && graceUntil < asOf;
+            }
+
+            async function calculateL1ToL2() {
+                const btn = $('calculateLevelsBtn');
+                if (!btn) return;
+                const asOf = todayYmd();
+                const eligible = rows.filter(r => canCalculateL1ToL2(r, asOf));
+
+                if (!eligible.length) {
+                    note('ok', 'No unpaid overdue Level 1 pawn is eligible for Level 2 today.');
+                    return;
+                }
+
+                if (!confirm('Calculate ' + eligible.length + ' unpaid overdue Level 1 pawn(s) and apply Level 2 where the missed-interest rule is satisfied?')) return;
+
+                const oldHtml = btn.innerHTML;
+                btn.disabled = true;
+                btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Calculating...';
+
+                let changed = 0;
+                let checked = 0;
+                const errors = [];
+
+                for (const pawn of eligible) {
+                    try {
+                        const result = await interestReq({
+                            action: 'interest_quote',
+                            pawn_id: Number(pawn.id || 0),
+                            as_of_date: asOf
+                        });
+                        checked++;
+                        const updatedPawn = result.pawn || {};
+                        if (Number(updatedPawn.current_rate_level || 1) >= 2 || Number(updatedPawn.rate_escalation_count || 0) > Number(pawn.rate_escalation_count || 0)) {
+                            changed++;
+                        }
+                    } catch (e) {
+                        errors.push((pawn.pawn_no || ('#' + pawn.id)) + ': ' + e.message);
+                    }
+                }
+
+                await load();
+                btn.disabled = false;
+                btn.innerHTML = oldHtml;
+
+                if (errors.length) {
+                    note('bad', changed + ' pawn(s) changed to Level 2. ' + errors.length + ' pawn(s) could not be calculated.');
+                    console.warn('Pawn level calculation errors:', errors);
+                } else {
+                    note('ok', changed + ' of ' + checked + ' eligible pawn(s) changed from Level 1 to Level 2.');
+                }
             }
 
             function badge(status) {
@@ -581,6 +680,7 @@ require __DIR__ . '/_common.php';
                 $('toDate').value = '';
                 load();
             });
+            $('calculateLevelsBtn').addEventListener('click', calculateL1ToL2);
 
             load();
         })();
