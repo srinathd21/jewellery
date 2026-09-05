@@ -208,9 +208,20 @@ if ($branchId > 0 && tableExists($conn, 'branches')) {
 $categories = [];
 $sql = "SELECT c.id, c.category_code, c.category_name, c.description, c.sort_order, c.is_active,
                p.category_name AS parent_name,
-               COUNT(DISTINCT pr.id) AS product_count,
-               COALESCE(SUM(CASE WHEN ps.product_id IS NULL THEN pr.gross_weight ELSE ps.gross_weight END), 0) AS total_gross_weight,
-               COALESCE(SUM(CASE WHEN ps.product_id IS NULL THEN pr.net_weight ELSE ps.net_weight END), 0) AS total_net_weight
+               COUNT(DISTINCT CASE WHEN (LOWER(COALESCE(m.metal_code,'')) LIKE 'gold%' OR LOWER(COALESCE(m.metal_name,'')) LIKE 'gold%' OR LOWER(COALESCE(pr.product_type,'')) = 'gold') THEN pr.id END) AS gold_product_count,
+               COUNT(DISTINCT CASE WHEN (LOWER(COALESCE(m.metal_code,'')) LIKE 'silver%' OR LOWER(COALESCE(m.metal_name,'')) LIKE 'silver%' OR LOWER(COALESCE(pr.product_type,'')) = 'silver') THEN pr.id END) AS silver_product_count,
+               COALESCE(SUM(CASE WHEN (LOWER(COALESCE(m.metal_code,'')) LIKE 'gold%' OR LOWER(COALESCE(m.metal_name,'')) LIKE 'gold%' OR LOWER(COALESCE(pr.product_type,'')) = 'gold')
+                                 THEN CASE WHEN ps.product_id IS NULL THEN pr.gross_weight ELSE ps.gross_weight END
+                                 ELSE 0 END), 0) AS gold_gross_weight,
+               COALESCE(SUM(CASE WHEN (LOWER(COALESCE(m.metal_code,'')) LIKE 'gold%' OR LOWER(COALESCE(m.metal_name,'')) LIKE 'gold%' OR LOWER(COALESCE(pr.product_type,'')) = 'gold')
+                                 THEN CASE WHEN ps.product_id IS NULL THEN pr.net_weight ELSE ps.net_weight END
+                                 ELSE 0 END), 0) AS gold_net_weight,
+               COALESCE(SUM(CASE WHEN (LOWER(COALESCE(m.metal_code,'')) LIKE 'silver%' OR LOWER(COALESCE(m.metal_name,'')) LIKE 'silver%' OR LOWER(COALESCE(pr.product_type,'')) = 'silver')
+                                 THEN CASE WHEN ps.product_id IS NULL THEN pr.gross_weight ELSE ps.gross_weight END
+                                 ELSE 0 END), 0) AS silver_gross_weight,
+               COALESCE(SUM(CASE WHEN (LOWER(COALESCE(m.metal_code,'')) LIKE 'silver%' OR LOWER(COALESCE(m.metal_name,'')) LIKE 'silver%' OR LOWER(COALESCE(pr.product_type,'')) = 'silver')
+                                 THEN CASE WHEN ps.product_id IS NULL THEN pr.net_weight ELSE ps.net_weight END
+                                 ELSE 0 END), 0) AS silver_net_weight
         FROM product_categories c
         LEFT JOIN product_categories p
                ON p.id = c.parent_id
@@ -219,6 +230,9 @@ $sql = "SELECT c.id, c.category_code, c.category_name, c.description, c.sort_ord
                ON pr.category_id = c.id
               AND pr.business_id = c.business_id
               AND pr.is_active = 1
+        LEFT JOIN metals m
+               ON m.id = pr.metal_id
+              AND m.business_id = pr.business_id
         LEFT JOIN (
             SELECT product_id,
                    SUM(gross_weight) AS gross_weight,
@@ -249,6 +263,7 @@ class CategoryReportPDF extends FPDF
     public $businessAddress = '';
     public $businessMobile = '';
     public $businessGstin = '';
+    public $reportTitle = 'CATEGORY REPORT';
 
     public function Header()
     {
@@ -263,15 +278,9 @@ class CategoryReportPDF extends FPDF
         }
 
         $contactParts = [];
-        if ($this->businessAddress !== '') {
-            $contactParts[] = $this->businessAddress;
-        }
-        if ($this->businessMobile !== '') {
-            $contactParts[] = 'Mobile: ' . $this->businessMobile;
-        }
-        if ($this->businessGstin !== '') {
-            $contactParts[] = 'GSTIN: ' . $this->businessGstin;
-        }
+        if ($this->businessAddress !== '') $contactParts[] = $this->businessAddress;
+        if ($this->businessMobile !== '') $contactParts[] = 'Mobile: ' . $this->businessMobile;
+        if ($this->businessGstin !== '') $contactParts[] = 'GSTIN: ' . $this->businessGstin;
         if ($contactParts) {
             $this->SetFont('Arial', '', 7);
             $this->MultiCell(0, 3.8, pdfText(implode(' | ', $contactParts)), 0, 'C');
@@ -281,7 +290,7 @@ class CategoryReportPDF extends FPDF
         $this->SetFillColor(123, 31, 58);
         $this->SetTextColor(255, 255, 255);
         $this->SetFont('Arial', 'B', 11);
-        $this->Cell(0, 8, 'CATEGORY REPORT', 0, 1, 'C', true);
+        $this->Cell(0, 8, pdfText($this->reportTitle), 0, 1, 'C', true);
 
         $this->SetTextColor(70, 70, 70);
         $this->SetFont('Arial', '', 7);
@@ -306,14 +315,11 @@ $pdf->businessMobile = $businessMobile;
 $pdf->businessGstin = $businessGstin;
 $pdf->SetMargins(8, 8, 8);
 $pdf->SetAutoPageBreak(true, 14);
-$pdf->AddPage();
 
 $headers = ['S.No', 'Category', 'Code', 'Parent', 'Products', 'Gross Wt.', 'Net Wt.', 'Sort', 'Status'];
-// Match the full printable width used by the report title/navigation bar.
-// A4 landscape = 297 mm; with 8 mm left/right margins the usable width is 281 mm.
 $tableWidth = 281;
 $tableX = 8;
-$widths = [10, 56, 30, 44, 22, 30, 30, 20, 39]; // total = 281 mm
+$widths = [10, 56, 30, 44, 22, 30, 30, 20, 39];
 
 $drawHeader = function () use ($pdf, $headers, $widths, $tableX) {
     $pdf->SetX($tableX);
@@ -327,72 +333,82 @@ $drawHeader = function () use ($pdf, $headers, $widths, $tableX) {
     $pdf->Ln();
 };
 
-$drawHeader();
-$pdf->SetFont('Arial', '', 6.8);
-$pdf->SetTextColor(35, 35, 35);
-$pdf->SetDrawColor(220, 205, 180);
+$drawMetalReport = function ($metalLabel, $countKey, $grossKey, $netKey) use ($pdf, $categories, $drawHeader, $tableX, $tableWidth, $widths) {
+    $metalCategories = array_values(array_filter($categories, function ($category) use ($countKey) {
+        return (int)($category[$countKey] ?? 0) > 0;
+    }));
 
-$totalProducts = 0;
-$totalGross = 0.0;
-$totalNet = 0.0;
+    $pdf->reportTitle = strtoupper($metalLabel) . ' CATEGORY REPORT';
+    $pdf->AddPage();
+    $drawHeader();
+    $pdf->SetFont('Arial', '', 6.8);
+    $pdf->SetTextColor(35, 35, 35);
+    $pdf->SetDrawColor(220, 205, 180);
 
-foreach ($categories as $index => $category) {
-    if ($pdf->GetY() > 188) {
-        $pdf->AddPage();
-        $drawHeader();
-        $pdf->SetFont('Arial', '', 6.8);
-        $pdf->SetTextColor(35, 35, 35);
-        $pdf->SetDrawColor(220, 205, 180);
+    $totalProducts = 0;
+    $totalGross = 0.0;
+    $totalNet = 0.0;
+
+    foreach ($metalCategories as $index => $category) {
+        if ($pdf->GetY() > 188) {
+            $pdf->AddPage();
+            $drawHeader();
+            $pdf->SetFont('Arial', '', 6.8);
+            $pdf->SetTextColor(35, 35, 35);
+            $pdf->SetDrawColor(220, 205, 180);
+        }
+
+        $products = (int)($category[$countKey] ?? 0);
+        $gross = (float)($category[$grossKey] ?? 0);
+        $net = (float)($category[$netKey] ?? 0);
+        $totalProducts += $products;
+        $totalGross += $gross;
+        $totalNet += $net;
+
+        $values = [
+            (string)($index + 1),
+            (string)($category['category_name'] ?? '-'),
+            !empty($category['category_code']) ? (string)$category['category_code'] : '-',
+            !empty($category['parent_name']) ? (string)$category['parent_name'] : 'Main Category',
+            (string)$products,
+            number_format($gross, 3) . ' g',
+            number_format($net, 3) . ' g',
+            (string)((int)($category['sort_order'] ?? 0)),
+            (int)($category['is_active'] ?? 0) === 1 ? 'Active' : 'Inactive'
+        ];
+
+        $pdf->SetX($tableX);
+        foreach ($values as $col => $value) {
+            $align = in_array($col, [0, 4, 5, 6, 7], true) ? 'C' : 'L';
+            $pdf->Cell($widths[$col], 7, pdfText($value), 1, 0, $align);
+        }
+        $pdf->Ln();
     }
 
-    $products = (int)($category['product_count'] ?? 0);
-    $gross = (float)($category['total_gross_weight'] ?? 0);
-    $net = (float)($category['total_net_weight'] ?? 0);
-    $totalProducts += $products;
-    $totalGross += $gross;
-    $totalNet += $net;
-
-    $values = [
-        (string)($index + 1),
-        (string)($category['category_name'] ?? '-'),
-        !empty($category['category_code']) ? (string)$category['category_code'] : '-',
-        !empty($category['parent_name']) ? (string)$category['parent_name'] : 'Main Category',
-        (string)$products,
-        number_format($gross, 3) . ' g',
-        number_format($net, 3) . ' g',
-        (string)((int)($category['sort_order'] ?? 0)),
-        (int)($category['is_active'] ?? 0) === 1 ? 'Active' : 'Inactive'
-    ];
-
-    $pdf->SetX($tableX);
-    foreach ($values as $col => $value) {
-        $align = in_array($col, [0, 4, 5, 6, 7], true) ? 'C' : 'L';
-        $pdf->Cell($widths[$col], 7, pdfText($value), 1, 0, $align);
+    if (!$metalCategories) {
+        $pdf->SetFont('Arial', 'I', 8);
+        $pdf->SetX($tableX);
+        $pdf->Cell($tableWidth, 12, 'No ' . $metalLabel . ' category data available.', 1, 1, 'C');
     }
-    $pdf->Ln();
-}
 
-if (!$categories) {
-    $pdf->SetFont('Arial', 'I', 8);
+    $pdf->Ln(3);
+    $pdf->SetFillColor(248, 236, 208);
+    $pdf->SetTextColor(80, 17, 38);
+    $pdf->SetFont('Arial', 'B', 7.5);
+    $summaryWidths = [40, 24, 40, 24, 36, 43, 32, 42];
     $pdf->SetX($tableX);
-    $pdf->Cell($tableWidth, 12, 'No category data available.', 1, 1, 'C');
-}
+    $pdf->Cell($summaryWidths[0], 6.5, 'Total Categories', 1, 0, 'L', true);
+    $pdf->Cell($summaryWidths[1], 6.5, (string)count($metalCategories), 1, 0, 'C', true);
+    $pdf->Cell($summaryWidths[2], 6.5, $metalLabel . ' Products', 1, 0, 'L', true);
+    $pdf->Cell($summaryWidths[3], 6.5, (string)$totalProducts, 1, 0, 'C', true);
+    $pdf->Cell($summaryWidths[4], 6.5, 'Gross Weight', 1, 0, 'L', true);
+    $pdf->Cell($summaryWidths[5], 6.5, number_format($totalGross, 3) . ' g', 1, 0, 'R', true);
+    $pdf->Cell($summaryWidths[6], 6.5, 'Net Weight', 1, 0, 'L', true);
+    $pdf->Cell($summaryWidths[7], 6.5, number_format($totalNet, 3) . ' g', 1, 1, 'R', true);
+};
 
-$pdf->Ln(3);
-$pdf->SetFillColor(248, 236, 208);
-$pdf->SetTextColor(80, 17, 38);
-$pdf->SetFont('Arial', 'B', 7.5);
-// Summary uses exactly the same 281 mm width as the table and report title bar.
-$summaryWidths = [40, 24, 40, 24, 36, 43, 32, 42]; // total = 281 mm
-$pdf->SetX($tableX);
-$pdf->Cell($summaryWidths[0], 6.5, 'Total Categories', 1, 0, 'L', true);
-$pdf->Cell($summaryWidths[1], 6.5, (string)count($categories), 1, 0, 'C', true);
-$pdf->Cell($summaryWidths[2], 6.5, 'Linked Products', 1, 0, 'L', true);
-$pdf->Cell($summaryWidths[3], 6.5, (string)$totalProducts, 1, 0, 'C', true);
-$pdf->Cell($summaryWidths[4], 6.5, 'Gross Weight', 1, 0, 'L', true);
-$pdf->Cell($summaryWidths[5], 6.5, number_format($totalGross, 3) . ' g', 1, 0, 'R', true);
-$pdf->Cell($summaryWidths[6], 6.5, 'Net Weight', 1, 0, 'L', true);
-$pdf->Cell($summaryWidths[7], 6.5, number_format($totalNet, 3) . ' g', 1, 1, 'R', true);
+$drawMetalReport('Gold', 'gold_product_count', 'gold_gross_weight', 'gold_net_weight');
+$drawMetalReport('Silver', 'silver_product_count', 'silver_gross_weight', 'silver_net_weight');
 
 $inline = isset($_GET['inline']) && $_GET['inline'] === '1';
 $mode = $inline ? 'I' : 'D';
